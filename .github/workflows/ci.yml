@@ -16,10 +16,10 @@ jobs:
       - name: Muddle
         uses: demonnic/build-with-muddler@main
         with:
-          workingDir: ${{ github.workspace }}/alui
-      
+          workingDir: ${{ github.workspace }}
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v3.1.2
         with:
           name: alui.mpackage
-          path: alui/build/alui.mpackage
+          path: build/alui.mpackage
