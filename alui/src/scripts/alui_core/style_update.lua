@@ -22,16 +22,23 @@ function style_update(event)
             alui.style[f] = v
         end
     end
+    GUI.Style_Gauge_Aim_Control:setValue(alui.style.aim, alui.style.control)
+    GUI.Style_Gauge_Offensive_Dodge:setValue(alui.style.offensive, alui.style.dodge)
+    GUI.Style_Gauge_Daring_Parry:setValue(alui.style.daring, alui.style.parry)
+    GUI.Style_Gauge_Power_Speed:setValue(alui.style.power, alui.style.speed)
+    GUI.Style_Gauge_Attack_Defense:setValue(alui.style.attack, alui.style.defense)
+    
 
-    alui.stylemini:clear()
 
-    alui.stylemini:cecho("You are aiming at the " .. alui.style.Aim .. ".\n")
-    alui.stylemini:cecho(alui.style.Control .. "<green>\n")
-    alui.stylemini:cecho("<green>Aim       " .. bar(alui.style.aim, alui.style.control) .. " Control\n")
-    alui.stylemini:cecho("<green>Offensive " .. bar(alui.style.offensive, 100 - alui.style.offensive) .. " Dodge\n")
-    alui.stylemini:cecho("<green>Daring    " .. bar(alui.style.daring, alui.style.parry) .. " Parry\n")
-    alui.stylemini:cecho("<green>Power     " .. bar(alui.style.power, alui.style.speed) .. " Speed\n")
-    alui.stylemini:cecho("<green>Attack    " .. bar(alui.style.attack, alui.style.defense) .. " Defense\n")
+    -- alui.stylemini:clear()
+
+    -- alui.stylemini:cecho("You are aiming at the " .. alui.style.Aim .. ".\n")
+    -- alui.stylemini:cecho(alui.style.Control .. "<green>\n")
+    -- alui.stylemini:cecho("<green>Aim       " .. bar(alui.style.aim, alui.style.control) .. " Control\n")
+    -- alui.stylemini:cecho("<green>Offensive " .. bar(alui.style.offensive, 100 - alui.style.offensive) .. " Dodge\n")
+    -- alui.stylemini:cecho("<green>Daring    " .. bar(alui.style.daring, alui.style.parry) .. " Parry\n")
+    -- alui.stylemini:cecho("<green>Power     " .. bar(alui.style.power, alui.style.speed) .. " Speed\n")
+    -- alui.stylemini:cecho("<green>Attack    " .. bar(alui.style.attack, alui.style.defense) .. " Defense\n")
 
 end
 
