@@ -165,81 +165,66 @@ GUI.Style_VBox = Geyser.VBox:new({
 }, GUI.Style_Container)
 
 
-local Style_HBox_Height = "20%"
 
 
-GUI.Style_HBox_Aim_Control = Geyser.HBox:new({
-  name = "alui style hbox1",
-  width = "100%",
-  height = Style_HBox_Height,
-}, GUI.Style_VBox)
-
-GUI.Style_HBox_Offensive_Dodge = Geyser.HBox:new({
-  name = "alui style hbox2",
-  width = "100%",
-  height = Style_HBox_Height,
-}, GUI.Style_VBox)
-
-GUI.Style_HBox_Darring_Parry = Geyser.HBox:new({
-  name = "alui style hbox3",
-  width = "100%",
-  height = Style_HBox_Height,
-}, GUI.Style_VBox)
-
-GUI.Style_HBox_Power_Speed = Geyser.HBox:new({
-  name = "alui style hbox4",
-  width = "100%",
-  height = Style_HBox_Height,
-}, GUI.Style_VBox)
-
-GUI.Style_HBox_Attack_Defense = Geyser.HBox:new({
-  name = "alui style hbox5",
-  width = "100%",
-  height = Style_HBox_Height,
-}, GUI.Style_VBox)
+local function createStyleHbox(name, parent)
+  local Style_HBox_Height = "20%"
+  local hbox = Geyser.HBox:new({
+    name = name,
+    width = "100%",
+    height = Style_HBox_Height,
+  }, parent)
+  return hbox
+end
 
 
 
 
+GUI.Style_HBox_Aim_Control = createStyleHbox("GUI.Style_HBox_Aim_Control", GUI.Style_VBox)
+GUI.Style_HBox_Offensive_Dodge = createStyleHbox("GUI.Style_HBox_Offensive_Dodge", GUI.Style_VBox)
+GUI.Style_HBox_Darring_Parry = createStyleHbox("GUI.Style_HBox_Darring_Parry", GUI.Style_VBox)
+GUI.Style_HBox_Power_Speed = createStyleHbox("GUI.Style_HBox_Power_Speed", GUI.Style_VBox)
+GUI.Style_HBox_Attack_Defense = createStyleHbox("GUI.Style_HBox_Attack_Defense", GUI.Style_VBox)
 
 
 
 local Style_Button_Width = '10%'
 local Style_Gauge_Width = "40%"
 
+local function createStyleButton(name, parent, color)
+  local button = Geyser.Button:new({
+    name = "GUI.Style_" .. name .. "_Increase",
+    width = Style_Button_Width,
+    tooltip = 'Increase ' .. name .. ' Some',
+    color = color.Up,
+  }, parent)
+  button:echo("<center>" .. name)
+  return button
+end
 
-GUI.Style_Aim_Increase = Geyser.Button:new({
-  name = "alui style aim increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Aim Some",
-  color = Style_Colors.Aim.Up,
-  color_down = Style_Colors.Aim.Down,
-  color_hover = Style_Colors.Aim.Hover,
-}, GUI.Style_HBox_Aim_Control)
-GUI.Style_Aim_Increase:echo("<center>Aim")
-
-GUI.Style_Gauge_Aim_Control = Geyser.Gauge:new({
-  name = "alui style gauge aim control",
-  width = Style_Gauge_Width,
-}, GUI.Style_HBox_Aim_Control)
-
-GUI.Style_Control_Increase = Geyser.Button:new({
-  name = "alui style control increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Control Some",
-  color = Style_Colors.Control.Up,
-}, GUI.Style_HBox_Aim_Control)
-
-GUI.Style_Control_Increase:echo("<center>Control")
+GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, Style_Colors.Aim)
 
 
-GUI.Style_Gauge_Aim_Control:setValue(5, 10)
+local function createStyleGauge(name, parent, leftColor, rightColor)
+  local gauge = Geyser.Gauge:new({
+    name = "GUI.Style_Gauge_" .. name,
+    width = Style_Gauge_Width,
+  }, parent)
+  gauge:setValue(5, 10)
+  GUI.GaugeFrontCSS:set("background-color", leftColor.Up)
+  GUI.GaugeBackCSS:set("background-color", rightColor.Down)
+  gauge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
+  gauge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
+  return gauge
+  
+end
 
-GUI.GaugeFrontCSS:set("background-color", Style_Colors.Control.Hover)
+GUI.Style_Gauge_Aim_Control = createStyleGauge("GUI.Style_Gauge_Aim_Control", GUI.Style_HBox_Aim_Control, Style_Colors.Control, Style_Colors.Aim)
 
-GUI.GaugeBackCSS:set("background-color", Style_Colors.Aim.Hover)
-GUI.Style_Gauge_Aim_Control.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-GUI.Style_Gauge_Aim_Control.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
+
+GUI.Style_Control_Increase = createStyleButton("Control", GUI.Style_HBox_Aim_Control, Style_Colors.Control)
+
+
 
 GUI.Style_Aim_Increase:setClickCallback(function()
   send('increase aim some', false)
