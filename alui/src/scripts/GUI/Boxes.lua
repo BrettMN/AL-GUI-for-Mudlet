@@ -13,131 +13,67 @@ GUI.BoxCSS = CSSMan.new([[
 ]])
 
 
+-- GUI.GaugeBackCSS = CSSMan.new([[
+--   background-color: rgba(0,0,0,0);
+--   border-style: solid;
+--   border-color: white;
+--   border-width: 1px;
+--   border-radius: 1px;
+--   margin: 5px;
+-- ]])
+
+GUI.GaugeBackCSS = CSSMan.new([[
+  background-color: rgba(0,0,0,0);
+  margin-top: 5px;
+  margin-bottom: 5px;
+  border-style: solid;
+  border-color: white;
+]])
+
+-- GUI.GaugeFrontCSS = CSSMan.new([[
+--   background-color: rgba(0,0,0,0);
+--   border-style: solid;
+--   border-color: white;
+--   border-width: 1px;
+--   border-radius: 1px;
+--   margin: 5px;
+-- ]])
+
+GUI.GaugeFrontCSS = CSSMan.new([[
+  background-color: rgba(0,0,0,0);
+  margin-top: 5px;
+  margin-bottom: 5px;
+  border-style: solid;
+  border-color: white;S
+]])
 
 
 
-GUI.Box1 = Geyser.Label:new({
-  name = "GUI.Box1",
-  x = 0,
-  y = 0,
-  width = "100%",
-  height = "20%",
-}, GUI.Right)
-GUI.Box1:setStyleSheet(GUI.BoxCSS:getCSS())
--- GUI.Box1:echo("<center>GUI.Box1")
+-- Function to create a new box
+local function createBox(name, x, y, width, height, parent)
+  local box = Geyser.Label:new({
+    name = name,
+    x = x,
+    y = y,
+    width = width,
+    height = height,
+  }, parent)
+  box:setStyleSheet(GUI.BoxCSS:getCSS())
+  return box
+end
 
--- GUI.Box1:setBackgroundImage(getMudletHomeDir() .. "/alui/UI Assets/Delra Requests/windowBorderCornerless.png")
+
+
+-- Create boxes using the reusable function
+GUI.Box1 = createBox("GUI.Box1", 0, 0, "100%", "20%", GUI.Right)
+GUI.Box2 = createBox("GUI.Box2", 0, "20%", "100%", "40%", GUI.Right)
+GUI.Box3 = createBox("GUI.Box3", 0, "60%", "100%", "40%", GUI.Right)
+GUI.Box4 = createBox("GUI.Box4", 0, 0, "100%", "50%", GUI.Left)
+GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "25%", GUI.Left)
+GUI.Box7 = createBox("GUI.Box7", 0, "75%", "100%", "25%", GUI.Left)
+
 
 local Package_Root = getMudletHomeDir()
-
--- GUI.Box1:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-GUI.Box2 = Geyser.Label:new({
-  name = "GUI.Box2",
-  x = 0,
-  y = "20%",
-  width = "100%",
-  height = "40%",
-}, GUI.Right)
-GUI.Box2:setStyleSheet(GUI.BoxCSS:getCSS())
-GUI.Box2:echo("<center>GUI.Box2")
-
-GUI.Box3 = Geyser.Label:new({
-  name = "GUI.Box3",
-  x = 0,
-  y = "60%",
-  width = "100%",
-  height = "40%",
-}, GUI.Right)
-GUI.Box3:setStyleSheet(GUI.BoxCSS:getCSS())
-GUI.Box3:echo("<center>GUI.Box3")
-
-GUI.Box4 = Geyser.Label:new({
-  name = "GUI.Box4",
-  x = "0%",
-  y = "0%",
-  width = "100%",
-  height = "50%",
-}, GUI.Left)
-GUI.Box4:setStyleSheet(GUI.BoxCSS:getCSS())
--- GUI.Box4:echo("<center>GUI.Box4")
-
-GUI.Box5 = Geyser.Label:new({
-  name = "GUI.Box5-6",
-  x = "0%",
-  y = "50%",
-  width = "100%",
-  height = "25%",
-}, GUI.Left)
-GUI.Box5:setStyleSheet(GUI.BoxCSS:getCSS())
--- GUI.Box5:echo("<center>GUI.Box5")
-
--- GUI.Box6 = Geyser.Label:new({
---   name = "GUI.Box6",
---   x = "50%", y = "25%",
---   width = "50%",
---   height = "50%",
--- },GUI.Left)
--- GUI.Box6:setStyleSheet(GUI.BoxCSS:getCSS())
--- GUI.Box6:echo("<center>GUI.Box6")
-
-GUI.Box7 = Geyser.Label:new({
-  name = "GUI.Box7",
-  x = "0%",
-  y = "75%",
-  width = "100%",
-  height = "25%",
-}, GUI.Left)
-GUI.Box7:setStyleSheet(GUI.BoxCSS:getCSS())
--- GUI.Box7:echo("<center>GUI.Box7")
-
-
-
--- GUI.Box1:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-
--- GUI.Box2:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-
--- GUI.Box3:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-
--- GUI.Box4:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-
--- GUI.Box5:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
-
--- GUI.Box7:setStyleSheet([[
---     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
---     background-size: cover;
---     background-position: center;
--- ]])
-
 
 
 
@@ -160,13 +96,6 @@ GUI.Mapper = Geyser.Mapper:new({
   width = GUI.Map_Container:get_width() - (Gui_Padding * 2),
   height = GUI.Map_Container:get_height() - (Gui_Padding * 2),
 }, GUI.Map_Container)
-
---the map's default background color is black, so lets blend it in...
-GUI.Box1CSS = CSSMan.new(GUI.BoxCSS:getCSS())
-GUI.Box1CSS:set("background-color", "black")
-GUI.Box1:setStyleSheet(GUI.Box1CSS:getCSS())
-
-
 
 
 
@@ -222,61 +151,18 @@ GUI.Style_Container = Geyser.Container:new({
   height = "100%",
 }, GUI.Box1)
 
--- alui.stylemini = alui.stylemini or Geyser.MiniConsole:new({
---   name = "alui style console",
---   x = Gui_Padding,
---   y = Gui_Padding,
---   height = GUI.Style_Container:get_height() - (Gui_Padding * 2),
---   width = GUI.Style_Container:get_width() - (Gui_Padding * 2),
---   color = "black",
--- }, GUI.Style_Container)
-
--- GUI.GaugeBackCSS = CSSMan.new([[
---   background-color: rgba(0,0,0,0);
---   border-style: solid;
---   border-color: white;
---   border-width: 1px;
---   border-radius: 1px;
---   margin: 5px;
--- ]])
-
-GUI.GaugeBackCSS = CSSMan.new([[
-  background-color: rgba(0,0,0,0);
-  margin-top: 5px;
-  margin-bottom: 5px;
-  border-style: solid;
-  border-color: white;
-]])
-
--- GUI.GaugeFrontCSS = CSSMan.new([[
---   background-color: rgba(0,0,0,0);
---   border-style: solid;
---   border-color: white;
---   border-width: 1px;
---   border-radius: 1px;
---   margin: 5px;
--- ]])
-
-GUI.GaugeFrontCSS = CSSMan.new([[
-  background-color: rgba(0,0,0,0);
-  margin-top: 5px;
-  margin-bottom: 5px;
-  border-style: solid;
-  border-color: white;
-
-]])
 
 local Style_Colors = {
-  Aim = "red",
-  Control = "green",
-  Offensive = "yellow",
-  Dodge = "blue",
-  Daring = "purple",
-  Parry = "orange",
-  Power = "green",
-  Speed = "red",
-  Attack = "blue",
-  Defense = "yellow",
+  Aim = { Hover = 'red', Up = 'red', Down = 'red' },
+  Control = { Hover = 'green', Up = 'green', Down = 'green' },
+  Offensive = { Hover = 'blue', Up = 'blue', Down = 'blue' },
+  Dodge = { Hover = 'yellow', Up = 'yellow', Down = 'yellow' },
+  Daring = { Hover = 'purple', Up = 'purple', Down = 'purple' },
+  Parry = { Hover = 'orange', Up = 'orange', Down = 'orange' },
+  Power = { Hover = 'green', Up = 'green', Down = 'green' },
+  Speed = { Hover = 'red', Up = 'red', Down = 'red' },
+  Attack = { Hover = 'blue', Up = 'blue', Down = 'blue' },
+  Defense = { Hover = 'yellow', Up = 'yellow', Down = 'yellow' },
 }
 
 
@@ -336,7 +222,9 @@ GUI.Style_Aim_Increase = Geyser.Button:new({
   name = "alui style aim increase",
   width = Style_Button_Width,
   tooltip = "Increase Aim Some",
-  color = Style_Colors.Aim,
+  color = Style_Colors.Aim.Up,
+  color_down = Style_Colors.Aim.Down,
+  color_hover = Style_Colors.Aim.Hover,
 }, GUI.Style_HBox_Aim_Control)
 GUI.Style_Aim_Increase:echo("<center>Aim")
 
@@ -349,7 +237,7 @@ GUI.Style_Control_Increase = Geyser.Button:new({
   name = "alui style control increase",
   width = Style_Button_Width,
   tooltip = "Increase Control Some",
-  color = Style_Colors.Control,
+  color = Style_Colors.Control.Up,
 }, GUI.Style_HBox_Aim_Control)
 
 GUI.Style_Control_Increase:echo("<center>Control")
@@ -357,9 +245,9 @@ GUI.Style_Control_Increase:echo("<center>Control")
 
 GUI.Style_Gauge_Aim_Control:setValue(5, 10)
 
-GUI.GaugeFrontCSS:set("background-color", Style_Colors.Control)
+GUI.GaugeFrontCSS:set("background-color", Style_Colors.Control.Hover)
 
-GUI.GaugeBackCSS:set("background-color", Style_Colors.Aim)
+GUI.GaugeBackCSS:set("background-color", Style_Colors.Aim.Hover)
 GUI.Style_Gauge_Aim_Control.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
 GUI.Style_Gauge_Aim_Control.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
 

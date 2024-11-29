@@ -54,7 +54,7 @@ function vitals_update(e)
     local wounds = gmcp.Char.Wounds
 
 
-    echo('\n' .. yajl.to_string(wounds) .. '\n')
+    -- echo('\n' .. yajl.to_string(wounds) .. '\n')
 
 
     alui.status.hunger = hunger_colors[vit.Hunger]
