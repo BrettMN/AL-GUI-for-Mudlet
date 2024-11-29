@@ -1,8 +1,10 @@
 local EMCO = require("alui.emco")
 
 
+
+
 GUI.BoxCSS = CSSMan.new([[
-  background-color: rgba(0,0,0,100);
+  background-color: black;
   border-style: solid;
   border-width: 1px;
   border-radius: 10px;
@@ -23,6 +25,16 @@ GUI.Box1 = Geyser.Label:new({
 }, GUI.Right)
 GUI.Box1:setStyleSheet(GUI.BoxCSS:getCSS())
 -- GUI.Box1:echo("<center>GUI.Box1")
+
+-- GUI.Box1:setBackgroundImage(getMudletHomeDir() .. "/alui/UI Assets/Delra Requests/windowBorderCornerless.png")
+
+local Package_Root = getMudletHomeDir()
+
+-- GUI.Box1:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
 
 GUI.Box2 = Geyser.Label:new({
   name = "GUI.Box2",
@@ -82,6 +94,50 @@ GUI.Box7 = Geyser.Label:new({
 }, GUI.Left)
 GUI.Box7:setStyleSheet(GUI.BoxCSS:getCSS())
 -- GUI.Box7:echo("<center>GUI.Box7")
+
+
+
+-- GUI.Box1:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
+
+-- GUI.Box2:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
+
+-- GUI.Box3:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
+
+-- GUI.Box4:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
+
+-- GUI.Box5:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
+
+-- GUI.Box7:setStyleSheet([[
+--     background-image: url("]] .. Package_Root .. [["/alui/UI Assets/Delra Requests/windowBorderCornerless.png");
+--     background-size: cover;
+--     background-position: center;
+-- ]])
+
 
 
 
@@ -175,23 +231,53 @@ GUI.Style_Container = Geyser.Container:new({
 --   color = "black",
 -- }, GUI.Style_Container)
 
+-- GUI.GaugeBackCSS = CSSMan.new([[
+--   background-color: rgba(0,0,0,0);
+--   border-style: solid;
+--   border-color: white;
+--   border-width: 1px;
+--   border-radius: 1px;
+--   margin: 5px;
+-- ]])
+
 GUI.GaugeBackCSS = CSSMan.new([[
   background-color: rgba(0,0,0,0);
+  margin-top: 5px;
+  margin-bottom: 5px;
   border-style: solid;
   border-color: white;
-  border-width: 1px;
-  border-radius: 5px;
-  margin: 5px;
 ]])
+
+-- GUI.GaugeFrontCSS = CSSMan.new([[
+--   background-color: rgba(0,0,0,0);
+--   border-style: solid;
+--   border-color: white;
+--   border-width: 1px;
+--   border-radius: 1px;
+--   margin: 5px;
+-- ]])
 
 GUI.GaugeFrontCSS = CSSMan.new([[
   background-color: rgba(0,0,0,0);
+  margin-top: 5px;
+  margin-bottom: 5px;
   border-style: solid;
   border-color: white;
-  border-width: 1px;
-  border-radius: 5px;
-  margin: 5px;
+
 ]])
+
+local Style_Colors = {
+  Aim = "red",
+  Control = "green",
+  Offensive = "yellow",
+  Dodge = "blue",
+  Daring = "purple",
+  Parry = "orange",
+  Power = "green",
+  Speed = "red",
+  Attack = "blue",
+  Defense = "yellow",
+}
 
 
 GUI.Style_VBox = Geyser.VBox:new({
@@ -242,12 +328,15 @@ GUI.Style_HBox_Attack_Defense = Geyser.HBox:new({
 
 
 
-local Style_Button_Width = "20%"
-local Style_Gauge_Width = "60%"
+local Style_Button_Width = '10%'
+local Style_Gauge_Width = "40%"
+
 
 GUI.Style_Aim_Increase = Geyser.Button:new({
   name = "alui style aim increase",
   width = Style_Button_Width,
+  tooltip = "Increase Aim Some",
+  color = Style_Colors.Aim,
 }, GUI.Style_HBox_Aim_Control)
 GUI.Style_Aim_Increase:echo("<center>Aim")
 
@@ -259,6 +348,8 @@ GUI.Style_Gauge_Aim_Control = Geyser.Gauge:new({
 GUI.Style_Control_Increase = Geyser.Button:new({
   name = "alui style control increase",
   width = Style_Button_Width,
+  tooltip = "Increase Control Some",
+  color = Style_Colors.Control,
 }, GUI.Style_HBox_Aim_Control)
 
 GUI.Style_Control_Increase:echo("<center>Control")
@@ -266,9 +357,9 @@ GUI.Style_Control_Increase:echo("<center>Control")
 
 GUI.Style_Gauge_Aim_Control:setValue(5, 10)
 
-GUI.GaugeFrontCSS:set("background-color", "red")
+GUI.GaugeFrontCSS:set("background-color", Style_Colors.Control)
 
-GUI.GaugeBackCSS:set("background-color", "green")
+GUI.GaugeBackCSS:set("background-color", Style_Colors.Aim)
 GUI.Style_Gauge_Aim_Control.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
 GUI.Style_Gauge_Aim_Control.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
 
@@ -287,6 +378,7 @@ end)
 GUI.Style_Offensive_Increase = Geyser.Button:new({
   name = "alui style offensive increase",
   width = Style_Button_Width,
+  tooltip = "Increase Offensive Some",
 }, GUI.Style_HBox_Offensive_Dodge)
 GUI.Style_Offensive_Increase:echo("<center>Offensive")
 
@@ -298,6 +390,7 @@ GUI.Style_Gauge_Offensive_Dodge = Geyser.Gauge:new({
 GUI.Style_Dodge_Increase = Geyser.Button:new({
   name = "alui style control dodge",
   width = Style_Button_Width,
+  tooltip = "Increase Dodge Some",
 }, GUI.Style_HBox_Offensive_Dodge)
 
 GUI.Style_Dodge_Increase:echo("<center>Dodge")
@@ -325,6 +418,7 @@ end)
 GUI.Style_Daring_Increase = Geyser.Button:new({
   name = "alui style daring increase",
   width = Style_Button_Width,
+  tooltip = "Increase Daring Some",
 }, GUI.Style_HBox_Darring_Parry)
 
 GUI.Style_Daring_Increase:echo("<center>Daring")
@@ -337,6 +431,7 @@ GUI.Style_Gauge_Daring_Parry = Geyser.Gauge:new({
 GUI.Style_Parry_Increase = Geyser.Button:new({
   name = "alui style parry increase",
   width = Style_Button_Width,
+  tooltip = "Increase Parry Some",
 }, GUI.Style_HBox_Darring_Parry)
 
 GUI.Style_Parry_Increase:echo("<center>Parry")
@@ -366,6 +461,7 @@ end)
 GUI.Style_Power_Increase = Geyser.Button:new({
   name = "alui style power increase",
   width = Style_Button_Width,
+  tooltip = "Increase Power Some",
 }, GUI.Style_HBox_Power_Speed)
 
 GUI.Style_Power_Increase:echo("<center>Power")
@@ -378,6 +474,7 @@ GUI.Style_Gauge_Power_Speed = Geyser.Gauge:new({
 GUI.Style_Speed_Increase = Geyser.Button:new({
   name = "alui style speed increase",
   width = Style_Button_Width,
+  tooltip = "Increase Speed Some",
 }, GUI.Style_HBox_Power_Speed)
 
 GUI.Style_Speed_Increase:echo("<center>Speed")
@@ -408,6 +505,7 @@ end)
 GUI.Style_Attack_Increase = Geyser.Button:new({
   name = "alui style attack increase",
   width = Style_Button_Width,
+  tooltip = "Increase Attack Some",
 }, GUI.Style_HBox_Attack_Defense)
 
 GUI.Style_Attack_Increase:echo("<center>Attack")
@@ -420,6 +518,7 @@ GUI.Style_Gauge_Attack_Defense = Geyser.Gauge:new({
 GUI.Style_Defense_Increase = Geyser.Button:new({
   name = "alui style defense increase",
   width = Style_Button_Width,
+  tooltip = "Increase Defense Some",
 }, GUI.Style_HBox_Attack_Defense)
 
 GUI.Style_Defense_Increase:echo("<center>Defense")

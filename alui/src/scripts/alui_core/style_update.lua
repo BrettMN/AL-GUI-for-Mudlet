@@ -22,11 +22,15 @@ function style_update(event)
             alui.style[f] = v
         end
     end
-    GUI.Style_Gauge_Aim_Control:setValue(alui.style.control, 100)
-    GUI.Style_Gauge_Offensive_Dodge:setValue(alui.style.dodge, 100)
-    GUI.Style_Gauge_Daring_Parry:setValue(alui.style.parry, 100)
-    GUI.Style_Gauge_Power_Speed:setValue(alui.style.speed, 100)
-    GUI.Style_Gauge_Attack_Defense:setValue(alui.style.defense, 100)
+
+
+    -- echo('\nstyle:\n' .. yajl.to_string(alui.style) .. '\n')
+
+    GUI.Style_Gauge_Aim_Control:setValue(alui.style.control)
+    GUI.Style_Gauge_Offensive_Dodge:setValue(alui.style.dodge)
+    GUI.Style_Gauge_Daring_Parry:setValue(alui.style.parry)
+    GUI.Style_Gauge_Power_Speed:setValue(alui.style.speed)
+    GUI.Style_Gauge_Attack_Defense:setValue(alui.style.defense)
 
 
 
@@ -39,6 +43,4 @@ function style_update(event)
     -- alui.stylemini:cecho("<green>Daring    " .. bar(alui.style.daring, alui.style.parry) .. " Parry\n")
     -- alui.stylemini:cecho("<green>Power     " .. bar(alui.style.power, alui.style.speed) .. " Speed\n")
     -- alui.stylemini:cecho("<green>Attack    " .. bar(alui.style.attack, alui.style.defense) .. " Defense\n")
-
 end
-

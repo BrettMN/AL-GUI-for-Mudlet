@@ -22,9 +22,16 @@ function status_update(e)
 
     local status = gmcp.Char.Status
 
+
+
+    -- echo('\nstatus:\n' .. yajl.to_string(status) .. '\n')
+
     alui.status.fatigue = fatigue_levels[status.Fatigue]
     alui.status.posture = status.Posture
-    alui.status.meline = "You are " .. status.Name:title() .. ", a " .. status.Age .. " year old " .. status.Race .. "."
 
+    if status.Name and status.Age and status.Race then
+        alui.status.meline = "You are " ..
+            status.Name:title() .. ", a " .. status.Age .. " year old " .. status.Race .. "."
+    end
     raiseEvent("alui status window")
 end
