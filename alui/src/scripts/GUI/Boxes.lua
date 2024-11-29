@@ -79,15 +79,21 @@ local Package_Root = getMudletHomeDir()
 
 local Gui_Padding = 20
 
+local function createContainer(name, parent)
+  local container = Geyser.Container:new({
+    name = name,
+    x = 0,
+    y = 0,
+    width = "100%",
+    height = "100%",
+  }, parent)
+  return container
+end
 
 
-GUI.Map_Container = Geyser.Container:new({
-  name = "GUI.Map_Container",
-  x = 0,
-  y = 0,
-  width = "100%",
-  height = "100%",
-}, GUI.Box4)
+
+GUI.Map_Container = createContainer("GUI.Map_Container", GUI.Box4)
+
 
 GUI.Mapper = Geyser.Mapper:new({
   name = "GUI.Mapper",
@@ -99,13 +105,8 @@ GUI.Mapper = Geyser.Mapper:new({
 
 
 
-GUI.Room_Container = Geyser.Container:new({
-  name = "alui room con",
-  x = 0,
-  y = 0,
-  width = "100%",
-  height = "100%",
-}, GUI.Box5)
+GUI.Room_Container = createContainer("GUI.Room_Container", GUI.Box5)
+
 
 alui.roommini = Geyser.MiniConsole:new({
   name = "alui room miniconsole",
@@ -119,13 +120,7 @@ alui.roommini = Geyser.MiniConsole:new({
 
 
 
-GUI.Status_Container = Geyser.Container:new({
-  name = "alui combat con",
-  x = 0,
-  y = 0,
-  height = "100%",
-  width = "100%",
-}, GUI.Box7)
+GUI.Status_Container = createContainer("GUI.Status_Container", GUI.Box7)
 
 alui.combatmini = Geyser.MiniConsole:new({
   name = "alui combat console",
@@ -143,13 +138,8 @@ alui.combatmini = Geyser.MiniConsole:new({
 
 
 
-GUI.Style_Container = Geyser.Container:new({
-  name = "alui style con",
-  x = 0,
-  y = 0,
-  width = "100%",
-  height = "100%",
-}, GUI.Box1)
+GUI.Style_Container = createContainer("GUI.Style_Container", GUI.Box1)
+
 
 
 local Style_Colors = {
