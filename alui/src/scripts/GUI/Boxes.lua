@@ -199,11 +199,12 @@ local function createStyleButton(name, parent, color)
     color = color.Up,
   }, parent)
   button:echo("<center>" .. name)
+
+  button:setClickCallback(function()
+    send('increase ' .. string.lower(name) .. ' some', false)
+  end)
   return button
 end
-
-GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, Style_Colors.Aim)
-
 
 local function createStyleGauge(name, parent, leftColor, rightColor)
   local gauge = Geyser.Gauge:new({
@@ -216,194 +217,38 @@ local function createStyleGauge(name, parent, leftColor, rightColor)
   gauge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
   gauge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
   return gauge
-  
 end
 
-GUI.Style_Gauge_Aim_Control = createStyleGauge("GUI.Style_Gauge_Aim_Control", GUI.Style_HBox_Aim_Control, Style_Colors.Control, Style_Colors.Aim)
-
-
+GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, Style_Colors.Aim)
+GUI.Style_Gauge_Aim_Control = createStyleGauge("GUI.Style_Gauge_Aim_Control", GUI.Style_HBox_Aim_Control,
+  Style_Colors.Control, Style_Colors.Aim)
 GUI.Style_Control_Increase = createStyleButton("Control", GUI.Style_HBox_Aim_Control, Style_Colors.Control)
 
 
+GUI.Style_Offensive_Increase = createStyleButton("Offensive", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Offensive)
+GUI.Style_Gauge_Offensive_Dodge = createStyleGauge("Offensive_Dodge", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Dodge,
+  Style_Colors.Offensive)
+GUI.Style_Dodge_Increase = createStyleButton("Dodge", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Dodge)
 
-GUI.Style_Aim_Increase:setClickCallback(function()
-  send('increase aim some', false)
-end)
-GUI.Style_Control_Increase:setClickCallback(function()
-  send('increase control some', false)
-end)
 
 
+GUI.Style_Daring_Increase = createStyleButton("Daring", GUI.Style_HBox_Darring_Parry, Style_Colors.Daring)
+GUI.Style_Gauge_Daring_Parry = createStyleGauge("Daring_Parry", GUI.Style_HBox_Darring_Parry, Style_Colors.Parry,
+  Style_Colors.Daring)
+GUI.Style_Parry_Increase = createStyleButton("Parry", GUI.Style_HBox_Darring_Parry, Style_Colors.Parry)
 
 
+GUI.Style_Power_Increase = createStyleButton("Power", GUI.Style_HBox_Power_Speed, Style_Colors.Power)
+GUI.Style_Gauge_Power_Speed = createStyleGauge("Power_Speed", GUI.Style_HBox_Power_Speed, Style_Colors.Speed,
+  Style_Colors.Power)
+GUI.Style_Speed_Increase = createStyleButton("Speed", GUI.Style_HBox_Power_Speed, Style_Colors.Speed)
 
 
-GUI.Style_Offensive_Increase = Geyser.Button:new({
-  name = "alui style offensive increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Offensive Some",
-}, GUI.Style_HBox_Offensive_Dodge)
-GUI.Style_Offensive_Increase:echo("<center>Offensive")
 
-GUI.Style_Gauge_Offensive_Dodge = Geyser.Gauge:new({
-  name = "alui style gauge offensive dodge",
-  width = Style_Gauge_Width,
-}, GUI.Style_HBox_Offensive_Dodge)
-
-GUI.Style_Dodge_Increase = Geyser.Button:new({
-  name = "alui style control dodge",
-  width = Style_Button_Width,
-  tooltip = "Increase Dodge Some",
-}, GUI.Style_HBox_Offensive_Dodge)
-
-GUI.Style_Dodge_Increase:echo("<center>Dodge")
-
-
-GUI.Style_Gauge_Offensive_Dodge:setValue(5, 10)
-
-GUI.GaugeFrontCSS:set("background-color", "yellow")
-
-GUI.GaugeBackCSS:set("background-color", "blue")
-GUI.Style_Gauge_Offensive_Dodge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-GUI.Style_Gauge_Offensive_Dodge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
-
-GUI.Style_Offensive_Increase:setClickCallback(function()
-  send('increase offensive some', false)
-end)
-GUI.Style_Dodge_Increase:setClickCallback(function()
-  send('increase dodge some', false)
-end)
-
-
-
-
-
-GUI.Style_Daring_Increase = Geyser.Button:new({
-  name = "alui style daring increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Daring Some",
-}, GUI.Style_HBox_Darring_Parry)
-
-GUI.Style_Daring_Increase:echo("<center>Daring")
-
-GUI.Style_Gauge_Daring_Parry = Geyser.Gauge:new({
-  name = "alui style gauge daring parry",
-  width = Style_Gauge_Width,
-}, GUI.Style_HBox_Darring_Parry)
-
-GUI.Style_Parry_Increase = Geyser.Button:new({
-  name = "alui style parry increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Parry Some",
-}, GUI.Style_HBox_Darring_Parry)
-
-GUI.Style_Parry_Increase:echo("<center>Parry")
-
-
-GUI.Style_Gauge_Daring_Parry:setValue(5, 10)
-
-GUI.GaugeFrontCSS:set("background-color", "purple")
-
-GUI.GaugeBackCSS:set("background-color", "orange")
-
-GUI.Style_Gauge_Daring_Parry.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-GUI.Style_Gauge_Daring_Parry.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
-
-GUI.Style_Daring_Increase:setClickCallback(function()
-  send('increase daring some', false)
-end)
-
-GUI.Style_Parry_Increase:setClickCallback(function()
-  send('increase parry some', false)
-end)
-
-
-
-
-
-GUI.Style_Power_Increase = Geyser.Button:new({
-  name = "alui style power increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Power Some",
-}, GUI.Style_HBox_Power_Speed)
-
-GUI.Style_Power_Increase:echo("<center>Power")
-
-GUI.Style_Gauge_Power_Speed = Geyser.Gauge:new({
-  name = "alui style gauge power speed",
-  width = Style_Gauge_Width,
-}, GUI.Style_HBox_Power_Speed)
-
-GUI.Style_Speed_Increase = Geyser.Button:new({
-  name = "alui style speed increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Speed Some",
-}, GUI.Style_HBox_Power_Speed)
-
-GUI.Style_Speed_Increase:echo("<center>Speed")
-
-
-GUI.Style_Gauge_Power_Speed:setValue(5, 10)
-
-GUI.GaugeFrontCSS:set("background-color", "green")
-
-GUI.GaugeBackCSS:set("background-color", "red")
-
-GUI.Style_Gauge_Power_Speed.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-
-GUI.Style_Gauge_Power_Speed.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
-
-GUI.Style_Power_Increase:setClickCallback(function()
-  send('increase power some', false)
-end)
-
-GUI.Style_Speed_Increase:setClickCallback(function()
-  send('increase speed some', false)
-end)
-
-
-
-
-
-GUI.Style_Attack_Increase = Geyser.Button:new({
-  name = "alui style attack increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Attack Some",
-}, GUI.Style_HBox_Attack_Defense)
-
-GUI.Style_Attack_Increase:echo("<center>Attack")
-
-GUI.Style_Gauge_Attack_Defense = Geyser.Gauge:new({
-  name = "alui style gauge attack defense",
-  width = Style_Gauge_Width,
-}, GUI.Style_HBox_Attack_Defense)
-
-GUI.Style_Defense_Increase = Geyser.Button:new({
-  name = "alui style defense increase",
-  width = Style_Button_Width,
-  tooltip = "Increase Defense Some",
-}, GUI.Style_HBox_Attack_Defense)
-
-GUI.Style_Defense_Increase:echo("<center>Defense")
-
-
-GUI.Style_Gauge_Attack_Defense:setValue(5, 10)
-
-GUI.GaugeFrontCSS:set("background-color", "blue")
-
-GUI.GaugeBackCSS:set("background-color", "yellow")
-
-GUI.Style_Gauge_Attack_Defense.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-
-GUI.Style_Gauge_Attack_Defense.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
-
-GUI.Style_Attack_Increase:setClickCallback(function()
-  send('increase attack some', false)
-end)
-
-GUI.Style_Defense_Increase:setClickCallback(function()
-  send('increase defense some', false)
-end)
+GUI.Style_Attack_Increase = createStyleButton("Attack", GUI.Style_HBox_Attack_Defense, Style_Colors.Attack)
+GUI.Style_Gauge_Attack_Defense = createStyleGauge("Attack_Defense", GUI.Style_HBox_Attack_Defense, Style_Colors.Defense,
+  Style_Colors.Attack)
+GUI.Style_Defense_Increase = createStyleButton("Defense", GUI.Style_HBox_Attack_Defense, Style_Colors.Defense)
 
 
 
