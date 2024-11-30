@@ -9,8 +9,8 @@ end
 
 --end util funcs
 
-alui = alui or {}
-alui.style = alui.style or {}
-alui.status = alui.status or {}
-alui.health = alui.health or {}
+alui          = alui or {}
+alui.style    = alui.style or {}
+alui.status   = alui.status or {}
+alui.health   = alui.health or {}
 alui.bleeding = alui.bleeding or {}

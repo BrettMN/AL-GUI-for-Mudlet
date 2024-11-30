@@ -2,5 +2,11 @@
   {
     "name": "Mapping Script",
     "isActive": "yes"
+  },  
+  {
+    "name": "alui_core",
+    "isActive": "yes",
+    "isFolder": "yes"
+
   }
 ]
