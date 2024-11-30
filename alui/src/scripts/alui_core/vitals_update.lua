@@ -16,6 +16,21 @@ local thirst_colors = {
     ["dying of thirst"] = "<ansi_light_red>dying of thirst<reset>",
 }
 
+
+-- 1. Stuffed
+-- 2. Full
+-- 3. Satiated
+-- 4. Not Hungry
+-- 5. Peckish
+-- 6. Slightly Hungry
+-- 7. Hungry
+-- 8. Very Hungry
+-- 9. Famished
+-- 10. Ravenous
+-- 11. Starving
+-- 12. Dying of Hunger
+
+
 local hunger_colors = {
     ["stuffed"] = "<ansi_green>stuffed<reset>",
     ["full"] = "<ansi_green>full<reset>",
@@ -26,9 +41,14 @@ local hunger_colors = {
     ["hungry"] = "<yellow>hungry<reset>",
     ["very hungry"] = "<yellow>very hungry<reset>",
     ["famished"] = "<red>famished<reset>",
+    ["ravenous"] = "<red>ravenous<reset>",
     ["starving"] = "<red>starving<reset>",
     ["dying of hunger"] = "<red>dying of hunger<reset>",
 }
+
+
+
+
 
 local health_levels = {
     ["destroyed"] = "<ansi_light_yellow:ansi_light_red>-1<reset>",
