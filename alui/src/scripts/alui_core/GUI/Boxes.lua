@@ -52,23 +52,8 @@ local Style_Gauge_Width = "40%"
 local Package_Root = getMudletHomeDir()
 local Gui_Padding = 20
 
-local Style_Colors = {
-  Aim = { Hover = 'red', Up = 'red', Pressed = 'red' },
-  Control = { Hover = 'green', Up = 'green', Pressed = 'green' },
-  Offensive = { Hover = 'blue', Up = 'blue', Pressed = 'blue' },
-  Dodge = { Hover = 'yellow', Up = 'SaddleBrown', Pressed = 'yellow' },
-  Daring = { Hover = 'purple', Up = 'purple', Pressed = 'purple' },
-  Parry = { Hover = 'orange', Up = 'DarkOrange', Pressed = 'orange' },
-  Power = { Hover = 'green', Up = 'SlateGrey', Pressed = 'green' },
-  Speed = { Hover = 'red', Up = 'MidnightBlue', Pressed = 'red' },
-  Attack = { Hover = 'blue', Up = 'DarkGreen', Pressed = 'blue' },
-  Defense = { Hover = 'yellow', Up = 'DarkViolet', Pressed = 'yellow' },
-}
-
-
-
-
-
+local aggressiveColor = '#830000'
+local defensiveColor = '#2A768C'
 
 -- Function to create a new box
 local function createBox(name, x, y, width, height, parent)
@@ -222,36 +207,36 @@ GUI.Style_HBox_Attack_Defense = createStyleHbox("GUI.Style_HBox_Attack_Defense",
 
 
 
-GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, Style_Colors.Aim)
+GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, aggressiveColor)
 GUI.Style_Gauge_Aim_Control = createStyleGauge("GUI.Style_Gauge_Aim_Control", GUI.Style_HBox_Aim_Control,
-  Style_Colors.Control, Style_Colors.Aim)
-GUI.Style_Control_Increase = createStyleButton("Control", GUI.Style_HBox_Aim_Control, Style_Colors.Control)
+  defensiveColor, aggressiveColor)
+GUI.Style_Control_Increase = createStyleButton("Control", GUI.Style_HBox_Aim_Control, defensiveColor)
 
 
-GUI.Style_Offensive_Increase = createStyleButton("Offensive", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Offensive)
-GUI.Style_Gauge_Offensive_Dodge = createStyleGauge("Offensive_Dodge", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Dodge,
-  Style_Colors.Offensive)
-GUI.Style_Dodge_Increase = createStyleButton("Dodge", GUI.Style_HBox_Offensive_Dodge, Style_Colors.Dodge)
-
-
-
-GUI.Style_Daring_Increase = createStyleButton("Daring", GUI.Style_HBox_Darring_Parry, Style_Colors.Daring)
-GUI.Style_Gauge_Daring_Parry = createStyleGauge("Daring_Parry", GUI.Style_HBox_Darring_Parry, Style_Colors.Parry,
-  Style_Colors.Daring)
-GUI.Style_Parry_Increase = createStyleButton("Parry", GUI.Style_HBox_Darring_Parry, Style_Colors.Parry)
-
-
-GUI.Style_Power_Increase = createStyleButton("Power", GUI.Style_HBox_Power_Speed, Style_Colors.Power)
-GUI.Style_Gauge_Power_Speed = createStyleGauge("Power_Speed", GUI.Style_HBox_Power_Speed, Style_Colors.Speed,
-  Style_Colors.Power)
-GUI.Style_Speed_Increase = createStyleButton("Speed", GUI.Style_HBox_Power_Speed, Style_Colors.Speed)
+GUI.Style_Offensive_Increase = createStyleButton("Offensive", GUI.Style_HBox_Offensive_Dodge, aggressiveColor)
+GUI.Style_Gauge_Offensive_Dodge = createStyleGauge("Offensive_Dodge", GUI.Style_HBox_Offensive_Dodge, defensiveColor,
+  aggressiveColor)
+GUI.Style_Dodge_Increase = createStyleButton("Dodge", GUI.Style_HBox_Offensive_Dodge, defensiveColor)
 
 
 
-GUI.Style_Attack_Increase = createStyleButton("Attack", GUI.Style_HBox_Attack_Defense, Style_Colors.Attack)
-GUI.Style_Gauge_Attack_Defense = createStyleGauge("Attack_Defense", GUI.Style_HBox_Attack_Defense, Style_Colors.Defense,
-  Style_Colors.Attack)
-GUI.Style_Defense_Increase = createStyleButton("Defense", GUI.Style_HBox_Attack_Defense, Style_Colors.Defense)
+GUI.Style_Daring_Increase = createStyleButton("Daring", GUI.Style_HBox_Darring_Parry, aggressiveColor)
+GUI.Style_Gauge_Daring_Parry = createStyleGauge("Daring_Parry", GUI.Style_HBox_Darring_Parry, defensiveColor,
+  aggressiveColor)
+GUI.Style_Parry_Increase = createStyleButton("Parry", GUI.Style_HBox_Darring_Parry, defensiveColor)
+
+
+GUI.Style_Power_Increase = createStyleButton("Power", GUI.Style_HBox_Power_Speed, aggressiveColor)
+GUI.Style_Gauge_Power_Speed = createStyleGauge("Power_Speed", GUI.Style_HBox_Power_Speed, defensiveColor,
+  aggressiveColor)
+GUI.Style_Speed_Increase = createStyleButton("Speed", GUI.Style_HBox_Power_Speed, defensiveColor)
+
+
+
+GUI.Style_Attack_Increase = createStyleButton("Attack", GUI.Style_HBox_Attack_Defense, aggressiveColor)
+GUI.Style_Gauge_Attack_Defense = createStyleGauge("Attack_Defense", GUI.Style_HBox_Attack_Defense, defensiveColor,
+  aggressiveColor)
+GUI.Style_Defense_Increase = createStyleButton("Defense", GUI.Style_HBox_Attack_Defense, defensiveColor)
 
 
 
