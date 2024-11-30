@@ -1,3 +1,6 @@
+local Package_Root = getMudletHomeDir()
+
+
 GUI.Header = Geyser.HBox:new({
   name = "GUI.Header",
   x = 0,
@@ -14,6 +17,8 @@ GUI.IconCSS = CSSMan.new([[
   border-radius: 5px;
   margin: 5px;
   qproperty-wordWrap: true;
+  background-repeat: no-repeat;
+  background-position: top right; background-origin: margin;
 ]])
 
 -- for i = 1, 12 do
@@ -25,15 +30,28 @@ GUI.IconCSS = CSSMan.new([[
 -- end
 
 local function createMenuItem(name, parent)
-  local icon = Geyser.Label:new({
+  local item = Geyser.Label:new({
     name = 'GUI.Menu.' .. name,
   }, parent)
-  icon:setStyleSheet(GUI.IconCSS:getCSS())
-  icon:echo("<center>" .. name)
-  return icon
+
+  item:setToolTip(name)
+  item:setStyleSheet(GUI.IconCSS:getCSS())
+  -- item:echo("<center>" .. name)
+  return item
 end
 
 GUI.Menu.Hunger = createMenuItem("Hunger", GUI.Header)
+GUI.Menu.Hunger:setBackgroundImage(Package_Root .. "/alui/icons/hungerIcon.png")
+GUI.Menu.Hunger:setStyleSheet([[  background-color: red;
+border-style: solid;
+border-width: 1px;
+border-color: white;
+border-radius: 5px;
+margin: 5px;
+qproperty-wordWrap: true;
+  background-repeat: no-repeat;
+  background-position: top right; background-origin: margin;
+]])
 GUI.Menu.Thirst = createMenuItem("Thirst", GUI.Header)
 GUI.Menu.Fatigue = createMenuItem("Fatigue", GUI.Header)
 GUI.Menu.Posture = createMenuItem("Posture", GUI.Header)
