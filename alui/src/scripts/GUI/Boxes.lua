@@ -47,6 +47,27 @@ GUI.GaugeFrontCSS = CSSMan.new([[
   border-color: white;S
 ]])
 
+local Style_Button_Width = '10%'
+local Style_Gauge_Width = "40%"
+local Package_Root = getMudletHomeDir()
+local Gui_Padding = 20
+
+local Style_Colors = {
+  Aim = { Hover = 'red', Up = 'red', Pressed = 'red' },
+  Control = { Hover = 'green', Up = 'green', Pressed = 'green' },
+  Offensive = { Hover = 'blue', Up = 'blue', Pressed = 'blue' },
+  Dodge = { Hover = 'yellow', Up = 'SaddleBrown', Pressed = 'yellow' },
+  Daring = { Hover = 'purple', Up = 'purple', Pressed = 'purple' },
+  Parry = { Hover = 'orange', Up = 'DarkOrange', Pressed = 'orange' },
+  Power = { Hover = 'green', Up = 'SlateGrey', Pressed = 'green' },
+  Speed = { Hover = 'red', Up = 'MidnightBlue', Pressed = 'red' },
+  Attack = { Hover = 'blue', Up = 'DarkGreen', Pressed = 'blue' },
+  Defense = { Hover = 'yellow', Up = 'DarkViolet', Pressed = 'yellow' },
+}
+
+
+
+
 
 
 -- Function to create a new box
@@ -62,23 +83,6 @@ local function createBox(name, x, y, width, height, parent)
   return box
 end
 
-
-
--- Create boxes using the reusable function
-GUI.Box1 = createBox("GUI.Box1", 0, 0, "100%", "20%", GUI.Right)
-GUI.Box2 = createBox("GUI.Box2", 0, "20%", "100%", "40%", GUI.Right)
-GUI.Box3 = createBox("GUI.Box3", 0, "60%", "100%", "40%", GUI.Right)
-GUI.Box4 = createBox("GUI.Box4", 0, 0, "100%", "50%", GUI.Left)
-GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "25%", GUI.Left)
-GUI.Box7 = createBox("GUI.Box7", 0, "75%", "100%", "25%", GUI.Left)
-
-
-local Package_Root = getMudletHomeDir()
-
-
-
-local Gui_Padding = 20
-
 local function createContainer(name, parent)
   local container = Geyser.Container:new({
     name = name,
@@ -91,6 +95,55 @@ local function createContainer(name, parent)
 end
 
 
+local function createStyleHbox(name, parent)
+  local Style_HBox_Height = "20%"
+  local hbox = Geyser.HBox:new({
+    name = name,
+    width = "100%",
+    height = Style_HBox_Height,
+  }, parent)
+  return hbox
+end
+
+
+local function createStyleButton(name, parent, color)
+  local button = Geyser.Button:new({
+    name = "GUI.Style_" .. name .. "_Increase",
+    width = Style_Button_Width,
+    tooltip = 'Increase ' .. name .. ' Some',
+
+    style = [[ margin: 5px; boarder-radius:5px; background-color: ]] .. color.Up .. [[; border: 1px solid white; ]],
+    downStyle = [[ margin: 1px; background-color: ]] .. color.Pressed .. [[; border: 1px solid white; ]],
+  }, parent)
+  button:echo("<center>" .. name)
+
+  button:setClickCallback(function()
+    send('increase ' .. string.lower(name) .. ' some', false)
+  end)
+  return button
+end
+
+local function createStyleGauge(name, parent, leftColor, rightColor)
+  local gauge = Geyser.Gauge:new({
+    name = "GUI.Style_Gauge_" .. name,
+    width = Style_Gauge_Width,
+  }, parent)
+  gauge:setValue(5, 10)
+  GUI.GaugeFrontCSS:set("background-color", leftColor.Up)
+  GUI.GaugeBackCSS:set("background-color", rightColor.Up)
+  gauge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
+  gauge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
+  return gauge
+end
+
+
+-- Create boxes using the reusable function
+GUI.Box1 = createBox("GUI.Box1", 0, 0, "100%", "20%", GUI.Right)
+GUI.Box2 = createBox("GUI.Box2", 0, "20%", "100%", "40%", GUI.Right)
+GUI.Box3 = createBox("GUI.Box3", 0, "60%", "100%", "40%", GUI.Right)
+GUI.Box4 = createBox("GUI.Box4", 0, 0, "100%", "50%", GUI.Left)
+GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "25%", GUI.Left)
+GUI.Box7 = createBox("GUI.Box7", 0, "75%", "100%", "25%", GUI.Left)
 
 GUI.Map_Container = createContainer("GUI.Map_Container", GUI.Box4)
 
@@ -142,19 +195,6 @@ GUI.Style_Container = createContainer("GUI.Style_Container", GUI.Box1)
 
 
 
-local Style_Colors = {
-  Aim = { Hover = 'red', Up = 'red', Down = 'red' },
-  Control = { Hover = 'green', Up = 'green', Down = 'green' },
-  Offensive = { Hover = 'blue', Up = 'blue', Down = 'blue' },
-  Dodge = { Hover = 'yellow', Up = 'yellow', Down = 'yellow' },
-  Daring = { Hover = 'purple', Up = 'purple', Down = 'purple' },
-  Parry = { Hover = 'orange', Up = 'orange', Down = 'orange' },
-  Power = { Hover = 'green', Up = 'green', Down = 'green' },
-  Speed = { Hover = 'red', Up = 'red', Down = 'red' },
-  Attack = { Hover = 'blue', Up = 'blue', Down = 'blue' },
-  Defense = { Hover = 'yellow', Up = 'yellow', Down = 'yellow' },
-}
-
 
 GUI.Style_VBox = Geyser.VBox:new({
   name = "alui style vbox",
@@ -167,15 +207,6 @@ GUI.Style_VBox = Geyser.VBox:new({
 
 
 
-local function createStyleHbox(name, parent)
-  local Style_HBox_Height = "20%"
-  local hbox = Geyser.HBox:new({
-    name = name,
-    width = "100%",
-    height = Style_HBox_Height,
-  }, parent)
-  return hbox
-end
 
 
 
@@ -188,36 +219,8 @@ GUI.Style_HBox_Attack_Defense = createStyleHbox("GUI.Style_HBox_Attack_Defense",
 
 
 
-local Style_Button_Width = '10%'
-local Style_Gauge_Width = "40%"
 
-local function createStyleButton(name, parent, color)
-  local button = Geyser.Button:new({
-    name = "GUI.Style_" .. name .. "_Increase",
-    width = Style_Button_Width,
-    tooltip = 'Increase ' .. name .. ' Some',
-    color = color.Up,
-  }, parent)
-  button:echo("<center>" .. name)
 
-  button:setClickCallback(function()
-    send('increase ' .. string.lower(name) .. ' some', false)
-  end)
-  return button
-end
-
-local function createStyleGauge(name, parent, leftColor, rightColor)
-  local gauge = Geyser.Gauge:new({
-    name = "GUI.Style_Gauge_" .. name,
-    width = Style_Gauge_Width,
-  }, parent)
-  gauge:setValue(5, 10)
-  GUI.GaugeFrontCSS:set("background-color", leftColor.Up)
-  GUI.GaugeBackCSS:set("background-color", rightColor.Down)
-  gauge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
-  gauge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
-  return gauge
-end
 
 GUI.Style_Aim_Increase = createStyleButton("Aim", GUI.Style_HBox_Aim_Control, Style_Colors.Aim)
 GUI.Style_Gauge_Aim_Control = createStyleGauge("GUI.Style_Gauge_Aim_Control", GUI.Style_HBox_Aim_Control,
