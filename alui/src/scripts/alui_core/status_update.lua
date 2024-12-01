@@ -1,18 +1,18 @@
 alui.status = alui.status or {}
 
 local fatigue_levels = {
-    ["well rested"] = "light_cyan",
+    ["well rested"] = "cyan",
     ["barely tired"] = "green",
     ["somewhat tired"] = "green",
     ["winded"] = "green",
     ["tired"] = "green",
-    ["weary"] = "light_yellow",
-    ["haggard"] = "light_yellow",
-    ["worn out"] = "light_yellow",
-    ["exhausted"] = "light_yellow",
-    ["disoriented"] = "light_red",
-    ["faint"] = "light_red",
-    ["system shocked"] = "light_red"
+    ["weary"] = "lightyellow",
+    ["haggard"] = "lightyellow",
+    ["worn out"] = "lightyellow",
+    ["exhausted"] = "lightyellow",
+    ["disoriented"] = "lightred",
+    ["faint"] = "lightred",
+    ["system shocked"] = "darkred"
 }
 
 function status_update(e)
