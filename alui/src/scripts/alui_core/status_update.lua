@@ -1,18 +1,18 @@
 alui.status = alui.status or {}
 
 local fatigue_levels = {
-    ["well rested"] = "<ansi_light_cyan>well rested<reset>",
-    ["barely tired"] = "<ansi_green>barely tired<reset>",
-    ["somewhat tired"] = "<ansi_green>somewhat tired<reset>",
-    ["winded"] = "<ansi_green>winded<reset>",
-    ["tired"] = "<ansi_green>tired<reset>",
-    ["weary"] = "<ansi_light_yellow>weary<reset>",
-    ["haggard"] = "<ansi_light_yellow>haggard<reset>",
-    ["worn out"] = "<ansi_light_yellow>worn out<reset>",
-    ["exhausted"] = "<ansi_light_yellow>exhausted<reset>",
-    ["disoriented"] = "<ansi_light_red>disoriented<reset>",
-    ["faint"] = "<ansi_light_red>faint<reset>",
-    ["system shocked"] = "<ansi_light_red>system shocked<reset>"
+    ["well rested"] = "light_cyan",
+    ["barely tired"] = "green",
+    ["somewhat tired"] = "green",
+    ["winded"] = "green",
+    ["tired"] = "green",
+    ["weary"] = "light_yellow",
+    ["haggard"] = "light_yellow",
+    ["worn out"] = "light_yellow",
+    ["exhausted"] = "light_yellow",
+    ["disoriented"] = "light_red",
+    ["faint"] = "light_red",
+    ["system shocked"] = "light_red"
 }
 
 function status_update(e)
@@ -22,12 +22,11 @@ function status_update(e)
 
     local status = gmcp.Char.Status
 
-
-
-    -- echo('\nstatus:\n' .. yajl.to_string(status) .. '\n')
-
     alui.status.fatigue = fatigue_levels[status.Fatigue]
+    GUI.Menu.Fatigue:update()
+
     alui.status.posture = status.Posture
+    GUI.Menu.Posture:update()
 
     if status.Name and status.Age and status.Race then
         alui.status.meline = "You are " ..

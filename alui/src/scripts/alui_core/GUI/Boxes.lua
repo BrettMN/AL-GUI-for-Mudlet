@@ -10,6 +10,7 @@ GUI.BoxCSS = CSSMan.new([[
   border-radius: 10px;
   border-color: white;
   margin: 10px;
+  board
 ]])
 
 
@@ -44,7 +45,7 @@ GUI.GaugeFrontCSS = CSSMan.new([[
   margin-top: 5px;
   margin-bottom: 5px;
   border-style: solid;
-  border-color: white;S
+  border-color: white;
 ]])
 
 local Style_Button_Width = '10%'
@@ -97,8 +98,8 @@ local function createStyleButton(name, parent, color)
     width = Style_Button_Width,
     tooltip = 'Increase ' .. name .. ' Some',
 
-    style = [[ margin: 5px; boarder-radius:5px; background-color: ]] .. color.Up .. [[; border: 1px solid white; ]],
-    downStyle = [[ margin: 1px; background-color: ]] .. color.Pressed .. [[; border: 1px solid white; ]],
+    style = [[ margin: 5px; boarder-radius:5px; background-color: ]] .. color .. [[; border: 1px solid white; ]],
+
   }, parent)
   button:echo("<center>" .. name)
 
@@ -114,8 +115,11 @@ local function createStyleGauge(name, parent, leftColor, rightColor)
     width = Style_Gauge_Width,
   }, parent)
   gauge:setValue(5, 10)
-  GUI.GaugeFrontCSS:set("background-color", leftColor.Up)
-  GUI.GaugeBackCSS:set("background-color", rightColor.Up)
+  GUI.GaugeFrontCSS:set("background-color", leftColor)
+  GUI.GaugeBackCSS:set("background-color", rightColor)
+
+
+
   gauge.back:setStyleSheet(GUI.GaugeBackCSS:getCSS())
   gauge.front:setStyleSheet(GUI.GaugeFrontCSS:getCSS())
   return gauge

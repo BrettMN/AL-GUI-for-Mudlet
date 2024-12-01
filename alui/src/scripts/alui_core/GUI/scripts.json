@@ -28,5 +28,11 @@
               "isFolder": "no",
               "name": "Boxes",
               "script": ""
+       },
+       {
+              "isActive": "yes",
+              "isFolder": "no",
+              "name": "CSSMan",
+              "script": ""
        }
 ]

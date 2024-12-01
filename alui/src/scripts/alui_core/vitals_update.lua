@@ -4,16 +4,16 @@ alui.health = alui.health or {}
 alui.bleeding = alui.bleeding or {}
 
 local thirst_colors = {
-    ["bloated"] = "<ansi_green>bloated<reset>",
-    ["quenched"] = "<ansi_green>quenched<reset>",
-    ["not thirsty"] = "<ansi_green>not thirsty<reset>",
-    ["slightly thirsty"] = "<yellow>slightly thirsty<reset>",
-    ["moderately thirsty"] = "<yellow>moderately thirsty<reset>",
-    ["thirsty"] = "<yellow>thirsty<reset>",
-    ["very thirsty"] = "<ansi_red>very thirsty<reset>",
-    ["parched"] = "<ansi_red>parched<reset>",
-    ["dehydrated"] = "<ansi_light_red>dehydrated<reset>",
-    ["dying of thirst"] = "<ansi_light_red>dying of thirst<reset>",
+    ["bloated"] = "#ffff00",
+    ["quenched"] = "#008000",
+    ["not thirsty"] = "#ffff00",
+    ["slightly thirsty"] = "yellow",
+    ["moderately thirsty"] = "yellow",
+    ["thirsty"] = "yellow",
+    ["very thirsty"] = "red",
+    ["parched"] = "red",
+    ["dehydrated"] = "lightred",
+    ["dying of thirst"] = "DarkRed",
 }
 
 
@@ -32,18 +32,18 @@ local thirst_colors = {
 
 
 local hunger_colors = {
-    ["stuffed"] = "<ansi_green>stuffed<reset>",
-    ["full"] = "<ansi_green>full<reset>",
-    ["satiated"] = "<ansi_green>satiated<reset>",
-    ["not hungry"] = "<ansi_green>not hungry<reset>",
-    ["peckish"] = "<yellow>peckish<reset>",
-    ["slightly hungry"] = "<yellow>sightly hungry<reset>",
-    ["hungry"] = "<yellow>hungry<reset>",
-    ["very hungry"] = "<yellow>very hungry<reset>",
-    ["famished"] = "<red>famished<reset>",
-    ["ravenous"] = "<red>ravenous<reset>",
-    ["starving"] = "<red>starving<reset>",
-    ["dying of hunger"] = "<red>dying of hunger<reset>",
+    ["stuffed"] = "green",
+    ["full"] = "green",
+    ["satiated"] = "green",
+    ["not hungry"] = "green",
+    ["peckish"] = "green",
+    ["slightly hungry"] = "yellow",
+    ["hungry"] = "yellow",
+    ["very hungry"] = "yellow",
+    ["famished"] = "red",
+    ["ravenous"] = "red",
+    ["starving"] = "red",
+    ["dying of hunger"] = "DarkRed",
 }
 
 
@@ -71,14 +71,15 @@ function vitals_update(e)
     local vit = gmcp.Char.Vitals
 
 
-    local wounds = gmcp.Char.Wounds
-
-
+    -- local wounds = gmcp.Char.Wounds
     -- echo('\n' .. yajl.to_string(wounds) .. '\n')
 
 
     alui.status.hunger = hunger_colors[vit.Hunger]
+    GUI.Menu.Hunger:update()
+
     alui.status.thirst = thirst_colors[vit.Thirst]
+    GUI.Menu.Thirst:update()
 
     --handle healths
     if type(vit.List) == "table" then
