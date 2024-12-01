@@ -27,7 +27,7 @@ GUI.Top = Geyser.Label:new({
   x = "25%",
   y = 0,
   width = "50%",
-  height = "10%",
+  height = "5%",
 })
 GUI.Top:setStyleSheet(GUI.BackgroundCSS:getCSS())
 
