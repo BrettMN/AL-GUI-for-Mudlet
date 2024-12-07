@@ -3,6 +3,11 @@ GUI.BackgroundCSS = CSSMan.new([[
   background-image: url('C:\workspace\AL-GUI-for-Mudlet\alui\src\resources\banner.webp');
 ]])
 
+
+
+
+
+
 GUI.Left = Geyser.Label:new({
   name = "GUI.Left",
   x = 0,
@@ -38,3 +43,37 @@ GUI.Top:setStyleSheet(GUI.BackgroundCSS:getCSS())
 --   height = "10%",
 -- })
 -- GUI.Bottom:setStyleSheet(GUI.BackgroundCSS:getCSS())
+
+
+
+GUI.setBackground = function()
+  local w, h = getMainWindowSize()
+
+  local isSmallScreen = w < 1920
+
+  echo("Is small screen: " .. tostring(isSmallScreen) .. "\n")
+
+  if isSmallScreen then
+    GUI.Left.width = "10%"
+
+    GUI.Right.width = "10%"
+
+    GUI.Top.width = "80%"
+  else
+    GUI.Left.width = "25%"
+
+    GUI.Right.width = "25%"
+
+    GUI.Top.width = "50%"
+  end
+
+  GUI.Left.height = "100%"
+
+  GUI.Right.height = "100%"
+
+  GUI.Top.height = "5%"
+  GUI.Left:show()
+  GUI.Right:show()
+  GUI.Top:show()
+  -- GUI.Bottom:show()
+end

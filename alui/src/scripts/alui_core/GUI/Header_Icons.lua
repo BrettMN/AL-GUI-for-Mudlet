@@ -172,6 +172,7 @@ GUI.Menu.Posture = createMenuItem("Posture", function(self)
     GUI.IconCSS:set("background-image", "none")
 
     if label then
+      self:clear()
       self:echo("<center>" .. label)
     end
 

@@ -4,9 +4,9 @@ alui.health = alui.health or {}
 alui.bleeding = alui.bleeding or {}
 
 local thirst_colors = {
-    ["bloated"] = "#ffff00",
-    ["quenched"] = "#008000",
-    ["not thirsty"] = "#ffff00",
+    ["bloated"] = "green",
+    ["quenched"] = "green",
+    ["not thirsty"] = "green",
     ["slightly thirsty"] = "yellow",
     ["moderately thirsty"] = "yellow",
     ["thirsty"] = "yellow",
