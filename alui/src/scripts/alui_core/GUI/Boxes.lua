@@ -332,3 +332,8 @@ GUI.resizeBoxes = function()
   GUI.Chat_Container:show()
   alui.chat_cap:show()
 end
+
+
+
+
+GUI.setBoxes()

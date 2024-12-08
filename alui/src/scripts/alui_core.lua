@@ -19,11 +19,19 @@ alui.bleeding     = alui.bleeding or {}
 GUI               = GUI or {}
 GUI.Menu          = GUI.Menu or {}
 GUI.Events        = GUI.Events or {}
+GUI.Timers        = GUI.Timers or {}
 
 
 
 GUI.Events.resize = registerNamedEventHandler(profileName, 'alui.events.resize', "sysWindowResizeEvent", function()
-    GUI.setBorders()
-    GUI.setBackground()
-    -- GUI.resizeBoxes()
+    if GUI.Timers.resize then
+        killTimer(GUI.Timers.resize)
+    end
+
+    GUI.Timers.resize = tempTimer(0.1, function()
+        GUI.setBorders()
+        GUI.setBackground()
+        GUI.resizeBoxes()
+        GUI.setBoxes()
+    end)
 end, false)
