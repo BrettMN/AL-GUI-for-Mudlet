@@ -3,16 +3,19 @@ alui.status = alui.status or {}
 alui.health = alui.health or {}
 alui.bleeding = alui.bleeding or {}
 
+local alRed = '#830000'
+local alBlue = '#2A768C'
+
 local thirst_colors = {
-    ["bloated"] = "cyan",
+    ["bloated"] = alBlue,
     ["quenched"] = "green",
     ["not thirsty"] = "green",
     ["slightly thirsty"] = "yellow",
     ["moderately thirsty"] = "yellow",
     ["thirsty"] = "yellow",
-    ["very thirsty"] = "red",
-    ["parched"] = "red",
-    ["dehydrated"] = "lightred",
+    ["very thirsty"] = alRed,
+    ["parched"] = alRed,
+    ["dehydrated"] = alRed,
     ["dying of thirst"] = "DarkRed",
 }
 
@@ -32,7 +35,7 @@ local thirst_colors = {
 
 
 local hunger_colors = {
-    ["stuffed"] = "cyan",
+    ["stuffed"] = alBlue,
     ["full"] = "green",
     ["satiated"] = "green",
     ["not hungry"] = "green",
@@ -40,9 +43,9 @@ local hunger_colors = {
     ["slightly hungry"] = "yellow",
     ["hungry"] = "yellow",
     ["very hungry"] = "yellow",
-    ["famished"] = "red",
-    ["ravenous"] = "red",
-    ["starving"] = "red",
+    ["famished"] = alRed,
+    ["ravenous"] = alRed,
+    ["starving"] = alRed,
     ["dying of hunger"] = "DarkRed",
 }
 

@@ -131,8 +131,8 @@ GUI.setBoxes = function()
   GUI.Box2 = createBox("GUI.Box2", 0, "20%", "100%", "40%", GUI.Right)
   GUI.Box3 = createBox("GUI.Box3", 0, "60%", "100%", "40%", GUI.Right)
   GUI.Box4 = createBox("GUI.Box4", 0, 0, "100%", "50%", GUI.Left)
-  GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "25%", GUI.Left)
-  GUI.Box7 = createBox("GUI.Box7", 0, "75%", "100%", "25%", GUI.Left)
+  GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "30%", GUI.Left)
+  GUI.Box7 = createBox("GUI.Box7", 0, "80%", "100%", "20%", GUI.Left)
 
   GUI.Map_Container = createContainer("GUI.Map_Container", GUI.Box4)
 

@@ -1,17 +1,20 @@
 alui.status = alui.status or {}
 
+local alRed = '#830000'
+local alBlue = '#2A768C'
+
 local fatigue_levels = {
-    ["well rested"] = "cyan",
+    ["well rested"] = alBlue,
     ["barely tired"] = "green",
     ["somewhat tired"] = "green",
     ["winded"] = "green",
     ["tired"] = "green",
-    ["weary"] = "lightyellow",
-    ["haggard"] = "lightyellow",
-    ["worn out"] = "lightyellow",
-    ["exhausted"] = "lightyellow",
-    ["disoriented"] = "lightred",
-    ["faint"] = "lightred",
+    ["weary"] = "yellow",
+    ["haggard"] = "yellow",
+    ["worn out"] = "yellow",
+    ["exhausted"] = alRed,
+    ["disoriented"] = alRed,
+    ["faint"] = "darkred",
     ["system shocked"] = "darkred"
 }
 
