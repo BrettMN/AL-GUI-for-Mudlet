@@ -3,20 +3,23 @@ alui.status = alui.status or {}
 alui.health = alui.health or {}
 alui.bleeding = alui.bleeding or {}
 
-local alRed = '#830000'
-local alBlue = '#2A768C'
+local blue = GUI.Colors.blue
+local green = GUI.Colors.green
+local yellow = GUI.Colors.yellow
+local orange = GUI.Colors.orange
+local red = GUI.Colors.red
 
 local thirst_colors = {
-    ["bloated"] = alBlue,
-    ["quenched"] = "green",
-    ["not thirsty"] = "green",
-    ["slightly thirsty"] = "yellow",
-    ["moderately thirsty"] = "yellow",
-    ["thirsty"] = "yellow",
-    ["very thirsty"] = alRed,
-    ["parched"] = alRed,
-    ["dehydrated"] = alRed,
-    ["dying of thirst"] = "DarkRed",
+    ["bloated"] = blue,
+    ["quenched"] = green,
+    ["not thirsty"] = green,
+    ["slightly thirsty"] = yellow,
+    ["moderately thirsty"] = yellow,
+    ["thirsty"] = yellow,
+    ["very thirsty"] = orange,
+    ["parched"] = orange,
+    ["dehydrated"] = red,
+    ["dying of thirst"] = red,
 }
 
 
@@ -35,18 +38,18 @@ local thirst_colors = {
 
 
 local hunger_colors = {
-    ["stuffed"] = alBlue,
-    ["full"] = "green",
-    ["satiated"] = "green",
-    ["not hungry"] = "green",
-    ["peckish"] = "green",
-    ["slightly hungry"] = "yellow",
-    ["hungry"] = "yellow",
-    ["very hungry"] = "yellow",
-    ["famished"] = alRed,
-    ["ravenous"] = alRed,
-    ["starving"] = alRed,
-    ["dying of hunger"] = "DarkRed",
+    ["stuffed"] = blue,
+    ["full"] = green,
+    ["satiated"] = green,
+    ["not hungry"] = green,
+    ["peckish"] = yellow,
+    ["slightly hungry"] = yellow,
+    ["hungry"] = yellow,
+    ["very hungry"] = yellow,
+    ["famished"] = orange,
+    ["ravenous"] = orange,
+    ["starving"] = red,
+    ["dying of hunger"] = red,
 }
 
 

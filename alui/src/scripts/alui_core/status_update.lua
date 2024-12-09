@@ -1,21 +1,24 @@
 alui.status = alui.status or {}
 
-local alRed = '#830000'
-local alBlue = '#2A768C'
+local blue = GUI.Colors.blue
+local green = GUI.Colors.green
+local yellow = GUI.Colors.yellow
+local orange = GUI.Colors.orange
+local red = GUI.Colors.red
 
 local fatigue_levels = {
-    ["well rested"] = alBlue,
-    ["barely tired"] = "green",
-    ["somewhat tired"] = "green",
-    ["winded"] = "green",
-    ["tired"] = "green",
-    ["weary"] = "yellow",
-    ["haggard"] = "yellow",
-    ["worn out"] = "yellow",
-    ["exhausted"] = alRed,
-    ["disoriented"] = alRed,
-    ["faint"] = "darkred",
-    ["system shocked"] = "darkred"
+    ["well rested"] = blue,
+    ["barely tired"] = green,
+    ["somewhat tired"] = green,
+    ["winded"] = green,
+    ["tired"] = green,
+    ["weary"] = yellow,
+    ["haggard"] = yellow,
+    ["worn out"] = yellow,
+    ["exhausted"] = orange,
+    ["disoriented"] = orange,
+    ["faint"] = red,
+    ["system shocked"] = red
 }
 
 function status_update(e)

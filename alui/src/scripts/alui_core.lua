@@ -21,6 +21,14 @@ GUI.Menu          = GUI.Menu or {}
 GUI.Events        = GUI.Events or {}
 GUI.Timers        = GUI.Timers or {}
 
+GUI.Colors = {
+    blue = '#2A768C',
+    green = '#2EA652',
+    yellow = '#E1B03E',
+    orange = '#C3701C',
+    red = '#830000',
+}
+
 
 
 GUI.Events.resize = registerNamedEventHandler(profileName, 'alui.events.resize', "sysWindowResizeEvent", function()
