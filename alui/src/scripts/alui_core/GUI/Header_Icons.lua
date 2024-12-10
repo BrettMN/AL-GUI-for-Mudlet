@@ -1,6 +1,10 @@
 local Package_Root = getMudletHomeDir()
 
 
+local blue = GUI.Colors.blue
+local red = GUI.Colors.red
+
+
 GUI.Header = Geyser.HBox:new({
   name = "GUI.Header",
   x = 0,
@@ -83,6 +87,23 @@ local function createMenuItem(name, updateFunction, parent)
 end
 
 
+local function createMenuButton(name, gameCommand, parent)
+  local button = Geyser.Button:new({
+    name = "GUI.Menu" .. name,
+    width = '100%',
+    tooltip = 'Toggle ' .. name,
+
+    style = [[
+    margin: 5px;
+    boarder-radius:5px;
+    border: 1px solid white;
+    ]],
+
+  }, parent)
+  return button
+end
+
+
 
 
 
@@ -159,13 +180,6 @@ GUI.Menu.Fatigue = createMenuItem("Fatigue", function(self)
   GUI.Header)
 
 
-
-
-
-
-
-
-
 GUI.Menu.Posture = createMenuItem("Posture", function(self)
     local label = alui.status.posture
 
@@ -181,6 +195,122 @@ GUI.Menu.Posture = createMenuItem("Posture", function(self)
     self:setStyleSheet(GUI.IconCSS:getCSS())
   end,
   GUI.Header)
+
+
+
+
+
+
+GUI.Menu.Mercy = createMenuItem("Mercy", function(self)
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+
+    local showMercy = alui.status.mercy
+
+
+    -- GUI.IconCSS:set("background-image", iconPath)
+
+
+    self:echo("<center> Mercy")
+
+    if showMercy then
+      GUI.IconCSS:set("background-color", blue)
+    else
+      GUI.IconCSS:set("background-color", red)
+    end
+
+    self:setStyleSheet(GUI.IconCSS:getCSS())
+  end,
+
+
+
+  GUI.Header)
+
+
+GUI.Menu.Mercy:setClickCallback(function()
+  local gameCommand = "mercy on"
+
+  if alui.status.mercy then
+    gameCommand = "mercy off"
+  end
+
+  send(gameCommand, false)
+end)
+
+
+
+
+
+GUI.Menu.Travel = createMenuItem("Travel", function(self)
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+
+    local autoTravel = alui.status.travel
+
+
+    -- GUI.IconCSS:set("background-image", iconPath)
+    self:echo("<center>Travel")
+
+    if autoTravel then
+      GUI.IconCSS:set("background-color", blue)
+    else
+      GUI.IconCSS:set("background-color", red)
+    end
+
+    self:setStyleSheet(GUI.IconCSS:getCSS())
+  end,
+  GUI.Header)
+
+
+
+
+GUI.Menu.Travel:setClickCallback(function()
+  local gameCommand = "travel on"
+
+  if alui.status.travel then
+    gameCommand = "travel off"
+  end
+
+  send(gameCommand, false)
+end)
+
+
+
+
+GUI.Menu.CommonSense = createMenuItem("CommonSense", function(self)
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+
+    local useCommonSense = alui.status.commonsense
+
+
+    -- GUI.IconCSS:set("background-image", iconPath)
+    self:echo("<center>CommonSense")
+
+    if useCommonSense then
+      GUI.IconCSS:set("background-color", blue)
+    else
+      GUI.IconCSS:set("background-color", red)
+    end
+    self:setStyleSheet(GUI.IconCSS:getCSS())
+  end,
+  GUI.Header)
+
+
+
+GUI.Menu.CommonSense:setClickCallback(function()
+  local gameCommand = "commonsense on"
+
+  if alui.status.commonsense then
+    gameCommand = "commonsense off"
+  end
+
+  send(gameCommand, false)
+end)
+
+
+
+
+
+
+
 
 
 

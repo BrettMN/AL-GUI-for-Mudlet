@@ -28,6 +28,26 @@ function status_update(e)
 
     local status = gmcp.Char.Status
 
+
+    -- {"AddEffect":"Your mind feels very awake.","Mercy":"On","Gender":"male","CommonSense":"On","Fatigue":"somewhat tired","Race":"molok","Name":"batu","Travel":"Off","Posture":"standing","Age":"25"}
+
+
+
+    if status.Mercy then
+        alui.status.mercy = status.Mercy == "On"
+        GUI.Menu.Mercy:update()
+    end
+
+    if status.CommonSense then
+        alui.status.commonsense = status.CommonSense == "On"
+        GUI.Menu.CommonSense:update()
+    end
+
+    if status.Travel then
+        alui.status.travel = status.Travel == "On"
+        GUI.Menu.Travel:update()
+    end
+
     alui.status.fatigue = fatigue_levels[status.Fatigue]
     GUI.Menu.Fatigue:update()
 
