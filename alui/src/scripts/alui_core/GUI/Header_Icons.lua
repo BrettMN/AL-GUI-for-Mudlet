@@ -26,52 +26,6 @@ GUI.IconCSS = CSSMan.new([[
 ]])
 
 
--- local function createMenuItem(name, iconPath, label, backgroundColor, statusProperty, parent)
---   local item = Geyser.Label:new({
---     name = 'GUI.Menu.' .. name,
---   }, parent)
-
---   item.settings = {
---     name = name,
---     iconPath = iconPath,
---     label = label,
---     backgroundColor = backgroundColor,
---     statusProperty = statusProperty
---   }
-
---   item.update = function(self)
---     local settings = self.settings
---     local iconPath = settings.iconPath
---     local label = settings.label
---     local backgroundColor = settings.backgroundColor or 'none'
---     local statusProperty = settings.statusProperty
-
---     if statusProperty then
---       backgroundColor = alui.status[statusProperty] or backgroundColor
---     end
-
---     if iconPath then
---       GUI.IconCSS:set("background-image", iconPath)
---     else
---       GUI.IconCSS:set("background-image", "none")
---       if label then
---         item:echo("<center>" .. label)
---       end
---     end
---     if backgroundColor then
---       GUI.IconCSS:set("background-color", backgroundColor)
---     else
---       GUI.IconCSS:set("background-color", "rgba(0,0,0,100)")
---     end
-
---     item:setStyleSheet(GUI.IconCSS:getCSS())
---   end
-
---   item:update()
-
---   return item
--- end
-
 
 local function createMenuItem(name, updateFunction, parent)
   local item = Geyser.Label:new({
@@ -82,6 +36,8 @@ local function createMenuItem(name, updateFunction, parent)
   item.update = updateFunction
 
   item:update()
+
+  -- setLabelToolTip(item.name, name)
 
   return item
 end
@@ -228,12 +184,15 @@ GUI.Menu.Mercy = createMenuItem("Mercy", function(self)
 
 GUI.Menu.Mercy:setClickCallback(function()
   local gameCommand = "mercy on"
+  local toolTip = "Turn Mercy Off"
 
   if alui.status.mercy then
     gameCommand = "mercy off"
+    toolTip = "Turn Mercy On"
   end
 
   send(gameCommand, false)
+  setLabelToolTip("GUI.Menu.Mercy", toolTip)
 end)
 
 
@@ -264,12 +223,15 @@ GUI.Menu.Travel = createMenuItem("Travel", function(self)
 
 GUI.Menu.Travel:setClickCallback(function()
   local gameCommand = "travel on"
+  local toolTip = "Turn Travel Off"
 
   if alui.status.travel then
     gameCommand = "travel off"
+    toolTip = "Turn Travel On"
   end
 
   send(gameCommand, false)
+  setLabelToolTip("GUI.Menu.Travel", toolTip)
 end)
 
 
@@ -295,14 +257,21 @@ GUI.Menu.CommonSense = createMenuItem("CommonSense", function(self)
 
 
 
+
+
 GUI.Menu.CommonSense:setClickCallback(function()
   local gameCommand = "commonsense on"
+  local toolTip = "Turn Commonsense Off"
+
 
   if alui.status.commonsense then
     gameCommand = "commonsense off"
+    toolTip = "Turn Commonsense On"
   end
 
   send(gameCommand, false)
+  setLabelToolTip("GUI.Menu.CommonSense", toolTip)
+
 end)
 
 
