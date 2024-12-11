@@ -21,10 +21,14 @@ GUI.IconCSS = CSSMan.new([[
   border-radius: 5px;
   margin: 5px;
   qproperty-wordWrap: true;
-    background-repeat: no-repeat;
-    background-position: center;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: auto 50%;
 ]])
 
+
+-- background-repeat: no-repeat;
+--   background-position: center;
 
 
 local function createMenuItem(name, updateFunction, parent)
@@ -64,7 +68,7 @@ end
 
 
 GUI.Menu.Hunger = createMenuItem("Hunger", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/hungerIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_hunger.png)"
     local label = nil
     local backgroundColor = alui.status.hunger
 
@@ -97,7 +101,7 @@ GUI.Menu.Hunger = createMenuItem("Hunger", function(self)
 
 
 GUI.Menu.Thirst = createMenuItem("Thirst", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/thirstIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_thirst01.png)"
     local backgroundColor = alui.status.thirst
 
     GUI.IconCSS:set("background-image", iconPath)
@@ -118,7 +122,7 @@ GUI.Menu.Thirst = createMenuItem("Thirst", function(self)
 
 
 GUI.Menu.Fatigue = createMenuItem("Fatigue", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_fatigue01.png)"
 
     local backgroundColor = alui.status.fatigue
 
@@ -158,15 +162,15 @@ GUI.Menu.Posture = createMenuItem("Posture", function(self)
 
 
 GUI.Menu.Mercy = createMenuItem("Mercy", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_mercy01.png)"
 
     local showMercy = alui.status.mercy
 
 
-    -- GUI.IconCSS:set("background-image", iconPath)
+    GUI.IconCSS:set("background-image", iconPath)
 
 
-    self:echo("<center> Mercy")
+    -- self:echo("<center> Mercy")
 
     if showMercy then
       GUI.IconCSS:set("background-color", blue)
@@ -200,13 +204,13 @@ end)
 
 
 GUI.Menu.Travel = createMenuItem("Travel", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_travel01.png)"
 
     local autoTravel = alui.status.travel
 
 
-    -- GUI.IconCSS:set("background-image", iconPath)
-    self:echo("<center>Travel")
+    GUI.IconCSS:set("background-image", iconPath)
+    -- self:echo("<center>Travel")
 
     if autoTravel then
       GUI.IconCSS:set("background-color", blue)
@@ -238,13 +242,13 @@ end)
 
 
 GUI.Menu.CommonSense = createMenuItem("CommonSense", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/fatigueIcon.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_commonsense.png)"
 
     local useCommonSense = alui.status.commonsense
 
 
-    -- GUI.IconCSS:set("background-image", iconPath)
-    self:echo("<center>CommonSense")
+    GUI.IconCSS:set("background-image", iconPath)
+    -- self:echo("<center>CommonSense")
 
     if useCommonSense then
       GUI.IconCSS:set("background-color", blue)
