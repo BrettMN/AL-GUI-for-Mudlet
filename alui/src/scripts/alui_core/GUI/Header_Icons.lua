@@ -68,7 +68,7 @@ end
 
 
 GUI.Menu.Hunger = createMenuItem("Hunger", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_hunger.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_hunger.png)"
     local label = nil
     local backgroundColor = alui.status.hunger
 
@@ -101,7 +101,7 @@ GUI.Menu.Hunger = createMenuItem("Hunger", function(self)
 
 
 GUI.Menu.Thirst = createMenuItem("Thirst", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_thirst01.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_thirst01.png)"
     local backgroundColor = alui.status.thirst
 
     GUI.IconCSS:set("background-image", iconPath)
@@ -122,7 +122,7 @@ GUI.Menu.Thirst = createMenuItem("Thirst", function(self)
 
 
 GUI.Menu.Fatigue = createMenuItem("Fatigue", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_fatigue01.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_fatigue01.png)"
 
     local backgroundColor = alui.status.fatigue
 
@@ -162,7 +162,7 @@ GUI.Menu.Posture = createMenuItem("Posture", function(self)
 
 
 GUI.Menu.Mercy = createMenuItem("Mercy", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_mercy01.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_mercy01.png)"
 
     local showMercy = alui.status.mercy
 
@@ -204,7 +204,7 @@ end)
 
 
 GUI.Menu.Travel = createMenuItem("Travel", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_travel01.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_travel01.png)"
 
     local autoTravel = alui.status.travel
 
@@ -242,7 +242,7 @@ end)
 
 
 GUI.Menu.CommonSense = createMenuItem("CommonSense", function(self)
-    local iconPath = "url(" .. Package_Root .. "/alui/icons/AL_commonsense.png)"
+    local iconPath = "url(" .. Package_Root .. "/alui/icons/medium/AL_commonsense.png)"
 
     local useCommonSense = alui.status.commonsense
 
@@ -275,7 +275,6 @@ GUI.Menu.CommonSense:setClickCallback(function()
 
   send(gameCommand, false)
   setLabelToolTip("GUI.Menu.CommonSense", toolTip)
-
 end)
 
 
