@@ -140,6 +140,50 @@ for dir, vec in pairs(move_vectors) do
     end
 end
 
+local function is_horizontal_shift(shift)
+    return type(shift) == "table" and shift[3] == 0
+end
+
+local function normalize_exit_direction(dir)
+    if type(dir) == "string" then
+        local lower = string.lower(dir)
+        if move_vectors[lower] then
+            return lower
+        end
+
+        local expanded = exitmap[lower]
+        if type(expanded) == "string" and move_vectors[expanded] then
+            return expanded
+        end
+
+        local asNumber = tonumber(dir)
+        if asNumber then
+            local named = stubmapFlipped[asNumber]
+            if type(named) == "string" and move_vectors[named] then
+                return named
+            end
+        end
+        return nil
+    end
+
+    if type(dir) == "number" then
+        local named = stubmapFlipped[dir]
+        if type(named) == "string" and move_vectors[named] then
+            return named
+        end
+    end
+
+    return nil
+end
+
+local function get_shift_for_exit_key(dir)
+    local normalized = normalize_exit_direction(dir)
+    if not normalized then
+        return nil
+    end
+    return move_vectors[normalized]
+end
+
 local function stretch_area_for_new_room(areaID, coords, shift)
     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
     if table.is_empty(overlap) then
@@ -536,7 +580,10 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
 
             if areaID and rx ~= nil and ry ~= nil and rz ~= nil and type(exits) == "table" then
                 for dir, targetID in pairs(exits) do
-                    local shift = move_vectors[dir]
+                    local shift = get_shift_for_exit_key(dir)
+                    if type(targetID) == "string" then
+                        targetID = tonumber(targetID)
+                    end
                     if shift and type(targetID) == "number" and targetID > 0 then
                         local expected = { rx + shift[1], ry + shift[2], rz + shift[3] }
                         local tx, ty, tz = getRoomCoordinates(targetID)
@@ -569,6 +616,70 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
     return movedTotal
 end
 
+local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
+    if type(seedRoomID) ~= "number" or seedRoomID < 1 then
+        return 0
+    end
+
+    local areaID = getRoomArea(seedRoomID)
+    local sx, sy, sz = getRoomCoordinates(seedRoomID)
+    if not areaID or sx == nil or sy == nil or sz == nil then
+        return 0
+    end
+
+    maxMoves = maxMoves or map.configs.reconcile_deep_max_moves
+
+    local queue = { { roomID = seedRoomID, coords = { sx, sy, sz } } }
+    local visited = { [seedRoomID] = true }
+    local movedTotal = 0
+
+    while #queue > 0 and movedTotal < maxMoves do
+        local nextQueue = {}
+
+        for _, entry in ipairs(queue) do
+            local roomID = entry.roomID
+            local coords = entry.coords
+            local roomAreaID = getRoomArea(roomID) or areaID
+            local exits = getRoomExits(roomID)
+
+            if roomAreaID and type(exits) == "table" then
+                for dir, targetID in pairs(exits) do
+                    local shift = get_shift_for_exit_key(dir)
+                    if type(targetID) == "string" then
+                        targetID = tonumber(targetID)
+                    end
+                    if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
+                        local expected = { coords[1] + shift[1], coords[2] + shift[2], sz }
+                        local tx, ty, tz = getRoomCoordinates(targetID)
+
+                        if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
+                            local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
+                            move_room_to_expected_position(targetID, targetHash, roomAreaID, expected, shift)
+                            movedTotal = movedTotal + 1
+                            if movedTotal >= maxMoves then
+                                break
+                            end
+                        end
+
+                        if not visited[targetID] then
+                            visited[targetID] = true
+                            table.insert(nextQueue, { roomID = targetID, coords = expected })
+                        end
+                    end
+                end
+            end
+
+            if movedTotal >= maxMoves then
+                break
+            end
+        end
+
+        queue = nextQueue
+    end
+
+    return movedTotal
+end
+
 function map.normalize_room_layout(maxPasses, maxMoves)
     local roomID = getRoomIDbyHash(map.room_info.vnum)
     if roomID < 1 then
@@ -576,13 +687,20 @@ function map.normalize_room_layout(maxPasses, maxMoves)
         return
     end
 
-    local moved = reconcile_connected_rooms(
-        roomID,
-        maxPasses or map.configs.reconcile_deep_max_passes,
-        maxMoves or map.configs.reconcile_deep_max_moves
-    )
+    local resolvedMaxPasses = maxPasses or map.configs.reconcile_deep_max_passes
+    local resolvedMaxMoves = maxMoves or map.configs.reconcile_deep_max_moves
+    local cardinalMoved = flatten_cardinal_connected_rooms(roomID, resolvedMaxMoves)
+    local remainingMoves = math.max(resolvedMaxMoves - cardinalMoved, 0)
+    local moved = cardinalMoved
+
+    if remainingMoves > 0 then
+        moved = moved + reconcile_connected_rooms(roomID, resolvedMaxPasses, remainingMoves)
+    end
+
     updateMap()
-    echo("Layout normalization moved " .. moved .. " rooms.\n")
+    echo(
+        "Layout normalization moved " .. moved .. " rooms (" .. cardinalMoved .. " cardinal elevation fixes).\n"
+    )
 end
 
 local function trim_whitespace(value)
@@ -703,7 +821,7 @@ function map.show_help()
     echo("  map help\n")
     echo("    Show this help text.\n")
     echo("  map normalize [maxPasses maxMoves]\n")
-    echo("    Reconcile room coordinates across connected directional exits.\n")
+    echo("    Flatten cardinally connected rooms to the current room elevation, then reconcile connected exits.\n")
     echo("    Defaults: maxPasses=" ..
         map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
     echo("    Example: map normalize 5 500\n")
