@@ -112,6 +112,17 @@ end
 -- Lookup table for vertical directions (more efficient than table.contains)
 local verticalDirs = { u = true, d = true }
 
+local function apply_room_environment(roomID, terrain)
+    local target = terrain_types[terrain]
+    if not target then
+        return
+    end
+
+    if getRoomEnv(roomID) ~= target.id then
+        setRoomEnv(roomID, target.id)
+    end
+end
+
 local function make_room()
     local info = map.room_info
     local coords = { 0, 0, 0 }
@@ -157,9 +168,7 @@ local function make_room()
     end
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
-    if terrain_types[info.terrain] then
-        setRoomEnv(thisRoom, terrain_types[info.terrain].id)
-    end
+    apply_room_environment(thisRoom, info.terrain)
     for dir, id in pairs(info.exits) do
         -- need to see how special exits are represented to handle those properly here
         if type(id) == "string" then
@@ -204,6 +213,7 @@ local function handle_move()
         if rnum < 1 then
             make_room()
         else
+            apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
 
