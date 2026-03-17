@@ -8,6 +8,10 @@
         "regex": "^map\\s+normalize(?:\\s+(\\d+)\\s+(\\d+))?$"
     },
     {
+        "name": "map area-name",
+        "regex": "^map\\s+area-name(?:\\s+(.+))?$"
+    },
+    {
         "name": "map shift",
         "regex": "^map\\s+shift\\s+(\\w+)$"
     },

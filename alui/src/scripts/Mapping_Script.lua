@@ -13,6 +13,8 @@ map.configs.reconcile_max_passes = map.configs.reconcile_max_passes or 3
 map.configs.reconcile_max_moves = map.configs.reconcile_max_moves or 200
 map.configs.reconcile_deep_max_passes = map.configs.reconcile_deep_max_passes or 20
 map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5000
+map.configs.area_display_names = map.configs.area_display_names or {}
+map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
@@ -307,6 +309,43 @@ local function create_neighbors_for_current_room(currentRoomID)
     end
 end
 
+local function resolve_area_id_for_room_info(info)
+    local gmcpArea = info and info.area
+    if type(gmcpArea) ~= "string" or gmcpArea == "" then
+        return nil
+    end
+
+    local cachedAreaID = tonumber(map.configs.area_ids_by_gmcp[gmcpArea])
+    if cachedAreaID and cachedAreaID > 0 then
+        return cachedAreaID
+    end
+
+    local areas = getAreaTable()
+    local areaID = type(areas) == "table" and areas[gmcpArea] or nil
+
+    if not areaID and type(areas) == "table" then
+        for _, id in pairs(areas) do
+            local savedKey = getAreaUserData(id, "gmcp_area_key")
+            if savedKey == gmcpArea then
+                areaID = id
+                break
+            end
+        end
+    end
+
+    if not areaID then
+        areaID = addAreaName(gmcpArea)
+    end
+
+    if type(areaID) == "number" and areaID > 0 then
+        map.configs.area_ids_by_gmcp[gmcpArea] = areaID
+        setAreaUserData(areaID, "gmcp_area_key", gmcpArea)
+        return areaID
+    end
+
+    return nil
+end
+
 local function make_room()
     local info = map.room_info
     local coords = { 0, 0, 0 }
@@ -314,10 +353,10 @@ local function make_room()
     addRoom(thisRoom)
     setRoomIDbyHash(thisRoom, info.vnum)
     setRoomName(thisRoom, info.name)
-    local areas = getAreaTable()
-    local areaID = areas[info.area]
+    local areaID = resolve_area_id_for_room_info(info)
     if not areaID then
-        areaID = addAreaName(info.area)
+        echo("Cannot create room: area could not be resolved.\n")
+        return
     else
         if type(map.prev_info.vnum) == "string" then
             coords = { getRoomCoordinates(getRoomIDbyHash(map.prev_info.vnum)) }
@@ -546,6 +585,119 @@ function map.normalize_room_layout(maxPasses, maxMoves)
     echo("Layout normalization moved " .. moved .. " rooms.\n")
 end
 
+local function trim_whitespace(value)
+    if type(value) ~= "string" then
+        return ""
+    end
+    return (value:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function get_area_name_by_id(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return nil
+    end
+
+    local areas = getAreaTable()
+    if type(areas) ~= "table" then
+        return nil
+    end
+
+    for name, id in pairs(areas) do
+        if id == areaID then
+            return name
+        end
+    end
+
+    return nil
+end
+
+local function get_current_area_context()
+    if type(map.room_info.vnum) ~= "string" then
+        return nil, nil, nil
+    end
+
+    local roomID = getRoomIDbyHash(map.room_info.vnum)
+    if type(roomID) ~= "number" or roomID < 1 then
+        return nil, nil, nil
+    end
+
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return roomID, nil, nil
+    end
+
+    return roomID, areaID, get_area_name_by_id(areaID)
+end
+
+function map.set_current_area_display_name(newName)
+    local cleanName = trim_whitespace(newName)
+    local _, areaID, areaName = get_current_area_context()
+    if not areaID then
+        echo("Cannot manage area display name: current area is unknown.\n")
+        return
+    end
+
+    if cleanName == "" then
+        local effectiveName = map.get_area_display_name(areaID) or (areaName or ("#" .. areaID))
+        echo("Current area name: " .. (areaName or ("#" .. areaID)) .. "\n")
+        echo("Display area name: " .. effectiveName .. "\n")
+        return
+    end
+
+    map.configs.area_display_names[tostring(areaID)] = cleanName
+    if type(map.room_info.area) == "string" and map.room_info.area ~= "" then
+        map.configs.area_ids_by_gmcp[map.room_info.area] = areaID
+        setAreaUserData(areaID, "gmcp_area_key", map.room_info.area)
+    end
+
+    local ok, err = setAreaName(areaID, cleanName)
+    if not ok then
+        echo("Failed to rename mapper area: " .. tostring(err) .. "\n")
+        return
+    end
+
+    echo("Area display name set for '" .. (areaName or ("#" .. areaID)) .. "': " .. cleanName .. "\n")
+end
+
+function map.get_area_display_name(areaIDOrName)
+    local areaID
+
+    if type(areaIDOrName) == "number" then
+        areaID = areaIDOrName
+    elseif type(areaIDOrName) == "string" then
+        local parsed = tonumber(areaIDOrName)
+        if parsed then
+            areaID = parsed
+        else
+            local areas = getAreaTable()
+            if type(areas) == "table" then
+                areaID = areas[areaIDOrName]
+            end
+        end
+    elseif areaIDOrName == nil then
+        local _, currentAreaID = get_current_area_context()
+        areaID = currentAreaID
+    end
+
+    if type(areaID) == "number" and areaID > 0 then
+        local displayName = map.configs.area_display_names[tostring(areaID)]
+        if type(displayName) == "string" and displayName ~= "" then
+            return displayName
+        end
+
+        local fallbackAreaName = get_area_name_by_id(areaID)
+        if fallbackAreaName then
+            return fallbackAreaName
+        end
+    end
+
+    if type(areaIDOrName) == "string" and areaIDOrName ~= "" then
+        return areaIDOrName
+    end
+
+    return nil
+end
+
 function map.show_help()
     echo("Map commands:\n")
     echo("  map help\n")
@@ -555,6 +707,8 @@ function map.show_help()
     echo("    Defaults: maxPasses=" ..
         map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
     echo("    Example: map normalize 5 500\n")
+    echo("  map area-name [new name]\n")
+    echo("    Show or set a custom display name for the current area.\n")
 end
 
 local function handle_move()
@@ -572,6 +726,14 @@ local function handle_move()
         end
 
         if rnum > 0 then
+            if type(info.area) == "string" and info.area ~= "" then
+                local currentAreaID = getRoomArea(rnum)
+                if type(currentAreaID) == "number" and currentAreaID > 0 then
+                    map.configs.area_ids_by_gmcp[info.area] = currentAreaID
+                    setAreaUserData(currentAreaID, "gmcp_area_key", info.area)
+                end
+            end
+
             reconcile_current_room_position(rnum)
             apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
