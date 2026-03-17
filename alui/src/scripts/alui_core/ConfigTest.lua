@@ -36,16 +36,6 @@ local function testConfigurationSystem()
         return ALUI.ConfigCommands and type(ALUI.ConfigCommands.handle) == "function"
     end)
     
-    -- Test 3: Theme system availability
-    test("Theme System", function()
-        return ALUI.Themes and ALUI.Themes.builtIn and next(ALUI.Themes.builtIn)
-    end)
-    
-    -- Test 4: Analytics system availability
-    test("Analytics System", function()
-        return ALUI.ConfigAnalytics and type(ALUI.ConfigAnalytics.getReport) == "function"
-    end)
-    
     -- Test 5: Configuration GUI availability  
     test("Configuration GUI", function()
         return ALUI.ConfigGUI and type(ALUI.ConfigGUI.create) == "function"
@@ -122,16 +112,6 @@ local function testConfigurationSystem()
             end
         end
         return true
-    end)
-    
-    -- Test 13: Analytics data collection
-    test("Analytics Data Collection", function()
-        if ALUI.ConfigAnalytics.monitoring then
-            local report = ALUI.ConfigAnalytics.getReport()
-            return report and report.summary and type(report.summary.totalConfigChanges) == "number"
-        else
-            return true -- Not monitoring, that's fine
-        end
     end)
     
     -- Test 14: Built-in themes availability

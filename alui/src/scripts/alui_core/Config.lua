@@ -422,17 +422,6 @@ function Config.apply()
             -- ConfigGUI will handle its own updates via change handlers
         end
 
-        -- Update theme system if available
-        if ALUI.Themes and Config.get("features.enableThemes", true) then
-            -- Themes will handle updates via change handlers
-        end
-
-        -- Update analytics if available
-        if ALUI.ConfigAnalytics and Config.get("performance.enableAnalytics", true) then
-            if not ALUI.ConfigAnalytics.monitoring then
-                ALUI.ConfigAnalytics.startMonitoring()
-            end
-        end
     end
 
     -- Apply to mapping system
@@ -487,15 +476,6 @@ function Config.applyAdvancedFeatures()
     -- Debug mode integration
     if Config.get("performance.enableDebugMode", false) then
         print("ALUI Config: Debug mode enabled - verbose logging active")
-    end
-
-    -- Analytics integration
-    if Config.get("performance.enableAnalytics", true) and ALUI.ConfigAnalytics then
-        if not ALUI.ConfigAnalytics.monitoring then
-            ALUI.ConfigAnalytics.startMonitoring()
-        end
-    elseif ALUI.ConfigAnalytics and ALUI.ConfigAnalytics.monitoring then
-        ALUI.ConfigAnalytics.monitoring = false
     end
 
     -- Backup management

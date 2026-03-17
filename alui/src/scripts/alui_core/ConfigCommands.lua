@@ -180,7 +180,7 @@ if tempAlias then
         handleConfigCommand(action, category, key, value)
     end)
     
-    cecho("<green>ALUI Configuration commands loaded. Type 'config' for help.\n")
+    -- cecho("<green>ALUI Configuration commands loaded. Type 'config' for help.\n")
 else
     cecho("<red>Warning: tempAlias not available. Configuration commands not registered.\n")
 end
