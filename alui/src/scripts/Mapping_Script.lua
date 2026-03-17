@@ -181,6 +181,24 @@ local function move_room_to_expected_position(roomID, roomHash, areaID, coords, 
     setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
 end
 
+-- Returns the z-shift implied by a vertical special exit name, or nil if ambiguous.
+-- Down is checked before up so that "downstairs" doesn't accidentally match "up".
+local function guess_vertical_shift(exitName)
+    local lower = string.lower(exitName)
+    if lower == "down" or lower == "d"
+        or lower:find("downstair", 1, true)
+        or lower:find("descend", 1, true) then
+        return { 0, 0, -1 }
+    end
+    if lower == "up" or lower == "u"
+        or lower:find("upstair", 1, true)
+        or lower:find("ascend", 1, true)
+        or lower:find("climb", 1, true) then
+        return { 0, 0, 1 }
+    end
+    return nil
+end
+
 local function create_neighbors_for_current_room(currentRoomID)
     local info = map.room_info
     if type(info.exits) ~= "table" then
@@ -250,8 +268,39 @@ local function create_neighbors_for_current_room(currentRoomID)
                 if targetID > 0 then
                     addSpecialExit(currentRoomID, targetID, dir)
                 else
-                    echo("Skipping special exit '" ..
-                        dir .. "' because target room vnum '" .. targetVnum .. "' is unknown.\n")
+                    -- For special exits with a clear vertical direction, pre-create a placeholder
+                    -- room so the player can enter it without triggering an overlapping make_room().
+                    local guessed = guess_vertical_shift(dir)
+                    if guessed then
+                        local targetCoords = { cx + guessed[1], cy + guessed[2], cz + guessed[3] }
+                        local overlap = getRoomsByPosition(areaID, targetCoords[1], targetCoords[2], targetCoords[3])
+                        local sameHashAtTarget = false
+                        if not table.is_empty(overlap) then
+                            for _, overlapID in pairs(overlap) do
+                                local overlapHash = getRoomHashByID and getRoomHashByID(overlapID)
+                                if overlapHash == targetVnum then
+                                    sameHashAtTarget = true
+                                    targetID = overlapID
+                                    break
+                                end
+                            end
+                        end
+                        if not sameHashAtTarget then
+                            if not table.is_empty(overlap) then
+                                stretch_area_for_new_room(areaID, targetCoords, guessed)
+                            end
+                            targetID = createRoomID()
+                            addRoom(targetID)
+                            setRoomIDbyHash(targetID, targetVnum)
+                            setRoomName(targetID, targetVnum)
+                            setRoomArea(targetID, areaID)
+                            setRoomCoordinates(targetID, targetCoords[1], targetCoords[2], targetCoords[3])
+                        end
+                        addSpecialExit(currentRoomID, targetID, dir)
+                    else
+                        echo("Skipping special exit '" ..
+                            dir .. "' because target room vnum '" .. targetVnum .. "' is unknown.\n")
+                    end
                 end
             end
         end
@@ -277,6 +326,55 @@ local function make_room()
                 for k, v in pairs(info.exits) do
                     if v == map.prev_info.vnum and move_vectors[k] then
                         shift = move_vectors[k]
+                        break
+                    end
+                end
+            end
+            -- Fallback 1: prev room had a directional exit leading to this room.
+            if shift[1] == 0 and shift[2] == 0 and shift[3] == 0 then
+                if type(map.prev_info.exits) == "table" then
+                    for k, v in pairs(map.prev_info.exits) do
+                        if v == info.vnum and move_vectors[k] then
+                            local rev = reverse_move_vectors[k]
+                            if rev then shift = move_vectors[rev] end
+                            break
+                        end
+                    end
+                end
+            end
+            -- Fallback 2: infer vertical offset from the special exit name.
+            -- The forward exit (prev→current) implies shift = negated guess.
+            -- The back exit (current→prev) implies shift = guess directly.
+            if shift[1] == 0 and shift[2] == 0 and shift[3] == 0 then
+                if type(map.prev_info.exits) == "table" then
+                    for k, v in pairs(map.prev_info.exits) do
+                        if v == info.vnum and not move_vectors[k] then
+                            local g = guess_vertical_shift(k)
+                            if g then shift = { -g[1], -g[2], -g[3] } end
+                            break
+                        end
+                    end
+                end
+                if shift[1] == 0 and shift[2] == 0 and shift[3] == 0 then
+                    if type(info.exits) == "table" then
+                        for k, v in pairs(info.exits) do
+                            if v == map.prev_info.vnum and not move_vectors[k] then
+                                local g = guess_vertical_shift(k)
+                                if g then shift = g end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            -- Fallback 3: no directional clue at all — probe adjacent positions
+            -- (z+1, z-1, then cardinal neighbours) to avoid placing on top of prev room.
+            if shift[1] == 0 and shift[2] == 0 and shift[3] == 0 then
+                local probes = { { 0, 0, 1 }, { 0, 0, -1 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 } }
+                for _, probe in ipairs(probes) do
+                    local testCoords = { coords[1] + probe[1], coords[2] + probe[2], coords[3] + probe[3] }
+                    if table.is_empty(getRoomsByPosition(areaID, testCoords[1], testCoords[2], testCoords[3])) then
+                        shift = { -probe[1], -probe[2], -probe[3] }
                         break
                     end
                 end
