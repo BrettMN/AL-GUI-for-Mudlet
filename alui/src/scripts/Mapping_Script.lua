@@ -56,13 +56,13 @@ local terrain_types = {
 -- list of possible movement directions and appropriate coordinate changes
 local move_vectors = {
     north = { 0, 1, 0 },
-    south = { 0, -1, 0 },
+    northeast = { 1, 1, 0 },
     east = { 1, 0, 0 },
+    southeast = { 1, -1, 0 },
+    south = { 0, -1, 0 },
+    southwest = { -1, -1, 0 },
     west = { -1, 0, 0 },
     northwest = { -1, 1, 0 },
-    northeast = { 1, 1, 0 },
-    southwest = { -1, -1, 0 },
-    southeast = { 1, -1, 0 },
     up = { 0, 0, 1 },
     down = { 0, 0, -1 }
 }
@@ -70,12 +70,12 @@ local move_vectors = {
 local exitmap = {
     n = 'north',
     ne = 'northeast',
-    nw = 'northwest',
     e = 'east',
-    w = 'west',
-    s = 'south',
     se = 'southeast',
+    s = 'south',
     sw = 'southwest',
+    w = 'west',
+    nw = 'northwest',
     u = 'up',
     d = 'down',
     ["in"] = 'in',
@@ -127,7 +127,7 @@ local function make_room()
         if type(map.prev_info.vnum) == "string" then
             coords = { getRoomCoordinates(getRoomIDbyHash(map.prev_info.vnum)) }
             local shift = { 0, 0, 0 }
-            if type(info.exists) then
+            if type(info.exits) == "table" then
                 for k, v in pairs(info.exits) do
                     if v == map.prev_info.vnum and move_vectors[k] then
                         shift = move_vectors[k]
@@ -388,9 +388,10 @@ function map.eventHandler(event, ...)
         end
         handle_move()
     elseif event == "shiftRoom" then
-        local dir = exitmap[arg[1]] or arg[1]
-        if not table.contains(exits, dir) then
-            echo("Error: Invalid direction '" .. dir .. "'.")
+        local args = { ... }
+        local dir = exitmap[args[1]] or args[1]
+        if not move_vectors[dir] then
+            echo("Error: Invalid direction '" .. tostring(args[1]) .. "'.")
         else
             shift_room(dir)
         end
