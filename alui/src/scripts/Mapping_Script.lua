@@ -123,6 +123,106 @@ local function apply_room_environment(roomID, terrain)
     end
 end
 
+local reverse_move_vectors = {}
+for dir, vec in pairs(move_vectors) do
+    for rdir, rvec in pairs(move_vectors) do
+        if vec[1] == -rvec[1] and vec[2] == -rvec[2] and vec[3] == -rvec[3] then
+            reverse_move_vectors[dir] = rdir
+            break
+        end
+    end
+end
+
+local function stretch_area_for_new_room(areaID, coords, shift)
+    local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+    if table.is_empty(overlap) then
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    local rcoords
+    for _, id in ipairs(rooms) do
+        rcoords = { getRoomCoordinates(id) }
+        for n = 1, 3 do
+            if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
+                rcoords[n] = rcoords[n] - shift[n]
+            end
+        end
+        setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
+    end
+end
+
+local function create_neighbors_for_current_room(currentRoomID)
+    local info = map.room_info
+    if type(info.exits) ~= "table" then
+        return
+    end
+
+    local areaID = getRoomArea(currentRoomID)
+    if not areaID then
+        return
+    end
+
+    local cx, cy, cz = getRoomCoordinates(currentRoomID)
+    if cx == nil or cy == nil or cz == nil then
+        return
+    end
+
+    for dir, targetVnum in pairs(info.exits) do
+        if type(targetVnum) == "string" then
+            if move_vectors[dir] then
+                local targetID = getRoomIDbyHash(targetVnum)
+                if targetID < 1 then
+                    local shift = move_vectors[dir]
+                    local coords = { cx + shift[1], cy + shift[2], cz + shift[3] }
+                    local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+                    local sameHashAtTarget = false
+
+                    if not table.is_empty(overlap) then
+                        for _, overlapID in pairs(overlap) do
+                            local overlapHash = getRoomHashByID and getRoomHashByID(overlapID)
+                            if overlapHash == targetVnum then
+                                sameHashAtTarget = true
+                                targetID = overlapID
+                                break
+                            end
+                        end
+                    end
+
+                    if not sameHashAtTarget and not table.is_empty(overlap) then
+                        stretch_area_for_new_room(areaID, coords, shift)
+                    end
+
+                    if targetID < 1 then
+                        targetID = createRoomID()
+                        addRoom(targetID)
+                        setRoomIDbyHash(targetID, targetVnum)
+                        setRoomName(targetID, targetVnum)
+                        setRoomArea(targetID, areaID)
+                        setRoomCoordinates(targetID, coords[1], coords[2], coords[3])
+                    end
+                end
+
+                setExitStub(currentRoomID, dir, true)
+                if targetID > 0 then
+                    local reverseDir = reverse_move_vectors[dir]
+                    if reverseDir then
+                        setExitStub(targetID, reverseDir, true)
+                    end
+                    connectExitStub(currentRoomID, targetID, dir)
+                end
+            else
+                local targetID = getRoomIDbyHash(targetVnum)
+                if targetID > 0 then
+                    addSpecialExit(currentRoomID, targetID, dir)
+                else
+                    echo("Skipping special exit '" .. dir .. "' because target room vnum '" .. targetVnum .. "' is unknown.\n")
+                end
+            end
+        end
+    end
+end
+
 local function make_room()
     local info = map.room_info
     local coords = { 0, 0, 0 }
@@ -212,7 +312,10 @@ local function handle_move()
         echo("Current room ID: " .. rnum .. "\n")
         if rnum < 1 then
             make_room()
-        else
+            rnum = getRoomIDbyHash(info.vnum)
+        end
+
+        if rnum > 0 then
             apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
@@ -240,6 +343,8 @@ local function handle_move()
                     end
                 end
             end
+
+            create_neighbors_for_current_room(rnum)
             centerview(rnum)
         end
     end
