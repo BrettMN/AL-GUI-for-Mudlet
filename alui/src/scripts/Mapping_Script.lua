@@ -25,15 +25,15 @@ local terrain_types = {
     -- each id value must be unique, terrain types not listed here will use mapper default color
     -- not used if you define these in a map XML file
     ["Inside"] = { id = 1, r = 255, g = 0, b = 0 },
-    ["ocean"] = { id = 20, r = 0, g = 0, b = 128 },          -- 'navy'
     ["plains"] = { id = 19, r = 0, g = 255, b = 0 },
     ["light forest"] = { id = 17, r = 34, g = 139, b = 34 }, -- 'forestgreen'
     ["dense forest"] = { id = 18, r = 0, g = 100, b = 0 },   -- 'darkgreen'
     ["hills"] = { id = 21, r = 218, g = 165, b = 32 },       -- 'goldenrod'
     ["mountains"] = { id = 22, r = 160, g = 82, b = 45 },    -- 'sienna'
     ["lake"] = { id = 23, r = 0, g = 25, b = 167 },
-    ["swamp"] = { id = 24, r = 128, g = 0, b = 128 },        -- 'purple'
-    ["desert"] = { id = 25, r = 240, g = 230, b = 140 },     -- 'khaki'
+    ["under the lake"] = { id = 23, r = 0, g = 25, b = 167 },
+    ["swamp"] = { id = 24, r = 128, g = 0, b = 128 },    -- 'purple'
+    ["desert"] = { id = 25, r = 240, g = 230, b = 140 }, -- 'khaki'
     ["min river"] = { id = 26, r = 0, g = 25, b = 167 },
     ["river"] = { id = 27, r = 0, g = 25, b = 167 },
     ["sw river"] = { id = 28, r = 0, g = 25, b = 167 },
@@ -45,7 +45,9 @@ local terrain_types = {
     ["se river"] = { id = 34, r = 0, g = 25, b = 167 },
     ["s river"] = { id = 35, r = 0, g = 25, b = 167 },
     ["max river"] = { id = 36, r = 0, g = 25, b = 167 },
-    ["under ocean"] = { id = 37, r = 0, g = 0, b = 128 },
+    ["ocean"] = { id = 37, r = 0, g = 0, b = 128 },           -- 'navy'
+    ["under ocean"] = { id = 37, r = 0, g = 0, b = 128 },     -- 'navy'
+    ["under the ocean"] = { id = 37, r = 0, g = 0, b = 128 }, -- 'navy'
     ["under lake"] = { id = 38, r = 0, g = 25, b = 167 },
     ["under river"] = { id = 39, r = 0, g = 25, b = 167 },
     ["sky"] = { id = 40, r = 135, g = 206, b = 235 },    -- 'skyblue'
@@ -248,7 +250,8 @@ local function create_neighbors_for_current_room(currentRoomID)
                 if targetID > 0 then
                     addSpecialExit(currentRoomID, targetID, dir)
                 else
-                    echo("Skipping special exit '" .. dir .. "' because target room vnum '" .. targetVnum .. "' is unknown.\n")
+                    echo("Skipping special exit '" ..
+                        dir .. "' because target room vnum '" .. targetVnum .. "' is unknown.\n")
                 end
             end
         end
@@ -451,7 +454,8 @@ function map.show_help()
     echo("    Show this help text.\n")
     echo("  map normalize [maxPasses maxMoves]\n")
     echo("    Reconcile room coordinates across connected directional exits.\n")
-    echo("    Defaults: maxPasses=" .. map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
+    echo("    Defaults: maxPasses=" ..
+        map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
     echo("    Example: map normalize 5 500\n")
 end
 
