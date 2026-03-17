@@ -1,0 +1,17 @@
+{
+    "vnum": "da8dc80edc438c55506934e2c8eff79e",
+    "terrain": "plains",
+    "exits": {
+        "southeast": "1db5474e63fa461acb2b50e4cc405921",
+        "west": "2e50bda0761c18dfdbeae45ebd660235",
+        "southwest": "c0413e8d62cbf2a805d0c913d4399d1f",
+        "northeast": "404ed0216ea0af9a3b12c85a46b8ea2d",
+        "east": "d16063cf2bc9618db999af75c4c7a867",
+        "north": "0dd87c891045318f703d9e0d426b4fa1",
+        "northwest": "acdcb0fce628ed0d19a94c1f62f6a71e",
+        "south": "d1139bd93a099e9dbe0417979884bfa0",
+        "up": "ce7326054c08b2ad5be88c9bcddb296e"
+    },
+    "name": "Grassy plains",
+    "area": "190f8fc81b3668861a929ac4079b8bf3"
+}

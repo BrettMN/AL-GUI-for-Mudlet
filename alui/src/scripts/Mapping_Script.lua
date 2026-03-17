@@ -200,15 +200,29 @@ local function handle_move()
 
     if type(info.vnum) == "string" then
         local rnum = getRoomIDbyHash(info.vnum)
+        echo("Current room ID: " .. rnum .. "\n")
         if rnum < 1 then
             make_room()
         else
+            -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
+            echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
+
             local stubs = getExitStubs1(rnum)
+
+            echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
+
             if stubs then
                 for _, n in ipairs(stubs) do
                     local dir = stubmapFlipped[n]
                     if info.exits and type(info.exits[dir]) == "string" then
-                        local id = getRoomIDbyHash(info.exits[dir])
+                        local targetVnum = info.exits[dir]
+
+                        local id         = getRoomIDbyHash(targetVnum)
+
+
+                        echo("Processing exit stub in direction '" ..
+                            dir .. "' with target room ID: " .. id .. " and a target vnum: " .. targetVnum .. "\n")
+
                         -- need to see how special exits are represented to handle those properly here
                         if (id > 0) and getRoomName(id) then
                             connectExitStub(rnum, id, dir)
@@ -356,15 +370,8 @@ end
 
 function map.eventHandler(event, ...)
     if event == "gmcp.Room.Info" then
-        -- fix incorrect gmcp sending
-        local t = {}
-        if type(gmcp.Room.Info) == "table" then
-            for k, v in pairs(gmcp.Room.Info) do
-                t[k:lower()] = v
-            end
-        end
-        gmcp.Room.Info = t
-        --end fix
+        echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
+        echo("Map Room Info:\n" .. yajl.to_string(map.room_info) .. "\n")
 
         map.prev_info = map.room_info
         map.room_info = {
