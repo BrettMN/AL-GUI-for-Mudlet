@@ -852,6 +852,15 @@ local function handle_move()
                 end
             end
 
+            -- Check if room needs to be moved to its correct area
+            -- Placeholder rooms created as exits may be in a different area than their actual area
+            local correctAreaID = resolve_area_id_for_room_info(info)
+            local currentAreaID = getRoomArea(rnum)
+            if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
+                echo("Moving room " .. rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                setRoomArea(rnum, correctAreaID)
+            end
+
             reconcile_current_room_position(rnum)
             apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
