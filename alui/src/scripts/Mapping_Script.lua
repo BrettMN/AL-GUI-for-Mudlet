@@ -381,14 +381,13 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
     maxMoves = maxMoves or map.configs.reconcile_max_moves
 
     local queue = { seedRoomID }
+    local visited = { [seedRoomID] = true }
     local movedTotal = 0
     local pass = 0
 
     while #queue > 0 and pass < maxPasses and movedTotal < maxMoves do
         pass = pass + 1
-        local movedThisPass = 0
         local nextQueue = {}
-        local nextSet = {}
 
         for _, roomID in ipairs(queue) do
             local areaID = getRoomArea(roomID)
@@ -405,15 +404,14 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                         if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                             local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
                             move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
-                            movedThisPass = movedThisPass + 1
                             movedTotal = movedTotal + 1
                             if movedTotal >= maxMoves then
                                 break
                             end
                         end
 
-                        if not nextSet[targetID] then
-                            nextSet[targetID] = true
+                        if not visited[targetID] then
+                            visited[targetID] = true
                             table.insert(nextQueue, targetID)
                         end
                     end
@@ -423,10 +421,6 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
             if movedTotal >= maxMoves then
                 break
             end
-        end
-
-        if movedThisPass == 0 then
-            break
         end
 
         queue = nextQueue
