@@ -1,0 +1,18 @@
+[
+    {
+        "name": "map help",
+        "regex": "^map\\s+help$"
+    },
+    {
+        "name": "map normalize",
+        "regex": "^map\\s+normalize(?:\\s+(\\d+)\\s+(\\d+))?$"
+    },
+    {
+        "name": "map shift",
+        "regex": "^map\\s+shift\\s+(\\w+)$"
+    },
+    {
+        "name": "map make-room",
+        "regex": "^map\\s+make-room$"
+    }
+]

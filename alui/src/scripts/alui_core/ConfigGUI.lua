@@ -19,12 +19,12 @@ ConfigGUI.dirty = false
 
 -- Configuration categories for the GUI
 ConfigGUI.categories = {
-    {id = "ui", name = "Interface", icon = "🎨", description = "Layout, sizing, and visual elements"},
-    {id = "colors", name = "Colors", icon = "🌈", description = "Color themes and status indicators"},
-    {id = "mapping", name = "Mapping", icon = "🗺️", description = "Map integration and navigation"},
-    {id = "chat", name = "Chat", icon = "💬", description = "Chat capture and display settings"},
-    {id = "performance", name = "Performance", icon = "⚡", description = "Timing, caching, and optimization"},
-    {id = "features", name = "Features", icon = "🔧", description = "Enable/disable functionality"}
+    { id = "ui", name = "Interface", icon = "🎨", description = "Layout, sizing, and visual elements" },
+    { id = "colors", name = "Colors", icon = "🌈", description = "Color themes and status indicators" },
+    { id = "mapping", name = "Mapping", icon = "🗺️", description = "Map integration and navigation" },
+    { id = "chat", name = "Chat", icon = "💬", description = "Chat capture and display settings" },
+    { id = "performance", name = "Performance", icon = "⚡", description = "Timing, caching, and optimization" },
+    { id = "features", name = "Features", icon = "🔧", description = "Enable/disable functionality" }
 }
 
 -- GUI Styling
@@ -36,7 +36,7 @@ ConfigGUI.styles = {
         border = "2px solid #444444",
         borderRadius = "8px"
     },
-    
+
     sidebar = {
         width = 200,
         background = "rgba(40, 40, 40, 255)",
@@ -44,12 +44,12 @@ ConfigGUI.styles = {
         selectedColor = "#3366CC",
         hoverColor = "#555555"
     },
-    
+
     content = {
         background = "rgba(30, 30, 30, 255)",
         padding = 20
     },
-    
+
     input = {
         height = 30,
         background = "rgba(50, 50, 50, 255)",
@@ -57,7 +57,7 @@ ConfigGUI.styles = {
         color = "white",
         padding = "5px"
     },
-    
+
     button = {
         height = 32,
         background = "#3366CC",
@@ -74,19 +74,20 @@ function ConfigGUI.create()
     if ConfigGUI.panel then
         ConfigGUI.destroy()
     end
-    
+
     -- Main panel container
     ConfigGUI.panel = Geyser.UserWindow:new({
         name = "ALUI_ConfigPanel",
         title = "ALUI Configuration",
-        x = "center-400", y = "center-300",
+        x = "center-400",
+        y = "center-300",
         width = ConfigGUI.styles.panel.width,
         height = ConfigGUI.styles.panel.height,
         color = "black",
         docked = false,
         autoSave = false
     })
-    
+
     -- Panel background styling
     ConfigGUI.panel:setStyleSheet(string.format([[
         QWidget {
@@ -97,46 +98,50 @@ function ConfigGUI.create()
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 12px;
         }
-    ]], ConfigGUI.styles.panel.background, 
+    ]], ConfigGUI.styles.panel.background,
         ConfigGUI.styles.panel.border,
         ConfigGUI.styles.panel.borderRadius))
-    
+
     -- Create sidebar for categories
     ConfigGUI.sidebar = Geyser.VBox:new({
         name = "ALUI_ConfigSidebar",
-        x = 0, y = 0,
+        x = 0,
+        y = 0,
         width = ConfigGUI.styles.sidebar.width,
         height = "100%"
     }, ConfigGUI.panel)
-    
+
     ConfigGUI.sidebar:setStyleSheet(string.format([[
         QWidget { background: %s; }
     ]], ConfigGUI.styles.sidebar.background))
-    
+
     -- Create content area
     ConfigGUI.content = Geyser.ScrollBox:new({
         name = "ALUI_ConfigContent",
-        x = ConfigGUI.styles.sidebar.width, y = 0,
+        x = ConfigGUI.styles.sidebar.width,
+        y = 0,
         width = ConfigGUI.styles.panel.width - ConfigGUI.styles.sidebar.width,
         height = "100%"
     }, ConfigGUI.panel)
-    
+
     ConfigGUI.content:setStyleSheet(string.format([[
-        QWidget { 
-            background: %s; 
+        QWidget {
+            background: %s;
             padding: %dpx;
         }
     ]], ConfigGUI.styles.content.background, ConfigGUI.styles.content.padding))
-    
+
     -- Create category buttons
     ConfigGUI.categoryButtons = {}
     for i, category in ipairs(ConfigGUI.categories) do
         local button = Geyser.Label:new({
             name = "ALUI_CategoryBtn_" .. category.id,
-            x = 0, y = (i-1) * ConfigGUI.styles.sidebar.itemHeight,
-            width = "100%", height = ConfigGUI.styles.sidebar.itemHeight
+            x = 0,
+            y = (i - 1) * ConfigGUI.styles.sidebar.itemHeight,
+            width = "100%",
+            height = ConfigGUI.styles.sidebar.itemHeight
         }, ConfigGUI.sidebar)
-        
+
         button:setStyleSheet(string.format([[
             QLabel {
                 background: transparent;
@@ -149,7 +154,7 @@ function ConfigGUI.create()
                 background: %s;
             }
         ]], ConfigGUI.styles.sidebar.hoverColor))
-        
+
         button:echo(string.format([[
             <center>
                 <span style="font-size: 18px;">%s</span><br/>
@@ -157,21 +162,23 @@ function ConfigGUI.create()
                 <span style="font-size: 10px; color: #CCCCCC;">%s</span>
             </center>
         ]], category.icon, category.name, category.description))
-        
+
         button:setClickCallback(function()
             ConfigGUI.selectCategory(category.id)
         end)
-        
+
         ConfigGUI.categoryButtons[category.id] = button
     end
-    
+
     -- Create bottom toolbar
     ConfigGUI.toolbar = Geyser.HBox:new({
         name = "ALUI_ConfigToolbar",
-        x = 0, y = ConfigGUI.styles.panel.height - 50,
-        width = "100%", height = 50
+        x = 0,
+        y = ConfigGUI.styles.panel.height - 50,
+        width = "100%",
+        height = 50
     }, ConfigGUI.panel)
-    
+
     ConfigGUI.toolbar:setStyleSheet([[
         QWidget {
             background: rgba(40, 40, 40, 255);
@@ -179,13 +186,14 @@ function ConfigGUI.create()
             padding: 10px;
         }
     ]])
-    
+
     -- Toolbar buttons
     ConfigGUI.saveBtn = Geyser.Label:new({
         name = "ALUI_SaveBtn",
-        width = 80, height = 30
+        width = 80,
+        height = 30
     }, ConfigGUI.toolbar)
-    
+
     ConfigGUI.saveBtn:setStyleSheet(string.format([[
         QLabel {
             background: %s;
@@ -204,18 +212,19 @@ function ConfigGUI.create()
         ConfigGUI.styles.button.borderRadius,
         ConfigGUI.styles.button.padding,
         ConfigGUI.styles.button.hoverBackground))
-    
+
     ConfigGUI.saveBtn:echo("<center>Save</center>")
     ConfigGUI.saveBtn:setClickCallback(function()
         ConfigGUI.save()
     end)
-    
+
     -- Reset button
     ConfigGUI.resetBtn = Geyser.Label:new({
         name = "ALUI_ResetBtn",
-        width = 80, height = 30
+        width = 80,
+        height = 30
     }, ConfigGUI.toolbar)
-    
+
     ConfigGUI.resetBtn:setStyleSheet([[
         QLabel {
             background: #CC3333;
@@ -229,18 +238,19 @@ function ConfigGUI.create()
             background: #DD4444;
         }
     ]])
-    
+
     ConfigGUI.resetBtn:echo("<center>Reset</center>")
     ConfigGUI.resetBtn:setClickCallback(function()
         ConfigGUI.resetCategory()
     end)
-    
+
     -- Close button
     ConfigGUI.closeBtn = Geyser.Label:new({
         name = "ALUI_CloseBtn",
-        width = 80, height = 30
+        width = 80,
+        height = 30
     }, ConfigGUI.toolbar)
-    
+
     ConfigGUI.closeBtn:setStyleSheet([[
         QLabel {
             background: #666666;
@@ -254,24 +264,24 @@ function ConfigGUI.create()
             background: #777777;
         }
     ]])
-    
+
     ConfigGUI.closeBtn:echo("<center>Close</center>")
     ConfigGUI.closeBtn:setClickCallback(function()
         ConfigGUI.close()
     end)
-    
+
     ConfigGUI.isOpen = true
-    
+
     -- Load initial category
     ConfigGUI.selectCategory("ui")
-    
+
     cecho("<green>ALUI Configuration Panel opened\n")
 end
 
 -- Select and display a configuration category
 function ConfigGUI.selectCategory(categoryId)
     ConfigGUI.currentCategory = categoryId
-    
+
     -- Update sidebar selection
     for id, button in pairs(ConfigGUI.categoryButtons) do
         if id == categoryId then
@@ -299,7 +309,7 @@ function ConfigGUI.selectCategory(categoryId)
             ]], ConfigGUI.styles.sidebar.hoverColor))
         end
     end
-    
+
     -- Clear and rebuild content area
     ConfigGUI.buildCategoryContent(categoryId)
 end
@@ -307,15 +317,16 @@ end
 -- Build content for a specific category
 function ConfigGUI.buildCategoryContent(categoryId)
     if not ConfigGUI.content then return end
-    
+
     ConfigGUI.content:clear()
-    
+
     local categoryConfig = Config.current[categoryId]
     if not categoryConfig then
-        ConfigGUI.content:echo("<center><span style='color: #FF6666;'>Category not found: " .. categoryId .. "</span></center>")
+        ConfigGUI.content:echo("<center><span style='color: #FF6666;'>Category not found: " ..
+        categoryId .. "</span></center>")
         return
     end
-    
+
     -- Category title
     local categoryInfo = nil
     for _, cat in ipairs(ConfigGUI.categories) do
@@ -324,7 +335,7 @@ function ConfigGUI.buildCategoryContent(categoryId)
             break
         end
     end
-    
+
     if categoryInfo then
         ConfigGUI.content:echo(string.format([[
             <div style="margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #555555;">
@@ -333,7 +344,7 @@ function ConfigGUI.buildCategoryContent(categoryId)
             </div>
         ]], categoryInfo.icon, categoryInfo.name, categoryInfo.description))
     end
-    
+
     -- Build settings for this category
     ConfigGUI.buildSettingsSection(categoryConfig, categoryId)
 end
@@ -342,7 +353,7 @@ end
 function ConfigGUI.buildSettingsSection(config, path)
     for key, value in pairs(config) do
         local fullPath = path .. "." .. key
-        
+
         if type(value) == "table" then
             -- Nested category - create collapsible section
             ConfigGUI.content:echo(string.format([[
@@ -350,7 +361,7 @@ function ConfigGUI.buildSettingsSection(config, path)
                     <h3 style="color: #66CCFF; margin: 0 0 10px 0;">%s</h3>
                 </div>
             ]], key:gsub("(%l)(%u)", "%1 %2"):gsub("^%l", string.upper)))
-            
+
             ConfigGUI.buildSettingsSection(value, fullPath)
         else
             -- Individual setting - create appropriate control
@@ -364,13 +375,13 @@ function ConfigGUI.buildSettingControl(key, value, fullPath)
     local displayName = key:gsub("(%l)(%u)", "%1 %2"):gsub("^%l", string.upper)
     local valueType = type(value)
     local controlHtml = ""
-    
+
     if valueType == "boolean" then
         local checked = value and "checked" or ""
         controlHtml = string.format([[
             <div style="margin: 10px 0; padding: 10px; background: rgba(50,50,50,100); border-radius: 4px;">
                 <label style="color: white; font-weight: bold;">%s</label><br/>
-                <input type="checkbox" %s onchange="ConfigGUI.updateSetting('%s', this.checked)"/> 
+                <input type="checkbox" %s onchange="ConfigGUI.updateSetting('%s', this.checked)"/>
                 <span style="color: #CCCCCC;">Enable/disable this feature</span>
             </div>
         ]], displayName, checked, fullPath)
@@ -378,7 +389,7 @@ function ConfigGUI.buildSettingControl(key, value, fullPath)
         controlHtml = string.format([[
             <div style="margin: 10px 0; padding: 10px; background: rgba(50,50,50,100); border-radius: 4px;">
                 <label style="color: white; font-weight: bold;">%s</label><br/>
-                <input type="number" value="%s" style="width: 200px; padding: 5px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;" 
+                <input type="number" value="%s" style="width: 200px; padding: 5px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;"
                        onchange="ConfigGUI.updateSetting('%s', parseFloat(this.value))"/>
                 <span style="color: #CCCCCC; margin-left: 10px;">Current: %s</span>
             </div>
@@ -389,9 +400,9 @@ function ConfigGUI.buildSettingControl(key, value, fullPath)
             controlHtml = string.format([[
                 <div style="margin: 10px 0; padding: 10px; background: rgba(50,50,50,100); border-radius: 4px;">
                     <label style="color: white; font-weight: bold;">%s</label><br/>
-                    <input type="color" value="%s" style="width: 60px; height: 30px; background: none; border: 1px solid #666;" 
+                    <input type="color" value="%s" style="width: 60px; height: 30px; background: none; border: 1px solid #666;"
                            onchange="ConfigGUI.updateSetting('%s', this.value)"/>
-                    <input type="text" value="%s" style="width: 130px; padding: 5px; margin-left: 10px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;" 
+                    <input type="text" value="%s" style="width: 130px; padding: 5px; margin-left: 10px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;"
                            onchange="ConfigGUI.updateSetting('%s', this.value)"/>
                     <div style="width: 30px; height: 30px; background: %s; border: 1px solid #666; display: inline-block; margin-left: 10px; vertical-align: top;"></div>
                 </div>
@@ -401,14 +412,14 @@ function ConfigGUI.buildSettingControl(key, value, fullPath)
             controlHtml = string.format([[
                 <div style="margin: 10px 0; padding: 10px; background: rgba(50,50,50,100); border-radius: 4px;">
                     <label style="color: white; font-weight: bold;">%s</label><br/>
-                    <input type="text" value="%s" style="width: 300px; padding: 5px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;" 
+                    <input type="text" value="%s" style="width: 300px; padding: 5px; background: rgba(70,70,70,255); border: 1px solid #666; color: white;"
                            onchange="ConfigGUI.updateSetting('%s', this.value)"/>
                     <span style="color: #CCCCCC; margin-left: 10px;">Text value</span>
                 </div>
             ]], displayName, value, fullPath)
         end
     end
-    
+
     ConfigGUI.content:echo(controlHtml)
 end
 
@@ -417,9 +428,9 @@ function ConfigGUI.updateSetting(path, value)
     local success = Config.set(path, value)
     if success then
         ConfigGUI.dirty = true
-        cecho(f"<green>Updated {path} = {value}\n")
+        cecho(f "<green>Updated {path} = {value}\n")
     else
-        cecho(f"<red>Failed to update {path}\n")
+        cecho(f "<red>Failed to update {path}\n")
     end
 end
 
@@ -435,7 +446,7 @@ function ConfigGUI.resetCategory()
     Config.reset(ConfigGUI.currentCategory)
     ConfigGUI.selectCategory(ConfigGUI.currentCategory) -- Refresh display
     ConfigGUI.dirty = true
-    cecho(f"<yellow>Reset {ConfigGUI.currentCategory} category to defaults\n")
+    cecho(f "<yellow>Reset {ConfigGUI.currentCategory} category to defaults\n")
 end
 
 -- Close the configuration panel
@@ -443,7 +454,7 @@ function ConfigGUI.close()
     if ConfigGUI.dirty then
         cecho("<yellow>Warning: You have unsaved changes. Use 'config save' to persist changes.\n")
     end
-    
+
     ConfigGUI.destroy()
 end
 
@@ -453,10 +464,10 @@ function ConfigGUI.destroy()
         ConfigGUI.panel:hide()
         ConfigGUI.panel = nil
     end
-    
+
     ConfigGUI.isOpen = false
     ConfigGUI.dirty = false
-    
+
     cecho("<dim_grey>ALUI Configuration Panel closed\n")
 end
 
@@ -467,17 +478,6 @@ function ConfigGUI.toggle()
     else
         ConfigGUI.create()
     end
-end
-
--- Register GUI toggle command
-if tempAlias then
-    if ALUI.ConfigGUIAlias then
-        killAlias(ALUI.ConfigGUIAlias)
-    end
-    
-    ALUI.ConfigGUIAlias = tempAlias("^config gui$", function()
-        ConfigGUI.toggle()
-    end)
 end
 
 return ConfigGUI

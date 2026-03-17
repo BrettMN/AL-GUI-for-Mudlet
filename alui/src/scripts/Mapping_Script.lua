@@ -7,7 +7,6 @@
 map = map or {}
 map.room_info = map.room_info or {}
 map.prev_info = map.prev_info or {}
-map.aliases = map.aliases or {}
 map.configs = map.configs or {}
 map.configs.speedwalk_delay = 0
 map.configs.reconcile_max_passes = map.configs.reconcile_max_passes or 3
@@ -317,6 +316,8 @@ local function make_room()
     end
 end
 
+map.make_room = make_room
+
 local function shift_room(dir)
     if type(map.room_info.vnum) ~= "string" then
         return
@@ -516,20 +517,6 @@ local function config()
     for k, v in pairs(terrain_types) do
         setCustomEnvColor(v.id, v.r, v.g, v.b, 255)
     end
-    -- making mapper window
-    --local info = defaults.mapper
-    --Geyser.Mapper:new({name = "myMap", x = info.x, y = info.y, width = info.width, height = info.height})
-    -- clearing existing aliases if they exist
-    for k, v in pairs(map.aliases) do
-        killAlias(v)
-    end
-    map.aliases = {}
-    -- making an alias to let the user shift a room around via command line
-    table.insert(map.aliases, tempAlias([[^shift (\w+)$]], [[raiseEvent("shiftRoom",matches[2])]]))
-    table.insert(map.aliases, tempAlias([[^make_room$]], [[make_room()]]))
-    table.insert(map.aliases,
-        tempAlias([[^map\s+normalize(?:\s+(\d+)\s+(\d+))?$]], [[map.normalize_room_layout(tonumber(matches[2]), tonumber(matches[3]))]]))
-    table.insert(map.aliases, tempAlias([[^map\s+help$]], [[map.show_help()]]))
 end
 
 local function check_doors(roomID, exits)
