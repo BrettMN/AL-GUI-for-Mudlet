@@ -10,6 +10,10 @@ map.prev_info = map.prev_info or {}
 map.aliases = map.aliases or {}
 map.configs = map.configs or {}
 map.configs.speedwalk_delay = 0
+map.configs.reconcile_max_passes = map.configs.reconcile_max_passes or 3
+map.configs.reconcile_max_moves = map.configs.reconcile_max_moves or 200
+map.configs.reconcile_deep_max_passes = map.configs.reconcile_deep_max_passes or 20
+map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5000
 
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
@@ -152,6 +156,30 @@ local function stretch_area_for_new_room(areaID, coords, shift)
     end
 end
 
+local function move_room_to_expected_position(roomID, roomHash, areaID, coords, shift)
+    local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+
+    if not table.is_empty(overlap) then
+        local hasCollision = false
+        for _, overlapID in pairs(overlap) do
+            if overlapID ~= roomID then
+                local overlapHash = getRoomHashByID and getRoomHashByID(overlapID)
+                if overlapHash and overlapHash ~= roomHash then
+                    hasCollision = true
+                    break
+                end
+            end
+        end
+
+        if hasCollision then
+            stretch_area_for_new_room(areaID, coords, shift)
+        end
+    end
+
+    setRoomArea(roomID, areaID)
+    setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
+end
+
 local function create_neighbors_for_current_room(currentRoomID)
     local info = map.room_info
     if type(info.exits) ~= "table" then
@@ -171,10 +199,15 @@ local function create_neighbors_for_current_room(currentRoomID)
     for dir, targetVnum in pairs(info.exits) do
         if type(targetVnum) == "string" then
             if move_vectors[dir] then
+                local shift = move_vectors[dir]
+                local coords = { cx + shift[1], cy + shift[2], cz + shift[3] }
                 local targetID = getRoomIDbyHash(targetVnum)
-                if targetID < 1 then
-                    local shift = move_vectors[dir]
-                    local coords = { cx + shift[1], cy + shift[2], cz + shift[3] }
+                if targetID > 0 then
+                    local tx, ty, tz = getRoomCoordinates(targetID)
+                    if tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3] then
+                        move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift)
+                    end
+                else
                     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
                     local sameHashAtTarget = false
 
@@ -301,6 +334,132 @@ local function shift_room(dir)
     end
 end
 
+local function reconcile_current_room_position(currentRoomID)
+    if type(map.prev_info.vnum) ~= "string" then
+        return
+    end
+    if type(map.room_info.exits) ~= "table" then
+        return
+    end
+
+    local prevID = getRoomIDbyHash(map.prev_info.vnum)
+    if prevID < 1 then
+        return
+    end
+
+    local shift
+    for dir, targetVnum in pairs(map.room_info.exits) do
+        if targetVnum == map.prev_info.vnum and move_vectors[dir] then
+            shift = move_vectors[dir]
+            break
+        end
+    end
+
+    if not shift then
+        return
+    end
+
+    local prevX, prevY, prevZ = getRoomCoordinates(prevID)
+    local expected = { prevX - shift[1], prevY - shift[2], prevZ - shift[3] }
+    local currentX, currentY, currentZ = getRoomCoordinates(currentRoomID)
+
+    if currentX ~= expected[1] or currentY ~= expected[2] or currentZ ~= expected[3] then
+        local areaID = getRoomArea(currentRoomID) or getRoomArea(prevID)
+        if areaID then
+            move_room_to_expected_position(currentRoomID, map.room_info.vnum, areaID, expected, shift)
+        end
+    end
+end
+
+local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
+    if type(seedRoomID) ~= "number" or seedRoomID < 1 then
+        return 0
+    end
+
+    maxPasses = maxPasses or map.configs.reconcile_max_passes
+    maxMoves = maxMoves or map.configs.reconcile_max_moves
+
+    local queue = { seedRoomID }
+    local movedTotal = 0
+    local pass = 0
+
+    while #queue > 0 and pass < maxPasses and movedTotal < maxMoves do
+        pass = pass + 1
+        local movedThisPass = 0
+        local nextQueue = {}
+        local nextSet = {}
+
+        for _, roomID in ipairs(queue) do
+            local areaID = getRoomArea(roomID)
+            local rx, ry, rz = getRoomCoordinates(roomID)
+            local exits = getRoomExits(roomID)
+
+            if areaID and rx ~= nil and ry ~= nil and rz ~= nil and type(exits) == "table" then
+                for dir, targetID in pairs(exits) do
+                    local shift = move_vectors[dir]
+                    if shift and type(targetID) == "number" and targetID > 0 then
+                        local expected = { rx + shift[1], ry + shift[2], rz + shift[3] }
+                        local tx, ty, tz = getRoomCoordinates(targetID)
+
+                        if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
+                            local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
+                            move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
+                            movedThisPass = movedThisPass + 1
+                            movedTotal = movedTotal + 1
+                            if movedTotal >= maxMoves then
+                                break
+                            end
+                        end
+
+                        if not nextSet[targetID] then
+                            nextSet[targetID] = true
+                            table.insert(nextQueue, targetID)
+                        end
+                    end
+                end
+            end
+
+            if movedTotal >= maxMoves then
+                break
+            end
+        end
+
+        if movedThisPass == 0 then
+            break
+        end
+
+        queue = nextQueue
+    end
+
+    return movedTotal
+end
+
+function map.normalize_room_layout(maxPasses, maxMoves)
+    local roomID = getRoomIDbyHash(map.room_info.vnum)
+    if roomID < 1 then
+        echo("Cannot normalize layout: current room is unknown.\n")
+        return
+    end
+
+    local moved = reconcile_connected_rooms(
+        roomID,
+        maxPasses or map.configs.reconcile_deep_max_passes,
+        maxMoves or map.configs.reconcile_deep_max_moves
+    )
+    updateMap()
+    echo("Layout normalization moved " .. moved .. " rooms.\n")
+end
+
+function map.show_help()
+    echo("Map commands:\n")
+    echo("  map help\n")
+    echo("    Show this help text.\n")
+    echo("  map normalize [maxPasses maxMoves]\n")
+    echo("    Reconcile room coordinates across connected directional exits.\n")
+    echo("    Defaults: maxPasses=" .. map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
+    echo("    Example: map normalize 5 500\n")
+end
+
 local function handle_move()
     local info = map.room_info
     if type(info.vnum) ~= "string" then
@@ -316,6 +475,7 @@ local function handle_move()
         end
 
         if rnum > 0 then
+            reconcile_current_room_position(rnum)
             apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
@@ -345,6 +505,7 @@ local function handle_move()
             end
 
             create_neighbors_for_current_room(rnum)
+            reconcile_connected_rooms(rnum)
             centerview(rnum)
         end
     end
@@ -366,6 +527,9 @@ local function config()
     -- making an alias to let the user shift a room around via command line
     table.insert(map.aliases, tempAlias([[^shift (\w+)$]], [[raiseEvent("shiftRoom",matches[2])]]))
     table.insert(map.aliases, tempAlias([[^make_room$]], [[make_room()]]))
+    table.insert(map.aliases,
+        tempAlias([[^map\s+normalize(?:\s+(\d+)\s+(\d+))?$]], [[map.normalize_room_layout(tonumber(matches[2]), tonumber(matches[3]))]]))
+    table.insert(map.aliases, tempAlias([[^map\s+help$]], [[map.show_help()]]))
 end
 
 local function check_doors(roomID, exits)
