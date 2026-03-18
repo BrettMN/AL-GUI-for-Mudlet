@@ -1,0 +1,1 @@
+map.pin_room()

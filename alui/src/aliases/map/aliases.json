@@ -20,7 +20,27 @@
         "regex": "^map\\s+make-room$"
     },
     {
+        "name": "map separate",
+        "regex": "^map\\s+separate$"
+    },
+    {
+        "name": "map pin",
+        "regex": "^map\\s+pin$"
+    },
+    {
+        "name": "map unpin",
+        "regex": "^map\\s+unpin$"
+    },
+    {
+        "name": "map pins",
+        "regex": "^map\\s+pins$"
+    },
+    {
         "name": "map export",
         "regex": "^map\\s+export$"
+    },
+    {
+        "name": "map clear-area-cache",
+        "regex": "^map\\s+clear-area-cache$"
     }
 ]

@@ -145,6 +145,10 @@ local function is_horizontal_shift(shift)
     return type(shift) == "table" and shift[3] == 0
 end
 
+local function is_room_pinned(roomID)
+    return getRoomUserData(roomID, "pinned") == "true"
+end
+
 local function normalize_exit_direction(dir)
     if type(dir) == "string" then
         local lower = string.lower(dir)
@@ -205,6 +209,11 @@ local function stretch_area_for_new_room(areaID, coords, shift)
 end
 
 local function move_room_to_expected_position(roomID, roomHash, areaID, coords, shift)
+    -- Never reposition a pinned room.
+    if is_room_pinned(roomID) then
+        return
+    end
+
     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
 
     if not table.is_empty(overlap) then
@@ -680,7 +689,15 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
                             if not visited[targetID] then
                                 visited[targetID] = true
-                                table.insert(nextQueue, { roomID = targetID, coords = expected })
+                                -- If this room is pinned, propagate BFS from its actual position
+                                -- so rooms beyond it are placed relative to where it really sits.
+                                local propagateCoords
+                                if is_room_pinned(targetID) then
+                                    propagateCoords = { tx, ty, tz }
+                                else
+                                    propagateCoords = expected
+                                end
+                                table.insert(nextQueue, { roomID = targetID, coords = propagateCoords })
                             end
                         else
                             if not visited[targetID] then
@@ -728,6 +745,278 @@ function map.normalize_room_layout(maxPasses, maxMoves)
     echo(
         "Layout normalization moved " .. moved .. " rooms (" .. cardinalMoved .. " cardinal elevation fixes).\n"
     )
+end
+
+-- Returns a list of components, where each component is a list of roomIDs.
+-- Two rooms are in the same component if they are reachable from each other via
+-- horizontal exits only (cardinal and diagonal, z-shift == 0).
+-- Vertical and special exits are excluded so that layered areas (e.g. bridge
+-- above + path below) end up in separate components.
+local function build_horizontal_components(areaID)
+    local rooms = getAreaRooms(areaID)
+    if not rooms or #rooms == 0 then
+        return {}
+    end
+
+    local adj = {}
+    for _, roomID in ipairs(rooms) do
+        adj[roomID] = adj[roomID] or {}
+        local exits = getRoomExits(roomID)
+        if type(exits) == "table" then
+            for dir, targetID in pairs(exits) do
+                local shift = get_shift_for_exit_key(dir)
+                if type(targetID) == "string" then
+                    targetID = tonumber(targetID)
+                end
+                if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
+                    if getRoomArea(targetID) == areaID then
+                        adj[roomID][targetID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    local visited = {}
+    local components = {}
+    for _, startID in ipairs(rooms) do
+        if not visited[startID] then
+            local component = {}
+            local queue = { startID }
+            visited[startID] = true
+            while #queue > 0 do
+                local cur = table.remove(queue, 1)
+                table.insert(component, cur)
+                for neighbor in pairs(adj[cur] or {}) do
+                    if not visited[neighbor] then
+                        visited[neighbor] = true
+                        table.insert(queue, neighbor)
+                    end
+                end
+            end
+            table.insert(components, component)
+        end
+    end
+
+    return components
+end
+
+-- Returns a table mapping "x,y,z" keys to the list of roomIDs at that position,
+-- only for positions occupied by more than one room.
+local function find_overlap_positions(areaID)
+    local rooms = getAreaRooms(areaID)
+    if not rooms or #rooms == 0 then
+        return {}
+    end
+
+    local byPos = {}
+    for _, roomID in ipairs(rooms) do
+        local x, y, z = getRoomCoordinates(roomID)
+        if x ~= nil and y ~= nil and z ~= nil then
+            local key = x .. "," .. y .. "," .. z
+            byPos[key] = byPos[key] or {}
+            table.insert(byPos[key], roomID)
+        end
+    end
+
+    local overlaps = {}
+    for key, ids in pairs(byPos) do
+        if #ids > 1 then
+            overlaps[key] = ids
+        end
+    end
+
+    return overlaps
+end
+
+-- Separates overlapping horizontal layers within the current area.
+-- Each horizontally-connected component is treated as a distinct layer.
+-- The largest component (by room count) keeps its z-values; smaller components
+-- that participate in overlaps are shifted vertically to a clear z-slot.
+function map.separate_overlaps()
+    local _, areaID, areaName = get_current_area_context()
+    if not areaID then
+        echo("Cannot separate overlaps: current area is unknown.\n")
+        return
+    end
+
+    local overlaps = find_overlap_positions(areaID)
+    if not next(overlaps) then
+        echo("No overlapping rooms found in '" .. (areaName or ("#" .. areaID)) .. "'.\n")
+        return
+    end
+
+    local overlapCount = 0
+    for _ in pairs(overlaps) do
+        overlapCount = overlapCount + 1
+    end
+    echo("Found " .. overlapCount .. " overlapping position(s) in '" ..
+        (areaName or ("#" .. areaID)) .. "'. Separating...\n")
+
+    local components = build_horizontal_components(areaID)
+
+    local roomToComp = {}
+    for i, comp in ipairs(components) do
+        for _, roomID in ipairs(comp) do
+            roomToComp[roomID] = i
+        end
+    end
+
+    -- Determine which components are involved in at least one overlapping position.
+    local involvedComps = {}
+    for _, ids in pairs(overlaps) do
+        for _, roomID in ipairs(ids) do
+            local ci = roomToComp[roomID]
+            if ci then
+                involvedComps[ci] = true
+            end
+        end
+    end
+
+    -- Sort involved components largest-first; the largest keeps its current z.
+    local sortedComps = {}
+    for i, comp in ipairs(components) do
+        if involvedComps[i] then
+            table.insert(sortedComps, { index = i, size = #comp, rooms = comp })
+        end
+    end
+    table.sort(sortedComps, function(a, b) return a.size > b.size end)
+
+    if #sortedComps < 2 then
+        echo("Overlapping rooms are all in the same horizontal layer; cannot auto-separate.\n")
+        echo("Use 'map shift' to manually reposition rooms.\n")
+        return
+    end
+
+    -- Collect all z-values currently used anywhere in the area.
+    local usedZ = {}
+    local allRooms = getAreaRooms(areaID)
+    for _, roomID in ipairs(allRooms) do
+        local _, _, z = getRoomCoordinates(roomID)
+        if z ~= nil then
+            usedZ[z] = true
+        end
+    end
+
+    local gap = 2
+    local totalMoved = 0
+    local layersMoved = 0
+
+    -- Skip index 1 (largest, stays put). Move all others to a clear z-slot.
+    for i = 2, #sortedComps do
+        local comp = sortedComps[i].rooms
+
+        -- Collect the z-values this component currently occupies.
+        local compZ = {}
+        local compZSet = {}
+        for _, roomID in ipairs(comp) do
+            local _, _, z = getRoomCoordinates(roomID)
+            if z ~= nil and not compZSet[z] then
+                compZSet[z] = true
+                compZ[#compZ + 1] = z
+            end
+        end
+
+        -- Find the smallest vertical offset (trying +gap, -gap, +2*gap, -2*gap, ...)
+        -- such that none of (compZ[j] + offset) is already in usedZ.
+        local dz = nil
+        for attempt = 1, 1000 do
+            for _, candidate in ipairs({ attempt * gap, -attempt * gap }) do
+                local ok = true
+                for _, cz in ipairs(compZ) do
+                    if usedZ[cz + candidate] then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then
+                    dz = candidate
+                    break
+                end
+            end
+            if dz then break end
+        end
+
+        if not dz then
+            echo("Could not find a safe z-offset for layer " .. i .. " (skipped).\n")
+        else
+            for _, roomID in ipairs(comp) do
+                local x, y, z = getRoomCoordinates(roomID)
+                if x ~= nil and y ~= nil and z ~= nil then
+                    local newZ = z + dz
+                    setRoomCoordinates(roomID, x, y, newZ)
+                    usedZ[newZ] = true
+                    totalMoved = totalMoved + 1
+                end
+            end
+            layersMoved = layersMoved + 1
+        end
+    end
+
+    updateMap()
+    echo("Separated " .. totalMoved .. " room" .. (totalMoved == 1 and "" or "s") ..
+        " across " .. layersMoved .. " layer" .. (layersMoved == 1 and "" or "s") .. ".\n")
+end
+
+function map.pin_room()
+    local roomID, areaID = get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot pin: current room is unknown.\n")
+        return
+    end
+    setRoomUserData(roomID, "pinned", "true")
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") pinned.\n")
+    echo("  map normalize will not move this room but will position neighbors around it.\n")
+end
+
+function map.unpin_room()
+    local roomID, areaID = get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot unpin: current room is unknown.\n")
+        return
+    end
+    deleteRoomUserData(roomID, "pinned")
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") unpinned.\n")
+end
+
+function map.list_pins()
+    local _, areaID, areaName = get_current_area_context()
+    if not areaID then
+        echo("Cannot list pins: current area is unknown.\n")
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if not rooms or #rooms == 0 then
+        echo("No rooms in current area.\n")
+        return
+    end
+
+    local pinned = {}
+    for _, roomID in ipairs(rooms) do
+        if is_room_pinned(roomID) then
+            local x, y, z = getRoomCoordinates(roomID)
+            table.insert(pinned, {
+                id = roomID,
+                name = getRoomName(roomID) or "unknown",
+                x = x,
+                y = y,
+                z = z
+            })
+        end
+    end
+
+    if #pinned == 0 then
+        echo("No pinned rooms in '" .. (areaName or ("#" .. areaID)) .. "'.\n")
+        return
+    end
+
+    echo(#pinned .. " pinned room" .. (#pinned == 1 and "" or "s") ..
+        " in '" .. (areaName or ("#" .. areaID)) .. "':\n")
+    for _, r in ipairs(pinned) do
+        echo("  [" .. r.id .. "] " .. r.name ..
+            " at (" .. r.x .. ", " .. r.y .. ", " .. r.z .. ")\n")
+    end
 end
 
 local function trim_whitespace(value)
@@ -843,6 +1132,39 @@ function map.get_area_display_name(areaIDOrName)
     return nil
 end
 
+function map.clear_area_cache()
+    -- Clear the in-memory GMCP-area-to-id cache.
+    map.configs.area_ids_by_gmcp = {}
+
+    -- Remove stale gmcp_area_key userdata from areas where the stored key no
+    -- longer corresponds to any area display name in the area table.  This
+    -- cleans up entries that were incorrectly stamped onto the wrong area by
+    -- the cache-poisoning bug (where the cache was written before the area
+    -- correction ran).  If you have manually-renamed areas whose original
+    -- GMCP key was a hash, re-enter any room in those areas to rebuild the
+    -- association automatically.
+    local areas = getAreaTable()
+    if type(areas) == "table" then
+        local removed = 0
+        for name, id in pairs(areas) do
+            local savedKey = getAreaUserData(id, "gmcp_area_key")
+            if type(savedKey) == "string" and savedKey ~= "" then
+                -- The key is stale when the area's display name is not the key
+                -- AND no area in the table has that key as its display name.
+                if name ~= savedKey and not areas[savedKey] then
+                    deleteAreaUserData(id, "gmcp_area_key")
+                    removed = removed + 1
+                end
+            end
+        end
+        echo("Area cache cleared. Removed " .. removed .. " stale gmcp_area_key entry" ..
+            (removed == 1 and "" or "s") .. ".\n")
+        echo("Re-enter rooms in each area to rebuild associations.\n")
+    else
+        echo("Area cache cleared (could not read area table for userdata cleanup).\n")
+    end
+end
+
 function map.show_help()
     echo("Map commands:\n")
     echo("  map help\n")
@@ -854,6 +1176,21 @@ function map.show_help()
     echo("    Example: map normalize 5 500\n")
     echo("  map area-name [new name]\n")
     echo("    Show or set a custom display name for the current area.\n")
+    echo("  map clear-area-cache\n")
+    echo("    Clear the GMCP area cache and remove stale area-key associations.\n")
+    echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n")
+    echo("  map separate\n")
+    echo("    Separate overlapping horizontal layers in the current area by shifting each layer to a unique z-level.\n")
+    echo("    Useful when a path under a bridge or through a tunnel ends up stacked on top of the road above.\n")
+    echo("    The largest layer keeps its position; smaller overlapping layers are shifted vertically.\n")
+    echo("  map pin\n")
+    echo("    Pin the current room so 'map normalize' never moves it.\n")
+    echo("    Pinned rooms act as anchors: normalize positions all connected rooms relative to them.\n")
+    echo("    Use this after manually placing a room where you want it (e.g. 3 south and 3 west).\n")
+    echo("  map unpin\n")
+    echo("    Remove the pin from the current room, allowing normalize to reposition it freely.\n")
+    echo("  map pins\n")
+    echo("    List all pinned rooms in the current area with their coordinates.\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n")
 end
@@ -921,24 +1258,26 @@ local function handle_move()
         end
 
         if rnum > 0 then
+            -- Check if room needs to be moved to its correct area.
+            -- This must run BEFORE updating the cache, so resolve_area_id_for_room_info()
+            -- performs a full lookup rather than short-circuiting on a stale cached value.
+            -- Placeholder rooms created as exits may be in a different area than their actual area.
+            local correctAreaID = resolve_area_id_for_room_info(info)
+            local currentAreaID = getRoomArea(rnum)
+            if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
+                echo("Moving room " .. rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                setRoomArea(rnum, correctAreaID)
+                currentAreaID = correctAreaID
+            end
+
+            -- Update the cache with the confirmed correct area ID.
             if type(info.area) == "string" and info.area ~= "" then
-                local currentAreaID = getRoomArea(rnum)
                 if type(currentAreaID) == "number" and currentAreaID > 0 then
                     map.configs.area_ids_by_gmcp[info.area] = currentAreaID
                     setAreaUserData(currentAreaID, "gmcp_area_key", info.area)
                 end
             end
 
-            -- Check if room needs to be moved to its correct area
-            -- Placeholder rooms created as exits may be in a different area than their actual area
-            local correctAreaID = resolve_area_id_for_room_info(info)
-            local currentAreaID = getRoomArea(rnum)
-            if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
-                echo("Moving room " .. rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
-                setRoomArea(rnum, correctAreaID)
-            end
-
-            reconcile_current_room_position(rnum)
             apply_room_environment(rnum, info.terrain)
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
