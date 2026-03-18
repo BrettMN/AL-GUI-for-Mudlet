@@ -15,6 +15,7 @@ map.configs.reconcile_deep_max_passes = map.configs.reconcile_deep_max_passes or
 map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5000
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
+map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
 
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
@@ -279,7 +280,7 @@ local function create_neighbors_for_current_room(currentRoomID)
                 local targetID = getRoomIDbyHash(targetVnum)
                 if targetID > 0 then
                     local tx, ty, tz = getRoomCoordinates(targetID)
-                    if tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3] then
+                    if map.configs.auto_reconcile and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
                         move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift)
                     end
                 else
@@ -1193,6 +1194,11 @@ function map.show_help()
     echo("    List all pinned rooms in the current area with their coordinates.\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n")
+    echo("  map auto-reconcile\n")
+    echo("    Toggle automatic room repositioning on/off (currently " ..
+        (map.configs.auto_reconcile and "ON" or "OFF") .. ").\n")
+    echo("    When ON (default), rooms are repositioned each move to keep exit vectors consistent.\n")
+    echo("    Turn OFF to prevent shuffling when moving between areas. Use 'map normalize' to reposition manually.\n")
 end
 
 function map.export_rooms()
@@ -1307,7 +1313,9 @@ local function handle_move()
             end
 
             create_neighbors_for_current_room(rnum)
-            reconcile_connected_rooms(rnum)
+            if map.configs.auto_reconcile then
+                reconcile_connected_rooms(rnum)
+            end
             centerview(rnum)
         end
     end

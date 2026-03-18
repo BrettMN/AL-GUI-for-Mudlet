@@ -42,5 +42,9 @@
     {
         "name": "map clear-area-cache",
         "regex": "^map\\s+clear-area-cache$"
+    },
+    {
+        "name": "map auto-reconcile",
+        "regex": "^map\\s+auto-reconcile$"
     }
 ]
