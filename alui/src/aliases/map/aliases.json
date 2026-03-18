@@ -18,5 +18,9 @@
     {
         "name": "map make-room",
         "regex": "^map\\s+make-room$"
+    },
+    {
+        "name": "map export",
+        "regex": "^map\\s+export$"
     }
 ]

@@ -100,6 +100,7 @@ local stubmap = {
     southeast = 7,
     southwest = 8,
     up = 9,
+    down = 10,
 }
 
 -- Precompute reverse mappings for O(1) lookups
@@ -561,6 +562,11 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
         return 0
     end
 
+    local seedAreaID = getRoomArea(seedRoomID)
+    if not seedAreaID then
+        return 0
+    end
+
     maxPasses = maxPasses or map.configs.reconcile_max_passes
     maxMoves = maxMoves or map.configs.reconcile_max_moves
 
@@ -585,21 +591,29 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                         targetID = tonumber(targetID)
                     end
                     if shift and type(targetID) == "number" and targetID > 0 then
-                        local expected = { rx + shift[1], ry + shift[2], rz + shift[3] }
-                        local tx, ty, tz = getRoomCoordinates(targetID)
-
-                        if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
-                            local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
-                            move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
-                            movedTotal = movedTotal + 1
-                            if movedTotal >= maxMoves then
-                                break
+                        -- Skip rooms belonging to a different area
+                        local targetAreaID = getRoomArea(targetID)
+                        if targetAreaID ~= seedAreaID then
+                            if not visited[targetID] then
+                                visited[targetID] = true
                             end
-                        end
+                        else
+                            local expected = { rx + shift[1], ry + shift[2], rz + shift[3] }
+                            local tx, ty, tz = getRoomCoordinates(targetID)
 
-                        if not visited[targetID] then
-                            visited[targetID] = true
-                            table.insert(nextQueue, targetID)
+                            if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
+                                local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
+                                move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
+                                movedTotal = movedTotal + 1
+                                if movedTotal >= maxMoves then
+                                    break
+                                end
+                            end
+
+                            if not visited[targetID] then
+                                visited[targetID] = true
+                                table.insert(nextQueue, targetID)
+                            end
                         end
                     end
                 end
@@ -649,21 +663,29 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                         targetID = tonumber(targetID)
                     end
                     if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
-                        local expected = { coords[1] + shift[1], coords[2] + shift[2], sz }
-                        local tx, ty, tz = getRoomCoordinates(targetID)
+                        -- Skip rooms belonging to a different area
+                        local targetAreaID = getRoomArea(targetID)
+                        if targetAreaID == areaID then
+                            local expected = { coords[1] + shift[1], coords[2] + shift[2], sz }
+                            local tx, ty, tz = getRoomCoordinates(targetID)
 
-                        if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
-                            local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
-                            move_room_to_expected_position(targetID, targetHash, roomAreaID, expected, shift)
-                            movedTotal = movedTotal + 1
-                            if movedTotal >= maxMoves then
-                                break
+                            if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
+                                local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
+                                move_room_to_expected_position(targetID, targetHash, roomAreaID, expected, shift)
+                                movedTotal = movedTotal + 1
+                                if movedTotal >= maxMoves then
+                                    break
+                                end
                             end
-                        end
 
-                        if not visited[targetID] then
-                            visited[targetID] = true
-                            table.insert(nextQueue, { roomID = targetID, coords = expected })
+                            if not visited[targetID] then
+                                visited[targetID] = true
+                                table.insert(nextQueue, { roomID = targetID, coords = expected })
+                            end
+                        else
+                            if not visited[targetID] then
+                                visited[targetID] = true
+                            end
                         end
                     end
                 end
@@ -689,14 +711,19 @@ function map.normalize_room_layout(maxPasses, maxMoves)
 
     local resolvedMaxPasses = maxPasses or map.configs.reconcile_deep_max_passes
     local resolvedMaxMoves = maxMoves or map.configs.reconcile_deep_max_moves
-    local cardinalMoved = flatten_cardinal_connected_rooms(roomID, resolvedMaxMoves)
-    local remainingMoves = math.max(resolvedMaxMoves - cardinalMoved, 0)
-    local moved = cardinalMoved
+
+    -- Reconcile runs first to apply general x/y/z positioning via cumulative exit shifts.
+    -- Flatten runs second so it has final authority on z for all cardinally-connected rooms,
+    -- overriding any incorrect z values that reconcile may have propagated via vertical paths.
+    local reconcileMoved = reconcile_connected_rooms(roomID, resolvedMaxPasses, resolvedMaxMoves)
+    local remainingMoves = math.max(resolvedMaxMoves - reconcileMoved, 0)
+    local cardinalMoved = 0
 
     if remainingMoves > 0 then
-        moved = moved + reconcile_connected_rooms(roomID, resolvedMaxPasses, remainingMoves)
+        cardinalMoved = flatten_cardinal_connected_rooms(roomID, remainingMoves)
     end
 
+    local moved = reconcileMoved + cardinalMoved
     updateMap()
     echo(
         "Layout normalization moved " .. moved .. " rooms (" .. cardinalMoved .. " cardinal elevation fixes).\n"
@@ -827,6 +854,56 @@ function map.show_help()
     echo("    Example: map normalize 5 500\n")
     echo("  map area-name [new name]\n")
     echo("    Show or set a custom display name for the current area.\n")
+    echo("  map export\n")
+    echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n")
+end
+
+function map.export_rooms()
+    local selection = getMapSelection()
+    local roomIDs = selection and selection.rooms
+    if type(roomIDs) ~= "table" or #roomIDs == 0 then
+        echo("No rooms selected. Select rooms on the mapper first, then run 'map export'.\n")
+        return
+    end
+
+    local result = {}
+    for _, roomID in ipairs(roomIDs) do
+        local areaID = getRoomArea(roomID)
+        local x, y, z = getRoomCoordinates(roomID)
+        local exits = getRoomExits(roomID)
+        local specialExits = getSpecialExitsSwap(roomID)
+        local doors = getDoors(roomID)
+        local userData = getAllRoomUserData(roomID)
+
+        -- Convert numeric exit keys to direction names for readability
+        local namedExits = {}
+        if type(exits) == "table" then
+            for k, v in pairs(exits) do
+                local dirName = type(k) == "number" and (stubmapFlipped[k] or tostring(k)) or k
+                namedExits[dirName] = v
+            end
+        end
+
+        result[#result + 1] = {
+            id            = roomID,
+            hash          = getRoomHashByID and getRoomHashByID(roomID) or nil,
+            name          = getRoomName(roomID),
+            x             = x,
+            y             = y,
+            z             = z,
+            area_id       = areaID,
+            area_name     = get_area_name_by_id(areaID),
+            environment   = getRoomEnv(roomID),
+            exits         = namedExits,
+            special_exits = (type(specialExits) == "table" and next(specialExits) ~= nil) and specialExits or nil,
+            doors         = (type(doors) == "table" and next(doors) ~= nil) and doors or nil,
+            user_data     = (type(userData) == "table" and next(userData) ~= nil) and userData or nil,
+        }
+    end
+
+    local json = yajl.to_string(result)
+    setClipboardText(json)
+    echo("Exported " .. #result .. " room" .. (#result == 1 and "" or "s") .. " to clipboard.\n")
 end
 
 local function handle_move()
