@@ -190,6 +190,39 @@ local function get_shift_for_exit_key(dir)
     return move_vectors[normalized]
 end
 
+-- Returns an iterator over exits in a stable canonical direction order, followed
+-- by any remaining exits not covered by the canonical list (e.g. special exits).
+-- Using this instead of pairs() ensures BFS traversal is deterministic across
+-- runs, which is required for normalize to converge to the same layout every time.
+local exit_canonical_order = {
+    "north", "northeast", "east", "southeast",
+    "south", "southwest", "west", "northwest",
+    "up", "down"
+}
+local function sorted_exit_pairs(exits)
+    if type(exits) ~= "table" then return function() end end
+    local result = {}
+    local seen = {}
+    for _, dir in ipairs(exit_canonical_order) do
+        local targetID = exits[dir]
+        if targetID ~= nil then
+            result[#result + 1] = { dir, targetID }
+            seen[dir] = true
+        end
+    end
+    for dir, targetID in pairs(exits) do
+        if not seen[dir] then
+            result[#result + 1] = { dir, targetID }
+        end
+    end
+    local i = 0
+    return function()
+        i = i + 1
+        local entry = result[i]
+        if entry then return entry[1], entry[2] end
+    end
+end
+
 local function stretch_area_for_new_room(areaID, coords, shift)
     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
     if table.is_empty(overlap) then
@@ -595,7 +628,7 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
             local exits = getRoomExits(roomID)
 
             if areaID and rx ~= nil and ry ~= nil and rz ~= nil and type(exits) == "table" then
-                for dir, targetID in pairs(exits) do
+                for dir, targetID in sorted_exit_pairs(exits) do
                     local shift = get_shift_for_exit_key(dir)
                     if type(targetID) == "string" then
                         targetID = tonumber(targetID)
@@ -608,8 +641,13 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                                 visited[targetID] = true
                             end
                         else
-                            local expected = { rx + shift[1], ry + shift[2], rz + shift[3] }
                             local tx, ty, tz = getRoomCoordinates(targetID)
+                            -- For horizontal exits, preserve the target's current z so that
+                            -- flatten_cardinal_connected_rooms has sole authority on elevation
+                            -- and the two passes cannot fight each other over z values.
+                            -- For vertical exits, apply the full shift so up/down stacking is correct.
+                            local expectedZ = (shift[3] == 0) and (tz or rz) or (rz + shift[3])
+                            local expected = { rx + shift[1], ry + shift[2], expectedZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                                 local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
@@ -667,7 +705,7 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
             local exits = getRoomExits(roomID)
 
             if roomAreaID and type(exits) == "table" then
-                for dir, targetID in pairs(exits) do
+                for dir, targetID in sorted_exit_pairs(exits) do
                     local shift = get_shift_for_exit_key(dir)
                     if type(targetID) == "string" then
                         targetID = tonumber(targetID)
@@ -676,7 +714,11 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                         -- Skip rooms belonging to a different area
                         local targetAreaID = getRoomArea(targetID)
                         if targetAreaID == areaID then
-                            local expected = { coords[1] + shift[1], coords[2] + shift[2], sz }
+                            -- Use the parent's propagated z (coords[3]) rather than the seed's z.
+                            -- This fans elevation outward from the user's location: rooms inherit
+                            -- their parent's z, and pinned rooms act as elevation anchors so all
+                            -- rooms cardinally beyond a pin adopt the pin's actual z.
+                            local expected = { coords[1] + shift[1], coords[2] + shift[2], coords[3] }
                             local tx, ty, tz = getRoomCoordinates(targetID)
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
@@ -730,9 +772,11 @@ function map.normalize_room_layout(maxPasses, maxMoves)
     local resolvedMaxPasses = maxPasses or map.configs.reconcile_deep_max_passes
     local resolvedMaxMoves = maxMoves or map.configs.reconcile_deep_max_moves
 
-    -- Reconcile runs first to apply general x/y/z positioning via cumulative exit shifts.
-    -- Flatten runs second so it has final authority on z for all cardinally-connected rooms,
-    -- overriding any incorrect z values that reconcile may have propagated via vertical paths.
+    -- Reconcile runs first to fix x/y for all exits and x/y/z for vertical exits only.
+    -- It deliberately preserves a horizontal target's current z so it does not conflict
+    -- with flatten.  Flatten runs second and owns z for all cardinally-connected rooms:
+    -- starting at the user's location it fans elevation outward, with pinned rooms acting
+    -- as elevation anchors so everything cardinally beyond them inherits their z.
     local reconcileMoved = reconcile_connected_rooms(roomID, resolvedMaxPasses, resolvedMaxMoves)
     local remainingMoves = math.max(resolvedMaxMoves - reconcileMoved, 0)
     local cardinalMoved = 0
@@ -764,7 +808,7 @@ local function build_horizontal_components(areaID)
         adj[roomID] = adj[roomID] or {}
         local exits = getRoomExits(roomID)
         if type(exits) == "table" then
-            for dir, targetID in pairs(exits) do
+            for dir, targetID in sorted_exit_pairs(exits) do
                 local shift = get_shift_for_exit_key(dir)
                 if type(targetID) == "string" then
                     targetID = tonumber(targetID)
