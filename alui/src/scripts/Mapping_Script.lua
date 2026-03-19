@@ -445,28 +445,30 @@ local function stretch_area_for_new_room(areaID, coords, shift)
     end
 end
 
-local function move_room_to_expected_position(roomID, roomHash, areaID, coords, shift)
+local function move_room_to_expected_position(roomID, roomHash, areaID, coords, shift, skipStretch)
     -- Never reposition a pinned room.
     if is_room_pinned(roomID) then
         return
     end
 
-    local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+    if not skipStretch then
+        local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
 
-    if not table.is_empty(overlap) then
-        local hasCollision = false
-        for _, overlapID in pairs(overlap) do
-            if overlapID ~= roomID then
-                local overlapHash = getRoomHashByID and getRoomHashByID(overlapID)
-                if overlapHash and overlapHash ~= roomHash then
-                    hasCollision = true
-                    break
+        if not table.is_empty(overlap) then
+            local hasCollision = false
+            for _, overlapID in pairs(overlap) do
+                if overlapID ~= roomID then
+                    local overlapHash = getRoomHashByID and getRoomHashByID(overlapID)
+                    if overlapHash and overlapHash ~= roomHash then
+                        hasCollision = true
+                        break
+                    end
                 end
             end
-        end
 
-        if hasCollision then
-            stretch_area_for_new_room(areaID, coords, shift)
+            if hasCollision then
+                stretch_area_for_new_room(areaID, coords, shift)
+            end
         end
     end
 
@@ -798,7 +800,7 @@ local function reconcile_current_room_position(currentRoomID)
     if currentX ~= expected[1] or currentY ~= expected[2] or currentZ ~= expected[3] then
         local areaID = getRoomArea(currentRoomID) or getRoomArea(prevID)
         if areaID then
-            move_room_to_expected_position(currentRoomID, map.room_info.vnum, areaID, expected, shift)
+            move_room_to_expected_position(currentRoomID, map.room_info.vnum, areaID, expected, shift, true)
         end
     end
 end
@@ -855,7 +857,7 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                                 local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
-                                move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
+                                move_room_to_expected_position(targetID, targetHash, areaID, expected, shift, true)
                                 movedTotal = movedTotal + 1
                                 passMovedCount = passMovedCount + 1 -- Count for this pass
                                 if movedTotal >= maxMoves then
@@ -959,7 +961,7 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                                 local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
-                                move_room_to_expected_position(targetID, targetHash, roomAreaID, expected, shift)
+                                move_room_to_expected_position(targetID, targetHash, roomAreaID, expected, shift, true)
                                 movedTotal = movedTotal + 1
                                 if movedTotal >= maxMoves then
                                     break
