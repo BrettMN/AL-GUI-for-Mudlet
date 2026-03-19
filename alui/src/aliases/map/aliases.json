@@ -48,6 +48,10 @@
         "regex": "^map\\s+auto-reconcile$"
     },
     {
+        "name": "map auto-grid",
+        "regex": "^map\\s+auto-grid$"
+    },
+    {
         "name": "map test-normalize",
         "regex": "^map\\s+test-normalize(?:\\s+(\\d+))?$"
     }

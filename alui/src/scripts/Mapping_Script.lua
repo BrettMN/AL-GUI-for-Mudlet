@@ -16,6 +16,7 @@ map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
+map.configs.auto_grid_mode = map.configs.auto_grid_mode ~= false
 
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
@@ -271,21 +272,26 @@ local function enforce_area_terrain_policy(areaID, options)
     options = options or {}
 
     local hasPolicyTerrain = area_has_grid_mode_terrain(areaID)
+    local policyActive = hasPolicyTerrain and map.configs.auto_grid_mode
     local pinsCleared = 0
     local gridModeSupported = type(setGridMode) == "function"
     local gridModeApplied = false
 
-    if hasPolicyTerrain and options.clearPins ~= false then
+    if policyActive and options.clearPins ~= false then
         pinsCleared = clear_pins_in_area(areaID)
     end
 
     if gridModeSupported and options.applyGrid ~= false then
-        local desiredMode = hasPolicyTerrain and true or false
-        gridModeApplied = setGridMode(areaID, desiredMode) ~= false
+        if policyActive then
+            gridModeApplied = setGridMode(areaID, true) ~= false
+        elseif hasPolicyTerrain then
+            setGridMode(areaID, false)
+        end
     end
 
     return {
         hasPolicyTerrain = hasPolicyTerrain,
+        policyActive = policyActive,
         pinsCleared = pinsCleared,
         gridModeSupported = gridModeSupported,
         gridModeApplied = gridModeApplied,
@@ -1026,7 +1032,7 @@ function map.normalize_room_layout(maxPasses, maxMoves)
 
     if areaID then
         local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
-        if policy.hasPolicyTerrain then
+        if policy.policyActive then
             local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
             echo("Terrain grid policy active for area '" .. areaName .. "'.")
             if policy.pinsCleared > 0 then
@@ -1278,7 +1284,7 @@ function map.pin_room()
     end
     if areaID then
         local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
-        if policy.hasPolicyTerrain then
+        if policy.policyActive then
             local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
             echo("Cannot pin room in '" .. areaName .. "': terrain policy enforces grid mode and disallows pins.\n")
             if policy.pinsCleared > 0 then
@@ -1583,6 +1589,11 @@ function map.show_help()
         (map.configs.auto_reconcile and "ON" or "OFF") .. ").\n")
     echo("    When ON (default), rooms are repositioned each move to keep exit vectors consistent.\n")
     echo("    Turn OFF to prevent shuffling when moving between areas. Use 'map normalize' to reposition manually.\n")
+    echo("  map auto-grid\n")
+    echo("    Toggle automatic grid mode on/off (currently " ..
+        (map.configs.auto_grid_mode and "ON" or "OFF") .. ").\n")
+    echo("    When ON (default), areas with outdoor terrain use grid mode and pins are disallowed.\n")
+    echo("    Turn OFF to disable grid mode enforcement and allow pinning in all areas.\n")
 end
 
 function map.export_rooms()
