@@ -150,6 +150,203 @@ local function is_room_pinned(roomID)
     return getRoomUserData(roomID, "pinned") == "true"
 end
 
+local grid_mode_terrain_names = {
+    ["plains"] = true,
+    ["light forest"] = true,
+    ["dense forest"] = true,
+    ["hills"] = true,
+    ["mountains"] = true,
+    ["lake"] = true,
+    ["under the lake"] = true,
+    ["under lake"] = true,
+    ["swamp"] = true,
+    ["river"] = true,
+    ["min river"] = true,
+    ["sw river"] = true,
+    ["w river"] = true,
+    ["nw river"] = true,
+    ["n river"] = true,
+    ["ne river"] = true,
+    ["e river"] = true,
+    ["se river"] = true,
+    ["s river"] = true,
+    ["max river"] = true,
+    ["ocean"] = true,
+    ["under ocean"] = true,
+    ["under the ocean"] = true,
+    ["road"] = true,
+    ["bridge"] = true,
+    ["beach"] = true,
+    ["pond"] = true,
+    ["tundra"] = true,
+}
+
+local function normalize_terrain_name(terrain)
+    if type(terrain) ~= "string" then
+        return nil
+    end
+    local value = terrain:gsub("^%s+", ""):gsub("%s+$", "")
+    if value == "" then
+        return nil
+    end
+    return string.lower(value)
+end
+
+local function room_matches_grid_mode_terrain(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then
+        return false
+    end
+
+    local storedTerrain = normalize_terrain_name(getRoomUserData(roomID, "terrain"))
+    if storedTerrain and grid_mode_terrain_names[storedTerrain] then
+        return true
+    end
+
+    local envID = getRoomEnv(roomID)
+    if type(envID) == "number" then
+        for terrainName, spec in pairs(terrain_types) do
+            if type(spec) == "table" and spec.id == envID then
+                local normalized = normalize_terrain_name(terrainName)
+                if normalized and grid_mode_terrain_names[normalized] then
+                    return true
+                end
+            end
+        end
+    end
+
+    if type(map.room_info.vnum) == "string" then
+        local currentRoomID = getRoomIDbyHash(map.room_info.vnum)
+        if currentRoomID == roomID then
+            local currentTerrain = normalize_terrain_name(map.room_info.terrain)
+            if currentTerrain and grid_mode_terrain_names[currentTerrain] then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function area_has_grid_mode_terrain(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return false
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        return false
+    end
+
+    for _, roomID in pairs(rooms) do
+        if room_matches_grid_mode_terrain(roomID) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function clear_pins_in_area(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return 0
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        return 0
+    end
+
+    local cleared = 0
+    for _, roomID in pairs(rooms) do
+        if is_room_pinned(roomID) then
+            deleteRoomUserData(roomID, "pinned")
+            cleared = cleared + 1
+        end
+    end
+
+    return cleared
+end
+
+local function enforce_area_terrain_policy(areaID, options)
+    options = options or {}
+
+    local hasPolicyTerrain = area_has_grid_mode_terrain(areaID)
+    local pinsCleared = 0
+    local gridModeSupported = type(setGridMode) == "function"
+    local gridModeApplied = false
+
+    if hasPolicyTerrain and options.clearPins ~= false then
+        pinsCleared = clear_pins_in_area(areaID)
+    end
+
+    if gridModeSupported and options.applyGrid ~= false then
+        local desiredMode = hasPolicyTerrain and true or false
+        gridModeApplied = setGridMode(areaID, desiredMode) ~= false
+    end
+
+    return {
+        hasPolicyTerrain = hasPolicyTerrain,
+        pinsCleared = pinsCleared,
+        gridModeSupported = gridModeSupported,
+        gridModeApplied = gridModeApplied,
+    }
+end
+
+local forced_z_by_terrain_name = {
+    ["plains"] = 0,
+    ["light forest"] = 0,
+    ["dense forest"] = 0,
+    ["hills"] = 0,
+    ["mountains"] = 0,
+    ["lake"] = 0,
+    ["swamp"] = 0,
+    ["river"] = 0,
+    ["ocean"] = 0,
+    ["road"] = 0,
+    ["bridge"] = 0,
+    ["beach"] = 0,
+    ["pond"] = 0,
+    ["tundra"] = 0,
+}
+
+local function get_forced_z_for_room(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then
+        return nil
+    end
+
+    if type(map.room_info.vnum) == "string" then
+        local currentRoomID = getRoomIDbyHash(map.room_info.vnum)
+        if currentRoomID == roomID then
+            local currentTerrain = normalize_terrain_name(map.room_info.terrain)
+            local currentForcedZ = currentTerrain and forced_z_by_terrain_name[currentTerrain] or nil
+            if type(currentForcedZ) == "number" then
+                return currentForcedZ
+            end
+        end
+    end
+
+    local storedTerrain = normalize_terrain_name(getRoomUserData(roomID, "terrain"))
+    local storedForcedZ = storedTerrain and forced_z_by_terrain_name[storedTerrain] or nil
+    if type(storedForcedZ) == "number" then
+        return storedForcedZ
+    end
+
+    local envID = getRoomEnv(roomID)
+    if type(envID) == "number" then
+        for terrainName, spec in pairs(terrain_types) do
+            if type(spec) == "table" and spec.id == envID then
+                local normalized = normalize_terrain_name(terrainName)
+                local forcedZ = normalized and forced_z_by_terrain_name[normalized] or nil
+                if type(forcedZ) == "number" then
+                    return forcedZ
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function normalize_exit_direction(dir)
     if type(dir) == "string" then
         local lower = string.lower(dir)
@@ -569,7 +766,7 @@ local function shift_room(dir)
     end
 end
 
-local function reconcile_current_room_position(currentRoomID, seedRoomID)
+local function reconcile_current_room_position(currentRoomID)
     if type(map.prev_info.vnum) ~= "string" then
         return
     end
@@ -597,13 +794,6 @@ local function reconcile_current_room_position(currentRoomID, seedRoomID)
     local prevX, prevY, prevZ = getRoomCoordinates(prevID)
     local expected = { prevX - shift[1], prevY - shift[2], prevZ - shift[3] }
     local currentX, currentY, currentZ = getRoomCoordinates(currentRoomID)
-
-    -- PROTECTION: Do not move seed room in z-direction when it's the seed room
-    -- Flatten uses seed room's z as base for elevation propagation.
-    -- seedRoomID is optional; if provided and matches currentRoomID, protect z
-    if seedRoomID and currentRoomID == seedRoomID and shift[3] ~= 0 then
-        expected[3] = currentZ -- Keep current z, don't adjust
-    end
 
     if currentX ~= expected[1] or currentY ~= expected[2] or currentZ ~= expected[3] then
         local areaID = getRoomArea(currentRoomID) or getRoomArea(prevID)
@@ -661,10 +851,6 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                             -- and the two passes cannot fight each other over z values.
                             -- For vertical exits, apply the full shift so up/down stacking is correct.
                             local expectedZ = (shift[3] == 0) and (tz or rz) or (rz + shift[3])
-                            -- Hard-anchor the seed room elevation during normalize.
-                            if targetID == seedRoomID and tz ~= nil then
-                                expectedZ = tz
-                            end
                             local expected = { rx + shift[1], ry + shift[2], expectedZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
@@ -710,6 +896,15 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
     local sx, sy, sz = getRoomCoordinates(seedRoomID)
     if not areaID or sx == nil or sy == nil or sz == nil then
         return 0
+    end
+
+    local seedForcedZ = get_forced_z_for_room(seedRoomID)
+    if type(seedForcedZ) == "number" then
+        sz = seedForcedZ
+        local _, _, currentSeedZ = getRoomCoordinates(seedRoomID)
+        if currentSeedZ ~= seedForcedZ then
+            setRoomCoordinates(seedRoomID, sx, sy, seedForcedZ)
+        end
     end
 
     maxMoves = maxMoves or map.configs.reconcile_deep_max_moves
@@ -758,7 +953,8 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                             -- Determine target's z-level:
                             -- 1. If target is pinned, use its z
                             -- 2. Otherwise use ancestor's z
-                            local targetZ = pinnedRooms[targetID] or ancestorZ
+                            local forcedTargetZ = get_forced_z_for_room(targetID)
+                            local targetZ = forcedTargetZ or pinnedRooms[targetID] or ancestorZ
                             local expected = { rx + shift[1], ry + shift[2], targetZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
@@ -773,7 +969,7 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                             if not visited[targetID] then
                                 visited[targetID] = true
                                 -- Pass along either pinned room's z (if target pinned) or ancestor's z (if not)
-                                local propagateZ = pinnedRooms[targetID] or ancestorZ
+                                local propagateZ = forcedTargetZ or pinnedRooms[targetID] or ancestorZ
                                 table.insert(nextQueue, { roomID = targetID, ancestorZ = propagateZ })
                             end
                         else
@@ -805,6 +1001,22 @@ function map.normalize_room_layout(maxPasses, maxMoves)
 
     local resolvedMaxPasses = maxPasses or map.configs.reconcile_deep_max_passes
     local resolvedMaxMoves = maxMoves or map.configs.reconcile_deep_max_moves
+    local areaID = getRoomArea(roomID)
+
+    if areaID then
+        local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
+        if policy.hasPolicyTerrain then
+            local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
+            echo("Terrain grid policy active for area '" .. areaName .. "'.")
+            if policy.pinsCleared > 0 then
+                echo(" Cleared " .. policy.pinsCleared .. " pin" .. (policy.pinsCleared == 1 and "" or "s") .. ".")
+            end
+            echo("\n")
+            if not policy.gridModeSupported then
+                echo("setGridMode is unavailable in this Mudlet version; area grid mode was not changed.\n")
+            end
+        end
+    end
 
     -- Reconcile runs first to fix x/y for all exits and x/y/z for vertical exits only.
     -- It deliberately preserves a horizontal target's current z so it does not conflict
@@ -1043,6 +1255,23 @@ function map.pin_room()
         echo("Cannot pin: current room is unknown.\n")
         return
     end
+    if areaID then
+        local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
+        if policy.hasPolicyTerrain then
+            local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
+            echo("Cannot pin room in '" .. areaName .. "': terrain policy enforces grid mode and disallows pins.\n")
+            if policy.pinsCleared > 0 then
+                echo("Cleared " ..
+                    policy.pinsCleared ..
+                    " existing pin" .. (policy.pinsCleared == 1 and "" or "s") .. " in this area.\n")
+            end
+            if not policy.gridModeSupported then
+                echo("setGridMode is unavailable in this Mudlet version; area grid mode was not changed.\n")
+            end
+            return
+        end
+    end
+
     setRoomUserData(roomID, "pinned", "true")
     echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") pinned.\n")
     echo("  map normalize will not move this room but will position neighbors around it.\n")
@@ -1241,81 +1470,81 @@ function map.clear_area_cache()
         echo("Re-enter rooms in each area to rebuild associations.\n")
     else
         echo("Area cache cleared (could not read area table for userdata cleanup).\n")
+    end
+end
 
-        function map.test_normalize_determinism(numRuns)
-            numRuns = numRuns or 5
+function map.test_normalize_determinism(numRuns)
+    numRuns = numRuns or 5
 
-            local roomID = getRoomIDbyHash(map.room_info.vnum)
-            if roomID < 1 then
-                echo("Cannot test: current room is unknown.\n")
-                return
-            end
+    local roomID = getRoomIDbyHash(map.room_info.vnum)
+    if roomID < 1 then
+        echo("Cannot test: current room is unknown.\n")
+        return
+    end
 
-            -- Collect initial snapshots by running normalize multiple times
-            local snapshots = {}
+    -- Collect initial snapshots by running normalize multiple times
+    local snapshots = {}
 
-            echo("Running map normalize " .. numRuns .. " times to test determinism...\n")
+    echo("Running map normalize " .. numRuns .. " times to test determinism...\n")
 
-            for runNum = 1, numRuns do
-                -- Run normalize
-                map.normalize_room_layout()
+    for runNum = 1, numRuns do
+        -- Run normalize
+        map.normalize_room_layout()
 
-                -- Snapshot current room state
-                local areaID = getRoomArea(roomID)
-                if areaID then
-                    local rooms = getAreaRooms(areaID)
-                    if type(rooms) == "table" then
-                        local snapshot = {}
-                        for _, id in ipairs(rooms) do
-                            local x, y, z = getRoomCoordinates(id)
-                            if x ~= nil and y ~= nil and z ~= nil then
-                                snapshot[id] = { x = x, y = y, z = z }
-                            end
-                        end
-                        snapshots[runNum] = snapshot
-                        echo("  Run " .. runNum .. ": captured " .. table.count(snapshot) .. " rooms.\n")
+        -- Snapshot current room state
+        local areaID = getRoomArea(roomID)
+        if areaID then
+            local rooms = getAreaRooms(areaID)
+            if type(rooms) == "table" then
+                local snapshot = {}
+                for _, id in ipairs(rooms) do
+                    local x, y, z = getRoomCoordinates(id)
+                    if x ~= nil and y ~= nil and z ~= nil then
+                        snapshot[id] = { x = x, y = y, z = z }
                     end
                 end
-            end
-
-            -- Compare all snapshots
-            echo("\nComparing snapshots...\n")
-            local allMatch = true
-            local firstSnapshot = snapshots[1]
-
-            for runNum = 2, numRuns do
-                local currentSnapshot = snapshots[runNum]
-                local differences = 0
-
-                for roomID, coords in pairs(firstSnapshot) do
-                    local currentCoords = currentSnapshot[roomID]
-                    if not currentCoords then
-                        echo("  Room " .. roomID .. " missing in run " .. runNum .. "!\n")
-                        differences = differences + 1
-                        allMatch = false
-                    elseif coords.x ~= currentCoords.x or coords.y ~= currentCoords.y or coords.z ~= currentCoords.z then
-                        echo("  Room " .. roomID .. " differs in run " .. runNum .. ": (" ..
-                            coords.x .. "," .. coords.y .. "," .. coords.z .. ") vs (" ..
-                            currentCoords.x .. "," .. currentCoords.y .. "," .. currentCoords.z .. ")\n")
-                        differences = differences + 1
-                        allMatch = false
-                    end
-                end
-
-                if differences == 0 then
-                    echo("  Run " .. runNum .. ": MATCH (identical to run 1)\n")
-                else
-                    echo("  Run " .. runNum .. ": " .. differences .. " difference(s)\n")
-                end
-            end
-
-            echo("\n")
-            if allMatch then
-                echo("✓ DETERMINISM TEST PASSED: All " .. numRuns .. " runs produced identical layouts.\n")
-            else
-                echo("✗ DETERMINISM TEST FAILED: Some runs produced different layouts.\n")
+                snapshots[runNum] = snapshot
+                echo("  Run " .. runNum .. ": captured " .. table.count(snapshot) .. " rooms.\n")
             end
         end
+    end
+
+    -- Compare all snapshots
+    echo("\nComparing snapshots...\n")
+    local allMatch = true
+    local firstSnapshot = snapshots[1]
+
+    for runNum = 2, numRuns do
+        local currentSnapshot = snapshots[runNum]
+        local differences = 0
+
+        for roomID, coords in pairs(firstSnapshot) do
+            local currentCoords = currentSnapshot[roomID]
+            if not currentCoords then
+                echo("  Room " .. roomID .. " missing in run " .. runNum .. "!\n")
+                differences = differences + 1
+                allMatch = false
+            elseif coords.x ~= currentCoords.x or coords.y ~= currentCoords.y or coords.z ~= currentCoords.z then
+                echo("  Room " .. roomID .. " differs in run " .. runNum .. ": (" ..
+                    coords.x .. "," .. coords.y .. "," .. coords.z .. ") vs (" ..
+                    currentCoords.x .. "," .. currentCoords.y .. "," .. currentCoords.z .. ")\n")
+                differences = differences + 1
+                allMatch = false
+            end
+        end
+
+        if differences == 0 then
+            echo("  Run " .. runNum .. ": MATCH (identical to run 1)\n")
+        else
+            echo("  Run " .. runNum .. ": " .. differences .. " difference(s)\n")
+        end
+    end
+
+    echo("\n")
+    if allMatch then
+        echo("✓ DETERMINISM TEST PASSED: All " .. numRuns .. " runs produced identical layouts.\n")
+    else
+        echo("✗ DETERMINISM TEST FAILED: Some runs produced different layouts.\n")
     end
 end
 
