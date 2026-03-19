@@ -992,6 +992,25 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
     return movedTotal
 end
 
+local function get_area_name_by_id(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return nil
+    end
+
+    local areas = getAreaTable()
+    if type(areas) ~= "table" then
+        return nil
+    end
+
+    for name, id in pairs(areas) do
+        if id == areaID then
+            return name
+        end
+    end
+
+    return nil
+end
+
 function map.normalize_room_layout(maxPasses, maxMoves)
     local roomID = getRoomIDbyHash(map.room_info.vnum)
     if roomID < 1 then
@@ -1332,25 +1351,6 @@ local function trim_whitespace(value)
         return ""
     end
     return (value:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function get_area_name_by_id(areaID)
-    if type(areaID) ~= "number" or areaID < 1 then
-        return nil
-    end
-
-    local areas = getAreaTable()
-    if type(areas) ~= "table" then
-        return nil
-    end
-
-    for name, id in pairs(areas) do
-        if id == areaID then
-            return name
-        end
-    end
-
-    return nil
 end
 
 local function get_current_area_context()
