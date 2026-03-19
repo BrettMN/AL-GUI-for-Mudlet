@@ -46,5 +46,9 @@
     {
         "name": "map auto-reconcile",
         "regex": "^map\\s+auto-reconcile$"
+    },
+    {
+        "name": "map test-normalize",
+        "regex": "^map\\s+test-normalize(?:\\s+(\\d+))?$"
     }
 ]

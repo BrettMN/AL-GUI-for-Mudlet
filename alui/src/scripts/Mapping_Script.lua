@@ -210,10 +210,16 @@ local function sorted_exit_pairs(exits)
             seen[dir] = true
         end
     end
+    -- Collect unseen exits and sort alphabetically for determinism
+    local unseenExits = {}
     for dir, targetID in pairs(exits) do
         if not seen[dir] then
-            result[#result + 1] = { dir, targetID }
+            unseenExits[#unseenExits + 1] = { dir, targetID }
         end
+    end
+    table.sort(unseenExits, function(a, b) return a[1] < b[1] end)
+    for _, entry in ipairs(unseenExits) do
+        result[#result + 1] = entry
     end
     local i = 0
     return function()
@@ -305,7 +311,7 @@ local function create_neighbors_for_current_room(currentRoomID)
         return
     end
 
-    for dir, targetVnum in pairs(info.exits) do
+    for dir, targetVnum in sorted_exit_pairs(info.exits) do
         if type(targetVnum) == "string" then
             if move_vectors[dir] then
                 local shift = move_vectors[dir]
@@ -563,7 +569,7 @@ local function shift_room(dir)
     end
 end
 
-local function reconcile_current_room_position(currentRoomID)
+local function reconcile_current_room_position(currentRoomID, seedRoomID)
     if type(map.prev_info.vnum) ~= "string" then
         return
     end
@@ -591,6 +597,13 @@ local function reconcile_current_room_position(currentRoomID)
     local prevX, prevY, prevZ = getRoomCoordinates(prevID)
     local expected = { prevX - shift[1], prevY - shift[2], prevZ - shift[3] }
     local currentX, currentY, currentZ = getRoomCoordinates(currentRoomID)
+
+    -- PROTECTION: Do not move seed room in z-direction when it's the seed room
+    -- Flatten uses seed room's z as base for elevation propagation.
+    -- seedRoomID is optional; if provided and matches currentRoomID, protect z
+    if seedRoomID and currentRoomID == seedRoomID and shift[3] ~= 0 then
+        expected[3] = currentZ -- Keep current z, don't adjust
+    end
 
     if currentX ~= expected[1] or currentY ~= expected[2] or currentZ ~= expected[3] then
         local areaID = getRoomArea(currentRoomID) or getRoomArea(prevID)
@@ -621,6 +634,7 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
     while #queue > 0 and pass < maxPasses and movedTotal < maxMoves do
         pass = pass + 1
         local nextQueue = {}
+        local passMovedCount = 0 -- Track moves in this pass
 
         for _, roomID in ipairs(queue) do
             local areaID = getRoomArea(roomID)
@@ -647,12 +661,17 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                             -- and the two passes cannot fight each other over z values.
                             -- For vertical exits, apply the full shift so up/down stacking is correct.
                             local expectedZ = (shift[3] == 0) and (tz or rz) or (rz + shift[3])
+                            -- Hard-anchor the seed room elevation during normalize.
+                            if targetID == seedRoomID and tz ~= nil then
+                                expectedZ = tz
+                            end
                             local expected = { rx + shift[1], ry + shift[2], expectedZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                                 local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
                                 move_room_to_expected_position(targetID, targetHash, areaID, expected, shift)
                                 movedTotal = movedTotal + 1
+                                passMovedCount = passMovedCount + 1 -- Count for this pass
                                 if movedTotal >= maxMoves then
                                     break
                                 end
@@ -673,6 +692,10 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
         end
 
         queue = nextQueue
+        -- Early exit: if this pass moved nothing, stop
+        if passMovedCount == 0 then
+            break
+        end
     end
 
     return movedTotal
@@ -691,7 +714,23 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
     maxMoves = maxMoves or map.configs.reconcile_deep_max_moves
 
-    local queue = { { roomID = seedRoomID, coords = { sx, sy, sz } } }
+    -- PHASE 1: Build pinned-room registry
+    local pinnedRooms = {} -- { roomID -> z_level }
+    local allRooms = getAreaRooms(areaID)
+
+    if type(allRooms) == "table" then
+        for _, roomID in ipairs(allRooms) do
+            if is_room_pinned(roomID) then
+                local _, _, pz = getRoomCoordinates(roomID)
+                if pz ~= nil then
+                    pinnedRooms[roomID] = pz
+                end
+            end
+        end
+    end
+
+    -- PHASE 2: Process rooms with pinned-anchor or seed fallback
+    local queue = { { roomID = seedRoomID, ancestorZ = sz } }
     local visited = { [seedRoomID] = true }
     local movedTotal = 0
 
@@ -700,26 +739,27 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
         for _, entry in ipairs(queue) do
             local roomID = entry.roomID
-            local coords = entry.coords
+            local ancestorZ = entry.ancestorZ
             local roomAreaID = getRoomArea(roomID) or areaID
             local exits = getRoomExits(roomID)
+            local rx, ry, rz = getRoomCoordinates(roomID)
 
-            if roomAreaID and type(exits) == "table" then
+            if roomAreaID and rx ~= nil and ry ~= nil and rz ~= nil and type(exits) == "table" then
                 for dir, targetID in sorted_exit_pairs(exits) do
                     local shift = get_shift_for_exit_key(dir)
                     if type(targetID) == "string" then
                         targetID = tonumber(targetID)
                     end
                     if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
-                        -- Skip rooms belonging to a different area
                         local targetAreaID = getRoomArea(targetID)
                         if targetAreaID == areaID then
-                            -- Use the parent's propagated z (coords[3]) rather than the seed's z.
-                            -- This fans elevation outward from the user's location: rooms inherit
-                            -- their parent's z, and pinned rooms act as elevation anchors so all
-                            -- rooms cardinally beyond a pin adopt the pin's actual z.
-                            local expected = { coords[1] + shift[1], coords[2] + shift[2], coords[3] }
                             local tx, ty, tz = getRoomCoordinates(targetID)
+
+                            -- Determine target's z-level:
+                            -- 1. If target is pinned, use its z
+                            -- 2. Otherwise use ancestor's z
+                            local targetZ = pinnedRooms[targetID] or ancestorZ
+                            local expected = { rx + shift[1], ry + shift[2], targetZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
                                 local targetHash = getRoomHashByID and getRoomHashByID(targetID) or ""
@@ -732,15 +772,9 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
                             if not visited[targetID] then
                                 visited[targetID] = true
-                                -- If this room is pinned, propagate BFS from its actual position
-                                -- so rooms beyond it are placed relative to where it really sits.
-                                local propagateCoords
-                                if is_room_pinned(targetID) then
-                                    propagateCoords = { tx, ty, tz }
-                                else
-                                    propagateCoords = expected
-                                end
-                                table.insert(nextQueue, { roomID = targetID, coords = propagateCoords })
+                                -- Pass along either pinned room's z (if target pinned) or ancestor's z (if not)
+                                local propagateZ = pinnedRooms[targetID] or ancestorZ
+                                table.insert(nextQueue, { roomID = targetID, ancestorZ = propagateZ })
                             end
                         else
                             if not visited[targetID] then
@@ -1207,6 +1241,81 @@ function map.clear_area_cache()
         echo("Re-enter rooms in each area to rebuild associations.\n")
     else
         echo("Area cache cleared (could not read area table for userdata cleanup).\n")
+
+        function map.test_normalize_determinism(numRuns)
+            numRuns = numRuns or 5
+
+            local roomID = getRoomIDbyHash(map.room_info.vnum)
+            if roomID < 1 then
+                echo("Cannot test: current room is unknown.\n")
+                return
+            end
+
+            -- Collect initial snapshots by running normalize multiple times
+            local snapshots = {}
+
+            echo("Running map normalize " .. numRuns .. " times to test determinism...\n")
+
+            for runNum = 1, numRuns do
+                -- Run normalize
+                map.normalize_room_layout()
+
+                -- Snapshot current room state
+                local areaID = getRoomArea(roomID)
+                if areaID then
+                    local rooms = getAreaRooms(areaID)
+                    if type(rooms) == "table" then
+                        local snapshot = {}
+                        for _, id in ipairs(rooms) do
+                            local x, y, z = getRoomCoordinates(id)
+                            if x ~= nil and y ~= nil and z ~= nil then
+                                snapshot[id] = { x = x, y = y, z = z }
+                            end
+                        end
+                        snapshots[runNum] = snapshot
+                        echo("  Run " .. runNum .. ": captured " .. table.count(snapshot) .. " rooms.\n")
+                    end
+                end
+            end
+
+            -- Compare all snapshots
+            echo("\nComparing snapshots...\n")
+            local allMatch = true
+            local firstSnapshot = snapshots[1]
+
+            for runNum = 2, numRuns do
+                local currentSnapshot = snapshots[runNum]
+                local differences = 0
+
+                for roomID, coords in pairs(firstSnapshot) do
+                    local currentCoords = currentSnapshot[roomID]
+                    if not currentCoords then
+                        echo("  Room " .. roomID .. " missing in run " .. runNum .. "!\n")
+                        differences = differences + 1
+                        allMatch = false
+                    elseif coords.x ~= currentCoords.x or coords.y ~= currentCoords.y or coords.z ~= currentCoords.z then
+                        echo("  Room " .. roomID .. " differs in run " .. runNum .. ": (" ..
+                            coords.x .. "," .. coords.y .. "," .. coords.z .. ") vs (" ..
+                            currentCoords.x .. "," .. currentCoords.y .. "," .. currentCoords.z .. ")\n")
+                        differences = differences + 1
+                        allMatch = false
+                    end
+                end
+
+                if differences == 0 then
+                    echo("  Run " .. runNum .. ": MATCH (identical to run 1)\n")
+                else
+                    echo("  Run " .. runNum .. ": " .. differences .. " difference(s)\n")
+                end
+            end
+
+            echo("\n")
+            if allMatch then
+                echo("✓ DETERMINISM TEST PASSED: All " .. numRuns .. " runs produced identical layouts.\n")
+            else
+                echo("✗ DETERMINISM TEST FAILED: Some runs produced different layouts.\n")
+            end
+        end
     end
 end
 
