@@ -60,6 +60,7 @@ local terrain_types = {
     ["beach"] = { id = 43, r = 255, g = 239, b = 213 },  -- 'papayawhip'
     ["pond"] = { id = 44, r = 0, g = 25, b = 167 },
     ["tundra"] = { id = 45, r = 245, g = 245, b = 245 }, -- 'whitesmoke'
+    ["unvisited"] = { id = 46, r = 10, g = 10, b = 10 }, -- light grey placeholder
 }
 
 -- list of possible movement directions and appropriate coordinate changes
@@ -553,6 +554,11 @@ local function create_neighbors_for_current_room(currentRoomID)
                         setRoomName(targetID, targetVnum)
                         setRoomArea(targetID, areaID)
                         setRoomCoordinates(targetID, coords[1], coords[2], coords[3])
+                        setRoomEnv(targetID, terrain_types["unvisited"].id)
+                        local currentTerrain = normalize_terrain_name(info.terrain)
+                        if currentTerrain and forced_z_by_terrain_name[currentTerrain] ~= nil then
+                            setRoomUserData(targetID, "terrain", info.terrain)
+                        end
                     end
                 end
 
@@ -596,6 +602,11 @@ local function create_neighbors_for_current_room(currentRoomID)
                             setRoomName(targetID, targetVnum)
                             setRoomArea(targetID, areaID)
                             setRoomCoordinates(targetID, targetCoords[1], targetCoords[2], targetCoords[3])
+                            setRoomEnv(targetID, terrain_types["unvisited"].id)
+                            local currentTerrain = normalize_terrain_name(info.terrain)
+                            if currentTerrain and forced_z_by_terrain_name[currentTerrain] ~= nil then
+                                setRoomUserData(targetID, "terrain", info.terrain)
+                            end
                         end
                         addSpecialExit(currentRoomID, targetID, dir)
                     else
@@ -740,6 +751,9 @@ local function make_room()
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
     apply_room_environment(thisRoom, info.terrain)
+    if type(info.terrain) == "string" and info.terrain ~= "" then
+        setRoomUserData(thisRoom, "terrain", info.terrain)
+    end
     for dir, id in pairs(info.exits) do
         -- need to see how special exits are represented to handle those properly here
         if type(id) == "string" then
@@ -1596,6 +1610,68 @@ function map.show_help()
         (map.configs.auto_grid_mode and "ON" or "OFF") .. ").\n")
     echo("    When ON (default), areas with outdoor terrain use grid mode and pins are disallowed.\n")
     echo("    Turn OFF to disable grid mode enforcement and allow pinning in all areas.\n\n")
+    echo("  map apply-terrain\n")
+    echo("    Apply the current room's terrain type to all unset rooms in the current area.\n")
+    echo("    Rooms with no environment (env -1 or 0) inherit the current room's terrain color and type.\n")
+    echo("    Rooms that already have an environment but no stored terrain userdata get it back-filled.\n")
+    echo("    Only works when the current room's terrain is an outdoor forced-z type (plains, forest, etc).\n\n")
+end
+
+function map.apply_area_terrain()
+    local roomID, areaID, areaName = get_current_area_context()
+    if not areaID then
+        echo("Cannot apply terrain: current area is unknown.\n")
+        return
+    end
+
+    local currentTerrain = normalize_terrain_name(map.room_info.terrain)
+    if not currentTerrain or forced_z_by_terrain_name[currentTerrain] == nil then
+        echo("Cannot apply terrain: current room's terrain '" ..
+            tostring(map.room_info.terrain) .. "' is not a forced-z outdoor type.\n")
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        echo("No rooms found in area '" .. (areaName or ("#" .. areaID)) .. "'.\n")
+        return
+    end
+
+    -- Build reverse lookup: envID -> terrain name (first match)
+    local envToTerrain = {}
+    for terrainName, spec in pairs(terrain_types) do
+        if type(spec) == "table" and not envToTerrain[spec.id] then
+            envToTerrain[spec.id] = terrainName
+        end
+    end
+
+    local envApplied = 0
+    local terrainBackfilled = 0
+
+    for _, rid in pairs(rooms) do
+        local envID = getRoomEnv(rid)
+        local storedTerrain = getRoomUserData(rid, "terrain")
+
+        if envID == -1 or envID == 0 then
+            -- Room has no environment set — apply current room's terrain
+            apply_room_environment(rid, map.room_info.terrain)
+            setRoomUserData(rid, "terrain", map.room_info.terrain)
+            envApplied = envApplied + 1
+        elseif type(storedTerrain) ~= "string" or storedTerrain == "" then
+            -- Room has an environment but no terrain userdata — back-fill from env
+            local reverseName = envToTerrain[envID]
+            if reverseName then
+                setRoomUserData(rid, "terrain", reverseName)
+                terrainBackfilled = terrainBackfilled + 1
+            end
+        end
+    end
+
+    updateMap()
+    echo("Area '" .. (areaName or ("#" .. areaID)) .. "': applied terrain to " ..
+        envApplied .. " unset room" .. (envApplied == 1 and "" or "s") ..
+        ", back-filled terrain data on " .. terrainBackfilled .. " room" ..
+        (terrainBackfilled == 1 and "" or "s") .. ".\n")
 end
 
 function map.export_rooms()
@@ -1682,6 +1758,9 @@ local function handle_move()
             end
 
             apply_room_environment(rnum, info.terrain)
+            if type(info.terrain) == "string" and info.terrain ~= "" then
+                setRoomUserData(rnum, "terrain", info.terrain)
+            end
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
 
