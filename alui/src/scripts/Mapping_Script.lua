@@ -60,7 +60,7 @@ local terrain_types = {
     ["beach"] = { id = 43, r = 255, g = 239, b = 213 },  -- 'papayawhip'
     ["pond"] = { id = 44, r = 0, g = 25, b = 167 },
     ["tundra"] = { id = 45, r = 245, g = 245, b = 245 }, -- 'whitesmoke'
-    ["unvisited"] = { id = 46, r = 10, g = 10, b = 10 }, -- light grey placeholder
+    ["unvisited"] = { id = 46, r = 50, g = 50, b = 50 }, -- light grey placeholder
 }
 
 -- list of possible movement directions and appropriate coordinate changes
@@ -1079,6 +1079,88 @@ function map.normalize_room_layout(maxPasses, maxMoves)
     )
 end
 
+-- Performs a single-pass BFS coordinate assignment starting from the current room.
+-- Unlike normalize (which corrects rooms relative to their existing coordinates over
+-- multiple passes), this rebuilds every reachable room's coordinates purely from
+-- exit topology: each room is placed at parent_coords + exit_shift.  The first BFS
+-- path to reach a room wins, so FIFO order from the seed determines positions.
+--
+-- When to prefer this over normalize:
+--   • Two groups were mapped independently and then linked by exits, leaving one
+--     entire group displaced by many units.
+--   • Vertical "up/down" stub rooms ended up stacked at z:0 instead of z:±1.
+--   • Large y/x coordinate jumps that multi-pass reconcile would take many passes to fix.
+--
+-- Pinned rooms are never moved; their stored coordinates are used as the base position
+-- for computing their neighbors so they act as anchors for the surrounding layout.
+function map.recalculate_room_layout()
+    local seedID = getRoomIDbyHash(map.room_info.vnum)
+    if type(seedID) ~= "number" or seedID < 1 then
+        echo("Cannot recalculate: current room is unknown.\n")
+        return
+    end
+
+    local areaID = getRoomArea(seedID)
+    if not areaID then
+        echo("Cannot recalculate: current room has no area.\n")
+        return
+    end
+
+    local sx, sy, sz = getRoomCoordinates(seedID)
+    if sx == nil then
+        echo("Cannot recalculate: current room has no coordinates.\n")
+        return
+    end
+
+    -- FIFO queue: each entry carries the coordinates to use as base for that room's exits.
+    local queue      = { { id = seedID, x = sx, y = sy, z = sz } }
+    local visited    = { [seedID] = true }
+    local movedCount = 0
+
+    while #queue > 0 do
+        local entry = table.remove(queue, 1)
+        local exits = getRoomExits(entry.id)
+
+        if type(exits) == "table" then
+            for dir, targetID in sorted_exit_pairs(exits) do
+                if type(targetID) == "string" then
+                    targetID = tonumber(targetID)
+                end
+
+                if type(targetID) == "number" and targetID > 0 and not visited[targetID] then
+                    visited[targetID]  = true
+
+                    local shift        = get_shift_for_exit_key(dir)
+                    local targetAreaID = getRoomArea(targetID)
+
+                    if shift and targetAreaID == areaID then
+                        local tx = entry.x + shift[1]
+                        local ty = entry.y + shift[2]
+                        local tz = entry.z + shift[3]
+
+                        if is_room_pinned(targetID) then
+                            -- Pinned: keep its stored position as base for neighbors.
+                            local px, py, pz = getRoomCoordinates(targetID)
+                            table.insert(queue, { id = targetID, x = px, y = py, z = pz })
+                        else
+                            local cx, cy, cz = getRoomCoordinates(targetID)
+                            if cx ~= tx or cy ~= ty or cz ~= tz then
+                                setRoomCoordinates(targetID, tx, ty, tz)
+                                movedCount = movedCount + 1
+                            end
+                            table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    updateMap()
+    echo("Topology recalculation repositioned " .. movedCount ..
+        " room" .. (movedCount == 1 and "" or "s") .. ".\n")
+end
+
 -- Returns a list of components, where each component is a list of roomIDs.
 -- Two rooms are in the same component if they are reachable from each other via
 -- horizontal exits only (cardinal and diagonal, z-shift == 0).
@@ -1615,6 +1697,12 @@ function map.show_help()
     echo("    Rooms with no environment (env -1 or 0) inherit the current room's terrain color and type.\n")
     echo("    Rooms that already have an environment but no stored terrain userdata get it back-filled.\n")
     echo("    Only works when the current room's terrain is an outdoor forced-z type (plains, forest, etc).\n\n")
+    echo("  map recalculate\n")
+    echo("    Rebuild all room coordinates from scratch using exit topology from the current room.\n")
+    echo("    Each room is placed at parent-coords + exit-direction. First BFS path to each room wins.\n")
+    echo("    More reliable than normalize when large groups of rooms have badly wrong coordinates\n")
+    echo("    (e.g. two independently mapped groups linked by exits, or vertical stubs stuck at z:0).\n")
+    echo("    Pinned rooms are not moved; their position is used as an anchor for surrounding rooms.\n\n")
 end
 
 function map.apply_area_terrain()

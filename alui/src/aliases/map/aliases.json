@@ -58,5 +58,9 @@
     {
         "name": "map apply-terrain",
         "regex": "^map\\s+apply-terrain$"
+    },
+    {
+        "name": "map recalculate",
+        "regex": "^map\\s+recalculate$"
     }
 ]
