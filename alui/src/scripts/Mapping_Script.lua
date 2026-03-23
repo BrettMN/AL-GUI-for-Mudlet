@@ -1762,7 +1762,7 @@ local function handle_move()
                 setRoomUserData(rnum, "terrain", info.terrain)
             end
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
-            echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
+            -- echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
 
             local stubs = getExitStubs1(rnum)
 
@@ -1921,8 +1921,30 @@ end
 
 function map.eventHandler(event, ...)
     if event == "gmcp.Room.Info" then
-        echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
-        echo("Map Room Info:\n" .. yajl.to_string(map.room_info) .. "\n")
+        -- echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
+        echo("\nGMCP Room Info:")
+        echo("\n\tvnum: " .. gmcp.Room.Info.vnum)
+        echo("\n\tarea: " .. gmcp.Room.Info.area)
+        echo("\n\texits:")
+        if type(gmcp.Room.Info.exits) == "table" then
+            for k, v in pairs(gmcp.Room.Info.exits) do
+                echo("\n\t\t" .. k .. ": " .. v)
+            end
+        else
+            echo("\n\t\tnone")
+        end
+        echo("\n")
+        -- echo("\n\t\tnorth:" .. gmcp.Room.Info.exits.north)
+        -- echo("\n\t\tnortheast:" .. gmcp.Room.Info.exits.northeast)
+        -- echo("\n\t\teast:" .. gmcp.Room.Info.exits.east)
+        -- echo("\n\t\tsoutheast:" .. gmcp.Room.Info.exits.southeast)
+        -- echo("\n\t\tsouth:" .. gmcp.Room.Info.exits.south)
+        -- echo("\n\t\tsouthwest:" .. gmcp.Room.Info.exits.southwest)
+        -- echo("\n\t\twest:" .. gmcp.Room.Info.exits.west)
+        -- echo("\n\t\tnorthwest:" .. gmcp.Room.Info.exits.northwest)
+
+        -- echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
+        -- echo("Map Room Info:\n" .. yajl.to_string(map.room_info) .. "\n")
 
         map.prev_info = map.room_info
         map.room_info = {
