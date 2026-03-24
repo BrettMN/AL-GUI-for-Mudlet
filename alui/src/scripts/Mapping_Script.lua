@@ -18,6 +18,14 @@ map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
 map.configs.auto_grid_mode = map.configs.auto_grid_mode ~= false
 
+-- FIFO queue for GMCP room events — prevents data loss during fast movement.
+-- Each entry is a deep-copied snapshot captured at event-receive time so that
+-- rapid movement (multiple rooms per network batch) doesn't overwrite data
+-- before handle_move() gets a chance to run.
+local room_event_queue = {}
+local queue_processing = false
+local queue_drain_timer = nil
+
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
     mapper = { x = 0, y = 0, width = "100%", height = "100%" }
@@ -1810,7 +1818,9 @@ function map.export_rooms()
     echo("Exported " .. #result .. " room" .. (#result == 1 and "" or "s") .. " to clipboard.\n")
 end
 
-local function handle_move()
+local function handle_move(isLastInBatch)
+    -- Default true so direct callers (e.g. map make-room) get full behaviour.
+    if isLastInBatch == nil then isLastInBatch = true end
     local info = map.room_info
     if type(info.vnum) ~= "string" then
         return
@@ -1846,6 +1856,12 @@ local function handle_move()
             end
 
             apply_room_environment(rnum, info.terrain)
+            -- Update the room name every visit so placeholder rooms (created by
+            -- create_neighbors_for_current_room with the hash as their name) get
+            -- their real GMCP name the first time the player actually enters them.
+            if type(info.name) == "string" and info.name ~= "" then
+                setRoomName(rnum, info.name)
+            end
             if type(info.terrain) == "string" and info.terrain ~= "" then
                 setRoomUserData(rnum, "terrain", info.terrain)
             end
@@ -1876,13 +1892,38 @@ local function handle_move()
                 end
             end
 
+            -- create_neighbors runs every room so placeholder rooms exist for
+            -- the next queued entry to link against via getRoomIDbyHash.
             create_neighbors_for_current_room(rnum)
-            if map.configs.auto_reconcile then
-                reconcile_connected_rooms(rnum)
+            -- Heavy work (reconcile + view centering) only on the last room in
+            -- the batch so rapid movement doesn't stall behind per-room BFS.
+            if isLastInBatch then
+                if map.configs.auto_reconcile then
+                    reconcile_connected_rooms(rnum)
+                end
+                updateMap()
+                centerview(rnum)
             end
-            centerview(rnum)
         end
     end
+end
+
+-- Drains room_event_queue in FIFO order, processing each snapshot through
+-- handle_move() with correct map.prev_info → map.room_info chaining.
+-- Scheduled via tempTimer(0, ...) so all GMCP events from one network batch
+-- are captured before processing starts, guaranteeing order.
+local function process_room_queue()
+    -- Guard against re-entrant calls (shouldn't happen in single-threaded Lua,
+    -- but defensive in case a future Mudlet version changes scheduling).
+    while #room_event_queue > 0 do
+        local snapshot = table.remove(room_event_queue, 1)
+        map.prev_info = map.room_info
+        map.room_info = snapshot
+        local isLast = (#room_event_queue == 0)
+        handle_move(isLast)
+    end
+    queue_processing = false
+    queue_drain_timer = nil
 end
 
 local function config()
@@ -2009,45 +2050,30 @@ end
 
 function map.eventHandler(event, ...)
     if event == "gmcp.Room.Info" then
-        -- echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
-        echo("\nGMCP Room Info:")
-        echo("\n\tvnum: " .. gmcp.Room.Info.vnum)
-        echo("\n\tarea: " .. gmcp.Room.Info.area)
-        echo("\n\texits:")
+        -- Deep-copy the GMCP data immediately. gmcp.Room.Info is a shared global
+        -- that Mudlet overwrites with the NEXT room's data between event firings,
+        -- so any reference to it after this point would see stale/future data.
+        local exits = {}
         if type(gmcp.Room.Info.exits) == "table" then
             for k, v in pairs(gmcp.Room.Info.exits) do
-                echo("\n\t\t" .. k .. ": " .. v)
+                exits[k] = v
             end
-        else
-            echo("\n\t\tnone")
         end
-        echo("\n")
-        -- echo("\n\t\tnorth:" .. gmcp.Room.Info.exits.north)
-        -- echo("\n\t\tnortheast:" .. gmcp.Room.Info.exits.northeast)
-        -- echo("\n\t\teast:" .. gmcp.Room.Info.exits.east)
-        -- echo("\n\t\tsoutheast:" .. gmcp.Room.Info.exits.southeast)
-        -- echo("\n\t\tsouth:" .. gmcp.Room.Info.exits.south)
-        -- echo("\n\t\tsouthwest:" .. gmcp.Room.Info.exits.southwest)
-        -- echo("\n\t\twest:" .. gmcp.Room.Info.exits.west)
-        -- echo("\n\t\tnorthwest:" .. gmcp.Room.Info.exits.northwest)
-
-        -- echo("\nGMCP Room Info:\n" .. yajl.to_string(gmcp.Room.Info) .. "\n")
-        -- echo("Map Room Info:\n" .. yajl.to_string(map.room_info) .. "\n")
-
-        map.prev_info = map.room_info
-        map.room_info = {
-            vnum = gmcp.Room.Info.vnum,
-            area = gmcp.Room.Info.area,
-            name = gmcp.Room.Info.brief,
+        local snapshot = {
+            vnum    = gmcp.Room.Info.vnum,
+            area    = gmcp.Room.Info.area,
+            name    = gmcp.Room.Info.brief,
             terrain = gmcp.Room.Info.terrain,
-            exits = gmcp.Room.Info.exits
+            exits   = exits,
         }
-        if type(map.room_info.exits) == "table" then
-            for k, v in pairs(map.room_info.exits) do
-                map.room_info.exits[k] = v
-            end
+        table.insert(room_event_queue, snapshot)
+        -- Schedule the drain function on the next timer tick (0 s delay).
+        -- All GMCP events fired in the same network batch will be queued
+        -- before the timer fires, so process_room_queue sees them all in order.
+        if not queue_processing then
+            queue_processing = true
+            queue_drain_timer = tempTimer(0, function() process_room_queue() end)
         end
-        handle_move()
     elseif event == "shiftRoom" then
         local args = { ... }
         local dir = exitmap[args[1]] or args[1]
