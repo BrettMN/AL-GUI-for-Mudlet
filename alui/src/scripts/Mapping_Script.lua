@@ -977,7 +977,9 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                     end
                     if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
                         local targetAreaID = getRoomArea(targetID)
-                        if targetAreaID == areaID then
+                        if targetAreaID ~= areaID then
+                            if not visited[targetID] then visited[targetID] = true end
+                        else
                             local tx, ty, tz = getRoomCoordinates(targetID)
 
                             -- Determine target's z-level:
@@ -1001,10 +1003,6 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                                 -- Pass along either pinned room's z (if target pinned) or ancestor's z (if not)
                                 local propagateZ = forcedTargetZ or pinnedRooms[targetID] or ancestorZ
                                 table.insert(nextQueue, { roomID = targetID, ancestorZ = propagateZ })
-                            end
-                        else
-                            if not visited[targetID] then
-                                visited[targetID] = true
                             end
                         end
                     end
@@ -1169,217 +1167,6 @@ function map.recalculate_room_layout()
         " room" .. (movedCount == 1 and "" or "s") .. ".\n")
 end
 
--- Returns a list of components, where each component is a list of roomIDs.
--- Two rooms are in the same component if they are reachable from each other via
--- horizontal exits only (cardinal and diagonal, z-shift == 0).
--- Vertical and special exits are excluded so that layered areas (e.g. bridge
--- above + path below) end up in separate components.
-local function build_horizontal_components(areaID)
-    local rooms = getAreaRooms(areaID)
-    if not rooms or #rooms == 0 then
-        return {}
-    end
-
-    local adj = {}
-    for _, roomID in ipairs(rooms) do
-        adj[roomID] = adj[roomID] or {}
-        local exits = getRoomExits(roomID)
-        if type(exits) == "table" then
-            for dir, targetID in sorted_exit_pairs(exits) do
-                local shift = get_shift_for_exit_key(dir)
-                if type(targetID) == "string" then
-                    targetID = tonumber(targetID)
-                end
-                if is_horizontal_shift(shift) and type(targetID) == "number" and targetID > 0 then
-                    if getRoomArea(targetID) == areaID then
-                        adj[roomID][targetID] = true
-                    end
-                end
-            end
-        end
-    end
-
-    local visited = {}
-    local components = {}
-    for _, startID in ipairs(rooms) do
-        if not visited[startID] then
-            local component = {}
-            local queue = { startID }
-            visited[startID] = true
-            while #queue > 0 do
-                local cur = table.remove(queue, 1)
-                table.insert(component, cur)
-                for neighbor in pairs(adj[cur] or {}) do
-                    if not visited[neighbor] then
-                        visited[neighbor] = true
-                        table.insert(queue, neighbor)
-                    end
-                end
-            end
-            table.insert(components, component)
-        end
-    end
-
-    return components
-end
-
--- Returns a table mapping "x,y,z" keys to the list of roomIDs at that position,
--- only for positions occupied by more than one room.
-local function find_overlap_positions(areaID)
-    local rooms = getAreaRooms(areaID)
-    if not rooms or #rooms == 0 then
-        return {}
-    end
-
-    local byPos = {}
-    for _, roomID in ipairs(rooms) do
-        local x, y, z = getRoomCoordinates(roomID)
-        if x ~= nil and y ~= nil and z ~= nil then
-            local key = x .. "," .. y .. "," .. z
-            byPos[key] = byPos[key] or {}
-            table.insert(byPos[key], roomID)
-        end
-    end
-
-    local overlaps = {}
-    for key, ids in pairs(byPos) do
-        if #ids > 1 then
-            overlaps[key] = ids
-        end
-    end
-
-    return overlaps
-end
-
--- Separates overlapping horizontal layers within the current area.
--- Each horizontally-connected component is treated as a distinct layer.
--- The largest component (by room count) keeps its z-values; smaller components
--- that participate in overlaps are shifted vertically to a clear z-slot.
-function map.separate_overlaps()
-    local _, areaID, areaName = get_current_area_context()
-    if not areaID then
-        echo("Cannot separate overlaps: current area is unknown.\n")
-        return
-    end
-
-    local overlaps = find_overlap_positions(areaID)
-    if not next(overlaps) then
-        echo("No overlapping rooms found in '" .. (areaName or ("#" .. areaID)) .. "'.\n")
-        return
-    end
-
-    local overlapCount = 0
-    for _ in pairs(overlaps) do
-        overlapCount = overlapCount + 1
-    end
-    echo("Found " .. overlapCount .. " overlapping position(s) in '" ..
-        (areaName or ("#" .. areaID)) .. "'. Separating...\n")
-
-    local components = build_horizontal_components(areaID)
-
-    local roomToComp = {}
-    for i, comp in ipairs(components) do
-        for _, roomID in ipairs(comp) do
-            roomToComp[roomID] = i
-        end
-    end
-
-    -- Determine which components are involved in at least one overlapping position.
-    local involvedComps = {}
-    for _, ids in pairs(overlaps) do
-        for _, roomID in ipairs(ids) do
-            local ci = roomToComp[roomID]
-            if ci then
-                involvedComps[ci] = true
-            end
-        end
-    end
-
-    -- Sort involved components largest-first; the largest keeps its current z.
-    local sortedComps = {}
-    for i, comp in ipairs(components) do
-        if involvedComps[i] then
-            table.insert(sortedComps, { index = i, size = #comp, rooms = comp })
-        end
-    end
-    table.sort(sortedComps, function(a, b) return a.size > b.size end)
-
-    if #sortedComps < 2 then
-        echo("Overlapping rooms are all in the same horizontal layer; cannot auto-separate.\n")
-        echo("Use 'map shift' to manually reposition rooms.\n")
-        return
-    end
-
-    -- Collect all z-values currently used anywhere in the area.
-    local usedZ = {}
-    local allRooms = getAreaRooms(areaID)
-    for _, roomID in ipairs(allRooms) do
-        local _, _, z = getRoomCoordinates(roomID)
-        if z ~= nil then
-            usedZ[z] = true
-        end
-    end
-
-    local gap = 2
-    local totalMoved = 0
-    local layersMoved = 0
-
-    -- Skip index 1 (largest, stays put). Move all others to a clear z-slot.
-    for i = 2, #sortedComps do
-        local comp = sortedComps[i].rooms
-
-        -- Collect the z-values this component currently occupies.
-        local compZ = {}
-        local compZSet = {}
-        for _, roomID in ipairs(comp) do
-            local _, _, z = getRoomCoordinates(roomID)
-            if z ~= nil and not compZSet[z] then
-                compZSet[z] = true
-                compZ[#compZ + 1] = z
-            end
-        end
-
-        -- Find the smallest vertical offset (trying +gap, -gap, +2*gap, -2*gap, ...)
-        -- such that none of (compZ[j] + offset) is already in usedZ.
-        local dz = nil
-        for attempt = 1, 1000 do
-            for _, candidate in ipairs({ attempt * gap, -attempt * gap }) do
-                local ok = true
-                for _, cz in ipairs(compZ) do
-                    if usedZ[cz + candidate] then
-                        ok = false
-                        break
-                    end
-                end
-                if ok then
-                    dz = candidate
-                    break
-                end
-            end
-            if dz then break end
-        end
-
-        if not dz then
-            echo("Could not find a safe z-offset for layer " .. i .. " (skipped).\n")
-        else
-            for _, roomID in ipairs(comp) do
-                local x, y, z = getRoomCoordinates(roomID)
-                if x ~= nil and y ~= nil and z ~= nil then
-                    local newZ = z + dz
-                    setRoomCoordinates(roomID, x, y, newZ)
-                    usedZ[newZ] = true
-                    totalMoved = totalMoved + 1
-                end
-            end
-            layersMoved = layersMoved + 1
-        end
-    end
-
-    updateMap()
-    echo("Separated " .. totalMoved .. " room" .. (totalMoved == 1 and "" or "s") ..
-        " across " .. layersMoved .. " layer" .. (layersMoved == 1 and "" or "s") .. ".\n")
-end
-
 function map.pin_room()
     local roomID, areaID = get_current_area_context()
     if not roomID or roomID < 1 then
@@ -1463,24 +1250,6 @@ local function trim_whitespace(value)
         return ""
     end
     return (value:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function get_current_area_context()
-    if type(map.room_info.vnum) ~= "string" then
-        return nil, nil, nil
-    end
-
-    local roomID = getRoomIDbyHash(map.room_info.vnum)
-    if type(roomID) ~= "number" or roomID < 1 then
-        return nil, nil, nil
-    end
-
-    local areaID = getRoomArea(roomID)
-    if type(areaID) ~= "number" or areaID < 1 then
-        return roomID, nil, nil
-    end
-
-    return roomID, areaID, get_area_name_by_id(areaID)
 end
 
 function map.set_current_area_display_name(newName)
@@ -1674,11 +1443,6 @@ function map.show_help()
     echo("  map clear-area-cache\n")
     echo("    Clear the GMCP area cache and remove stale area-key associations.\n")
     echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n\n")
-    echo("  map separate\n")
-    echo(
-        "    Separate overlapping horizontal layers in the current area by shifting each layer to a unique z-level.\n")
-    echo("    Useful when a path under a bridge or through a tunnel ends up stacked on top of the road above.\n")
-    echo("    The largest layer keeps its position; smaller overlapping layers are shifted vertically.\n\n")
     echo("  map pin\n")
     echo("    Pin the current room so 'map normalize' never moves it.\n")
     echo("    Pinned rooms act as anchors: normalize positions all connected rooms relative to them.\n")

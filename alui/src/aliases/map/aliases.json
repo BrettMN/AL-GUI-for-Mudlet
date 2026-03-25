@@ -20,10 +20,6 @@
         "regex": "^map\\s+make-room$"
     },
     {
-        "name": "map separate",
-        "regex": "^map\\s+separate$"
-    },
-    {
         "name": "map pin",
         "regex": "^map\\s+pin$"
     },
