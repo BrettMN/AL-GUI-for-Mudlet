@@ -16,7 +16,8 @@ map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
-map.configs.auto_grid_mode = map.configs.auto_grid_mode ~= false
+map.configs.auto_grid_mode = map.configs.auto_grid_mode or false
+map.configs.area_auto_grid = map.configs.area_auto_grid or {}
 
 -- FIFO queue for GMCP room events — prevents data loss during fast movement.
 -- Each entry is a deep-copied snapshot captured at event-receive time so that
@@ -281,7 +282,10 @@ local function enforce_area_terrain_policy(areaID, options)
     options = options or {}
 
     local hasPolicyTerrain = area_has_grid_mode_terrain(areaID)
-    local policyActive = hasPolicyTerrain and map.configs.auto_grid_mode
+    local areaKey = tostring(areaID)
+    local areaOverride = map.configs.area_auto_grid[areaKey]
+    local gridEnabled = (areaOverride ~= nil) and areaOverride or map.configs.auto_grid_mode
+    local policyActive = hasPolicyTerrain and gridEnabled
     local pinsCleared = 0
     local gridModeSupported = type(setGridMode) == "function"
     local gridModeApplied = false
@@ -1460,10 +1464,11 @@ function map.show_help()
     echo("    When ON (default), rooms are repositioned each move to keep exit vectors consistent.\n")
     echo("    Turn OFF to prevent shuffling when moving between areas. Use 'map normalize' to reposition manually.\n\n")
     echo("  map auto-grid\n")
-    echo("    Toggle automatic grid mode on/off (currently " ..
-        (map.configs.auto_grid_mode and "ON" or "OFF") .. ").\n")
-    echo("    When ON (default), areas with outdoor terrain use grid mode and pins are disallowed.\n")
-    echo("    Turn OFF to disable grid mode enforcement and allow pinning in all areas.\n\n")
+    echo("    Toggle grid mode for the CURRENT AREA.\n")
+    echo("    Grid mode is auto-enabled when you first enter an area with outdoor terrain.\n")
+    echo("    Use this command to override the auto-detected setting for the current area.\n")
+    echo("    When ON, the area uses grid mode and pins are disallowed.\n")
+    echo("    When OFF, grid mode is disabled and pinning is allowed.\n\n")
     echo("  map apply-terrain\n")
     echo("    Apply the current room's terrain type to all unset rooms in the current area.\n")
     echo("    Rooms with no environment (env -1 or 0) inherit the current room's terrain color and type.\n")
@@ -1629,6 +1634,18 @@ local function handle_move(isLastInBatch)
             if type(info.terrain) == "string" and info.terrain ~= "" then
                 setRoomUserData(rnum, "terrain", info.terrain)
             end
+
+            -- Auto-enable grid mode for areas with outdoor terrain on first visit
+            if currentAreaID and currentAreaID > 0 then
+                local areaKey = tostring(currentAreaID)
+                if map.configs.area_auto_grid[areaKey] == nil and area_has_grid_mode_terrain(currentAreaID) then
+                    map.configs.area_auto_grid[areaKey] = true
+                    if type(setGridMode) == "function" then
+                        setGridMode(currentAreaID, true)
+                    end
+                end
+            end
+
             -- TODO: Could this skip calling getExitStubs1 since we have the exists and directions in info.exits? Maybe we can just loop through those instead of calling getExitStubs1 and then looking up directions again?
             -- echo("Room Exits: " .. yajl.to_string(info.exits) .. "\n")
 
