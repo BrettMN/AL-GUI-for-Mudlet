@@ -58,5 +58,13 @@
     {
         "name": "map recalculate",
         "regex": "^map\\s+recalculate$"
+    },
+    {
+        "name": "map set poi",
+        "regex": "^map\\s+set\\s+poi$"
+    },
+    {
+        "name": "map remove poi",
+        "regex": "^map\\s+remove\\s+poi$"
     }
 ]

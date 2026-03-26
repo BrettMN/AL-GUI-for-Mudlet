@@ -763,6 +763,9 @@ local function make_room()
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
     apply_room_environment(thisRoom, info.terrain)
+    if getRoomChar(thisRoom) == "#" then
+        apply_room_environment(thisRoom, "Inside")
+    end
     if type(info.terrain) == "string" and info.terrain ~= "" then
         setRoomUserData(thisRoom, "terrain", info.terrain)
     end
@@ -1218,6 +1221,33 @@ function map.pin_room()
     echo("  map normalize will not move this room but will position neighbors around it.\n")
 end
 
+function map.set_poi()
+    local roomID = get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot set POI: current room is unknown.\n")
+        return
+    end
+    setRoomChar(roomID, "#")
+    apply_room_environment(roomID, "Inside")
+    updateMap()
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") marked as POI (#).\n")
+end
+
+function map.remove_poi()
+    local roomID = get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot remove POI: current room is unknown.\n")
+        return
+    end
+    setRoomChar(roomID, "")
+    local terrain = getRoomUserData(roomID, "terrain")
+    if type(terrain) == "string" and terrain ~= "" then
+        apply_room_environment(roomID, terrain)
+    end
+    updateMap()
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") POI marker removed.\n")
+end
+
 function map.unpin_room()
     local roomID, areaID = get_current_area_context()
     if not roomID or roomID < 1 then
@@ -1499,6 +1529,11 @@ function map.show_help()
     echo("    More reliable than normalize when large groups of rooms have badly wrong coordinates\n")
     echo("    (e.g. two independently mapped groups linked by exits, or vertical stubs stuck at z:0).\n")
     echo("    Pinned rooms are not moved; their position is used as an anchor for surrounding rooms.\n\n")
+    echo("  map set poi\n")
+    echo("    Set the current room's symbol to '#' and apply the Inside background color.\n")
+    echo("    Useful for marking points of interest (shops, quest givers, etc.) on the map.\n\n")
+    echo("  map remove poi\n")
+    echo("    Remove the POI marker from the current room and restore its original terrain color.\n\n")
 end
 
 function map.apply_area_terrain()
@@ -1644,6 +1679,9 @@ local function handle_move(isLastInBatch)
             end
 
             apply_room_environment(rnum, info.terrain)
+            if getRoomChar(rnum) == "#" then
+                apply_room_environment(rnum, "Inside")
+            end
             -- Update the room name every visit so placeholder rooms (created by
             -- create_neighbors_for_current_room with the hash as their name) get
             -- their real GMCP name the first time the player actually enters them.
