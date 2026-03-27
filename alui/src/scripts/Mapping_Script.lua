@@ -445,6 +445,21 @@ local function sorted_exit_pairs(exits)
     end
 end
 
+-- Returns true when the area uses grid mode or the current room has outdoor
+-- terrain, meaning rooms should never be pushed apart to resolve collisions.
+local function should_skip_stretch_for_area(areaID)
+    if type(areaID) == "number" and areaID > 0 then
+        if map.configs.area_auto_grid[tostring(areaID)] then
+            return true
+        end
+    end
+    local terrain = normalize_terrain_name(map.room_info and map.room_info.terrain)
+    if terrain and forced_z_by_terrain_name[terrain] ~= nil then
+        return true
+    end
+    return false
+end
+
 local function stretch_area_for_new_room(areaID, coords, shift)
     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
     if table.is_empty(overlap) then
@@ -538,7 +553,8 @@ local function create_neighbors_for_current_room(currentRoomID)
                 if targetID > 0 then
                     local tx, ty, tz = getRoomCoordinates(targetID)
                     if map.configs.auto_reconcile and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
-                        move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift)
+                        move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift,
+                            should_skip_stretch_for_area(areaID))
                     end
                 else
                     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
@@ -555,7 +571,7 @@ local function create_neighbors_for_current_room(currentRoomID)
                         end
                     end
 
-                    if not sameHashAtTarget and not table.is_empty(overlap) then
+                    if not sameHashAtTarget and not table.is_empty(overlap) and not should_skip_stretch_for_area(areaID) then
                         stretch_area_for_new_room(areaID, coords, shift)
                     end
 
@@ -605,7 +621,7 @@ local function create_neighbors_for_current_room(currentRoomID)
                             end
                         end
                         if not sameHashAtTarget then
-                            if not table.is_empty(overlap) then
+                            if not table.is_empty(overlap) and not should_skip_stretch_for_area(areaID) then
                                 stretch_area_for_new_room(areaID, targetCoords, guessed)
                             end
                             targetID = createRoomID()
@@ -743,19 +759,21 @@ local function make_room()
             for n = 1, 3 do
                 coords[n] = coords[n] - shift[n]
             end
-            -- map stretching
-            local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-            if not table.is_empty(overlap) then
-                local rooms = getAreaRooms(areaID)
-                local rcoords
-                for _, id in ipairs(rooms) do
-                    rcoords = { getRoomCoordinates(id) }
-                    for n = 1, 3 do
-                        if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
-                            rcoords[n] = rcoords[n] - shift[n]
+            -- map stretching (skip for grid-mode / outdoor-terrain areas)
+            if not should_skip_stretch_for_area(areaID) then
+                local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+                if not table.is_empty(overlap) then
+                    local rooms = getAreaRooms(areaID)
+                    local rcoords
+                    for _, id in ipairs(rooms) do
+                        rcoords = { getRoomCoordinates(id) }
+                        for n = 1, 3 do
+                            if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
+                                rcoords[n] = rcoords[n] - shift[n]
+                            end
                         end
+                        setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
                     end
-                    setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
                 end
             end
         end
