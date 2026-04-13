@@ -18,6 +18,7 @@ map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
 map.configs.auto_grid_mode = map.configs.auto_grid_mode or false
 map.configs.area_auto_grid = map.configs.area_auto_grid or {}
+map.configs.debug_mapper = map.configs.debug_mapper == true
 
 -- FIFO queue for GMCP room events — prevents data loss during fast movement.
 -- Each entry is a deep-copied snapshot captured at event-receive time so that
@@ -26,6 +27,12 @@ map.configs.area_auto_grid = map.configs.area_auto_grid or {}
 local room_event_queue = {}
 local queue_processing = false
 local queue_drain_timer = nil
+
+local function debug_echo(message)
+    if map.configs.debug_mapper then
+        echo(message)
+    end
+end
 
 local defaults = {
     -- using Geyser to handle the mapper in this, since this is a totally new script
@@ -415,6 +422,18 @@ local exit_canonical_order = {
     "south", "southwest", "west", "northwest",
     "up", "down"
 }
+
+local function stable_exit_key(value)
+    local valueType = type(value)
+    if valueType == "number" then
+        return "0:" .. tostring(value)
+    end
+    if valueType == "string" then
+        return "1:" .. value
+    end
+    return "2:" .. tostring(value)
+end
+
 local function sorted_exit_pairs(exits)
     if type(exits) ~= "table" then return function() end end
     local result = {}
@@ -433,7 +452,9 @@ local function sorted_exit_pairs(exits)
             unseenExits[#unseenExits + 1] = { dir, targetID }
         end
     end
-    table.sort(unseenExits, function(a, b) return a[1] < b[1] end)
+    table.sort(unseenExits, function(a, b)
+        return stable_exit_key(a[1]) < stable_exit_key(b[1])
+    end)
     for _, entry in ipairs(unseenExits) do
         result[#result + 1] = entry
     end
@@ -552,7 +573,9 @@ local function create_neighbors_for_current_room(currentRoomID)
                 local targetID = getRoomIDbyHash(targetVnum)
                 if targetID > 0 then
                     local tx, ty, tz = getRoomCoordinates(targetID)
-                    if map.configs.auto_reconcile and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
+                    local targetAreaID = getRoomArea(targetID)
+                    if map.configs.auto_reconcile and targetAreaID == areaID
+                        and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
                         move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift,
                             should_skip_stretch_for_area(areaID))
                     end
@@ -687,10 +710,6 @@ end
 local function make_room()
     local info = map.room_info
     local coords = { 0, 0, 0 }
-    local thisRoom = createRoomID()
-    addRoom(thisRoom)
-    setRoomIDbyHash(thisRoom, info.vnum)
-    setRoomName(thisRoom, info.name)
     local areaID = resolve_area_id_for_room_info(info)
     if not areaID then
         echo("Cannot create room: area could not be resolved.\n")
@@ -778,6 +797,10 @@ local function make_room()
             end
         end
     end
+    local thisRoom = createRoomID()
+    addRoom(thisRoom)
+    setRoomIDbyHash(thisRoom, info.vnum)
+    setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
     apply_room_environment(thisRoom, info.terrain)
@@ -1505,7 +1528,7 @@ function map.show_help()
     echo("  map help\n")
     echo("    Show this help text.\n\n")
     echo("  map normalize [maxPasses maxMoves]\n")
-    echo("    Flatten cardinally connected rooms to the current room elevation, then reconcile connected exits.\n")
+    echo("    Reconcile connected exits, then flatten cardinally connected rooms to the current room elevation.\n")
     echo("    Defaults: maxPasses=" ..
         map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
     echo("    Example: map normalize 5 500\n\n")
@@ -1518,7 +1541,7 @@ function map.show_help()
     echo("    Pin the current room so 'map normalize' never moves it.\n")
     echo("    Pinned rooms act as anchors: normalize positions all connected rooms relative to them.\n")
     echo("    Use this after manually placing a room where you want it (e.g. 3 south and 3 west).\n")
-    echo("    NOTE: Map Pins do not work in on the surface of Terrinor.\n\n")
+    echo("    NOTE: Pins are disallowed in grid-mode outdoor terrain areas (for example, surface Terrinor).\n\n")
     echo("  map unpin\n")
     echo("    Remove the pin from the current room, allowing normalize to reposition it freely.\n\n")
     echo("  map pins\n")
@@ -1669,7 +1692,7 @@ local function handle_move(isLastInBatch)
 
     if type(info.vnum) == "string" then
         local rnum = getRoomIDbyHash(info.vnum)
-        echo("Current room ID: " .. rnum .. "\n")
+        debug_echo("Current room ID: " .. rnum .. "\n")
         if rnum < 1 then
             make_room()
             rnum = getRoomIDbyHash(info.vnum)
@@ -1683,7 +1706,8 @@ local function handle_move(isLastInBatch)
             local correctAreaID = resolve_area_id_for_room_info(info)
             local currentAreaID = getRoomArea(rnum)
             if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
-                echo("Moving room " .. rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                debug_echo("Moving room " ..
+                rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
                 setRoomArea(rnum, correctAreaID)
                 currentAreaID = correctAreaID
             end
@@ -1726,7 +1750,7 @@ local function handle_move(isLastInBatch)
 
             local stubs = getExitStubs1(rnum)
 
-            echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
+            debug_echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
 
             if stubs then
                 for _, n in ipairs(stubs) do
@@ -1737,7 +1761,7 @@ local function handle_move(isLastInBatch)
                         local id         = getRoomIDbyHash(targetVnum)
 
 
-                        echo("Processing exit stub in direction '" ..
+                        debug_echo("Processing exit stub in direction '" ..
                             dir .. "' with target room ID: " .. id .. " and a target vnum: " .. targetVnum .. "\n")
 
                         -- need to see how special exits are represented to handle those properly here
@@ -1773,10 +1797,15 @@ local function process_room_queue()
     -- but defensive in case a future Mudlet version changes scheduling).
     while #room_event_queue > 0 do
         local snapshot = table.remove(room_event_queue, 1)
-        map.prev_info = map.room_info
-        map.room_info = snapshot
-        local isLast = (#room_event_queue == 0)
-        handle_move(isLast)
+        local ok, err = pcall(function()
+            map.prev_info = map.room_info
+            map.room_info = snapshot
+            local isLast = (#room_event_queue == 0)
+            handle_move(isLast)
+        end)
+        if not ok then
+            echo("Mapper queue error: " .. tostring(err) .. "\n")
+        end
     end
     queue_processing = false
     queue_drain_timer = nil
@@ -1851,7 +1880,7 @@ function map.speedwalk(roomID, walkPath, walkDirs)
     walkPath = speedWalkPath
     walkDirs = speedWalkDir
     if #speedWalkPath == 0 then
-        map.echo("No path to chosen room found.", false, true)
+        echo("No path to chosen room found.\n")
         return
     end
     table.insert(walkPath, 1, map.room_info.vnum)
@@ -1861,8 +1890,9 @@ function map.speedwalk(roomID, walkPath, walkDirs)
     repeat
         local id, dir = walkPath[k], walkDirs[k]
         if exitmap[dir] or short[dir] then
-            local door = check_doors(id, exitmap[dir] or dir)
-            local status = door and door[dir]
+            local mappedDir = exitmap[dir] or dir
+            local door = check_doors(id, mappedDir)
+            local status = door and door[mappedDir]
             if status and status > 1 then
                 -- if locked, unlock door
                 if status == 3 then
@@ -1900,7 +1930,7 @@ function doSpeedWalk()
     if #speedWalkPath ~= 0 then
         map.speedwalk(nil, speedWalkPath, speedWalkDir)
     else
-        map.echo("No path to chosen room found.", false, true)
+        echo("No path to chosen room found.\n")
     end
 end
 
