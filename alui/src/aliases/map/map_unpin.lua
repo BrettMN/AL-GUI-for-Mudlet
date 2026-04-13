@@ -1,1 +1,0 @@
-map.unpin_room()

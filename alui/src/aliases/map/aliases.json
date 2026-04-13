@@ -20,18 +20,6 @@
         "regex": "^map\\s+make-room$"
     },
     {
-        "name": "map pin",
-        "regex": "^map\\s+pin$"
-    },
-    {
-        "name": "map unpin",
-        "regex": "^map\\s+unpin$"
-    },
-    {
-        "name": "map pins",
-        "regex": "^map\\s+pins$"
-    },
-    {
         "name": "map export",
         "regex": "^map\\s+export$"
     },
@@ -42,10 +30,6 @@
     {
         "name": "map auto-reconcile",
         "regex": "^map\\s+auto-reconcile$"
-    },
-    {
-        "name": "map auto-grid",
-        "regex": "^map\\s+auto-grid$"
     },
     {
         "name": "map test-normalize",

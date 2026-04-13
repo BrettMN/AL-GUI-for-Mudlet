@@ -16,8 +16,6 @@ map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
-map.configs.auto_grid_mode = map.configs.auto_grid_mode or false
-map.configs.area_auto_grid = map.configs.area_auto_grid or {}
 map.configs.debug_mapper = map.configs.debug_mapper == true
 
 -- FIFO queue for GMCP room events — prevents data loss during fast movement.
@@ -164,41 +162,6 @@ local function is_horizontal_shift(shift)
     return type(shift) == "table" and shift[3] == 0
 end
 
-local function is_room_pinned(roomID)
-    return getRoomUserData(roomID, "pinned") == "true"
-end
-
-local grid_mode_terrain_names = {
-    ["plains"] = true,
-    ["light forest"] = true,
-    ["dense forest"] = true,
-    ["hills"] = true,
-    ["mountains"] = true,
-    ["lake"] = true,
-    ["under the lake"] = true,
-    ["under lake"] = true,
-    ["swamp"] = true,
-    ["river"] = true,
-    ["min river"] = true,
-    ["sw river"] = true,
-    ["w river"] = true,
-    ["nw river"] = true,
-    ["n river"] = true,
-    ["ne river"] = true,
-    ["e river"] = true,
-    ["se river"] = true,
-    ["s river"] = true,
-    ["max river"] = true,
-    ["ocean"] = true,
-    ["under ocean"] = true,
-    ["under the ocean"] = true,
-    ["road"] = true,
-    ["bridge"] = true,
-    ["beach"] = true,
-    ["pond"] = true,
-    ["tundra"] = true,
-}
-
 local function normalize_terrain_name(terrain)
     if type(terrain) ~= "string" then
         return nil
@@ -210,112 +173,8 @@ local function normalize_terrain_name(terrain)
     return string.lower(value)
 end
 
-local function room_matches_grid_mode_terrain(roomID)
-    if type(roomID) ~= "number" or roomID < 1 then
-        return false
-    end
-
-    local storedTerrain = normalize_terrain_name(getRoomUserData(roomID, "terrain"))
-    if storedTerrain and grid_mode_terrain_names[storedTerrain] then
-        return true
-    end
-
-    local envID = getRoomEnv(roomID)
-    if type(envID) == "number" then
-        for terrainName, spec in pairs(terrain_types) do
-            if type(spec) == "table" and spec.id == envID then
-                local normalized = normalize_terrain_name(terrainName)
-                if normalized and grid_mode_terrain_names[normalized] then
-                    return true
-                end
-            end
-        end
-    end
-
-    if type(map.room_info.vnum) == "string" then
-        local currentRoomID = getRoomIDbyHash(map.room_info.vnum)
-        if currentRoomID == roomID then
-            local currentTerrain = normalize_terrain_name(map.room_info.terrain)
-            if currentTerrain and grid_mode_terrain_names[currentTerrain] then
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
-local function area_has_grid_mode_terrain(areaID)
-    if type(areaID) ~= "number" or areaID < 1 then
-        return false
-    end
-
-    local rooms = getAreaRooms(areaID)
-    if type(rooms) ~= "table" then
-        return false
-    end
-
-    for _, roomID in pairs(rooms) do
-        if room_matches_grid_mode_terrain(roomID) then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function clear_pins_in_area(areaID)
-    if type(areaID) ~= "number" or areaID < 1 then
-        return 0
-    end
-
-    local rooms = getAreaRooms(areaID)
-    if type(rooms) ~= "table" then
-        return 0
-    end
-
-    local cleared = 0
-    for _, roomID in pairs(rooms) do
-        if is_room_pinned(roomID) then
-            deleteRoomUserData(roomID, "pinned")
-            cleared = cleared + 1
-        end
-    end
-
-    return cleared
-end
-
-local function enforce_area_terrain_policy(areaID, options)
-    options = options or {}
-
-    local hasPolicyTerrain = area_has_grid_mode_terrain(areaID)
-    local areaKey = tostring(areaID)
-    local areaOverride = map.configs.area_auto_grid[areaKey]
-    local gridEnabled = (areaOverride ~= nil) and areaOverride or map.configs.auto_grid_mode
-    local policyActive = hasPolicyTerrain and gridEnabled
-    local pinsCleared = 0
-    local gridModeSupported = type(setGridMode) == "function"
-    local gridModeApplied = false
-
-    if policyActive and options.clearPins ~= false then
-        pinsCleared = clear_pins_in_area(areaID)
-    end
-
-    if gridModeSupported and options.applyGrid ~= false then
-        if policyActive then
-            gridModeApplied = setGridMode(areaID, true) ~= false
-        elseif hasPolicyTerrain then
-            setGridMode(areaID, false)
-        end
-    end
-
-    return {
-        hasPolicyTerrain = hasPolicyTerrain,
-        policyActive = policyActive,
-        pinsCleared = pinsCleared,
-        gridModeSupported = gridModeSupported,
-        gridModeApplied = gridModeApplied,
-    }
+local function current_room_uses_grid_mode()
+    return map.room_info ~= nil and map.room_info.terrain ~= nil
 end
 
 local forced_z_by_terrain_name = {
@@ -466,19 +325,8 @@ local function sorted_exit_pairs(exits)
     end
 end
 
--- Returns true when the area uses grid mode or the current room has outdoor
--- terrain, meaning rooms should never be pushed apart to resolve collisions.
 local function should_skip_stretch_for_area(areaID)
-    if type(areaID) == "number" and areaID > 0 then
-        if map.configs.area_auto_grid[tostring(areaID)] then
-            return true
-        end
-    end
-    local terrain = normalize_terrain_name(map.room_info and map.room_info.terrain)
-    if terrain and forced_z_by_terrain_name[terrain] ~= nil then
-        return true
-    end
-    return false
+    return current_room_uses_grid_mode()
 end
 
 local function stretch_area_for_new_room(areaID, coords, shift)
@@ -501,11 +349,6 @@ local function stretch_area_for_new_room(areaID, coords, shift)
 end
 
 local function move_room_to_expected_position(roomID, roomHash, areaID, coords, shift, skipStretch)
-    -- Never reposition a pinned room.
-    if is_room_pinned(roomID) then
-        return
-    end
-
     if not skipStretch then
         local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
 
@@ -778,7 +621,7 @@ local function make_room()
             for n = 1, 3 do
                 coords[n] = coords[n] - shift[n]
             end
-            -- map stretching (skip for grid-mode / outdoor-terrain areas)
+            -- map stretching (skip while grid mode is active)
             if not should_skip_stretch_for_area(areaID) then
                 local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
                 if not table.is_empty(overlap) then
@@ -987,22 +830,6 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
     maxMoves = maxMoves or map.configs.reconcile_deep_max_moves
 
-    -- PHASE 1: Build pinned-room registry
-    local pinnedRooms = {} -- { roomID -> z_level }
-    local allRooms = getAreaRooms(areaID)
-
-    if type(allRooms) == "table" then
-        for _, roomID in ipairs(allRooms) do
-            if is_room_pinned(roomID) then
-                local _, _, pz = getRoomCoordinates(roomID)
-                if pz ~= nil then
-                    pinnedRooms[roomID] = pz
-                end
-            end
-        end
-    end
-
-    -- PHASE 2: Process rooms with pinned-anchor or seed fallback
     local queue = { { roomID = seedRoomID, ancestorZ = sz } }
     local visited = { [seedRoomID] = true }
     local movedTotal = 0
@@ -1030,11 +857,8 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
                         else
                             local tx, ty, tz = getRoomCoordinates(targetID)
 
-                            -- Determine target's z-level:
-                            -- 1. If target is pinned, use its z
-                            -- 2. Otherwise use ancestor's z
                             local forcedTargetZ = get_forced_z_for_room(targetID)
-                            local targetZ = forcedTargetZ or pinnedRooms[targetID] or ancestorZ
+                            local targetZ = forcedTargetZ or ancestorZ
                             local expected = { rx + shift[1], ry + shift[2], targetZ }
 
                             if tx ~= expected[1] or ty ~= expected[2] or tz ~= expected[3] then
@@ -1048,8 +872,7 @@ local function flatten_cardinal_connected_rooms(seedRoomID, maxMoves)
 
                             if not visited[targetID] then
                                 visited[targetID] = true
-                                -- Pass along either pinned room's z (if target pinned) or ancestor's z (if not)
-                                local propagateZ = forcedTargetZ or pinnedRooms[targetID] or ancestorZ
+                                local propagateZ = forcedTargetZ or ancestorZ
                                 table.insert(nextQueue, { roomID = targetID, ancestorZ = propagateZ })
                             end
                         end
@@ -1118,15 +941,15 @@ function map.normalize_room_layout(maxPasses, maxMoves)
     local areaID = getRoomArea(roomID)
 
     if areaID then
-        local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
-        if policy.policyActive then
+        local gridModeSupported = type(setGridMode) == "function"
+        if gridModeSupported then
+            setGridMode(areaID, current_room_uses_grid_mode())
+        end
+        if current_room_uses_grid_mode() then
             local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
-            echo("Terrain grid policy active for area '" .. areaName .. "'.")
-            if policy.pinsCleared > 0 then
-                echo(" Cleared " .. policy.pinsCleared .. " pin" .. (policy.pinsCleared == 1 and "" or "s") .. ".")
-            end
+            echo("Grid mode is active for area '" .. areaName .. "' because the current room reports terrain.")
             echo("\n")
-            if not policy.gridModeSupported then
+            if not gridModeSupported then
                 echo("setGridMode is unavailable in this Mudlet version; area grid mode was not changed.\n")
             end
         end
@@ -1134,9 +957,8 @@ function map.normalize_room_layout(maxPasses, maxMoves)
 
     -- Reconcile runs first to fix x/y for all exits and x/y/z for vertical exits only.
     -- It deliberately preserves a horizontal target's current z so it does not conflict
-    -- with flatten.  Flatten runs second and owns z for all cardinally-connected rooms:
-    -- starting at the user's location it fans elevation outward, with pinned rooms acting
-    -- as elevation anchors so everything cardinally beyond them inherits their z.
+    -- with flatten. Flatten runs second and owns z for all cardinally-connected rooms,
+    -- fanning that elevation outward from the current room unless forced-z terrain overrides it.
     local reconcileMoved = reconcile_connected_rooms(roomID, resolvedMaxPasses, resolvedMaxMoves)
     local remainingMoves = math.max(resolvedMaxMoves - reconcileMoved, 0)
     local cardinalMoved = 0
@@ -1164,8 +986,6 @@ end
 --   • Vertical "up/down" stub rooms ended up stacked at z:0 instead of z:±1.
 --   • Large y/x coordinate jumps that multi-pass reconcile would take many passes to fix.
 --
--- Pinned rooms are never moved; their stored coordinates are used as the base position
--- for computing their neighbors so they act as anchors for the surrounding layout.
 function map.recalculate_room_layout()
     local seedID = getRoomIDbyHash(map.room_info.vnum)
     if type(seedID) ~= "number" or seedID < 1 then
@@ -1211,18 +1031,12 @@ function map.recalculate_room_layout()
                         local ty = entry.y + shift[2]
                         local tz = entry.z + shift[3]
 
-                        if is_room_pinned(targetID) then
-                            -- Pinned: keep its stored position as base for neighbors.
-                            local px, py, pz = getRoomCoordinates(targetID)
-                            table.insert(queue, { id = targetID, x = px, y = py, z = pz })
-                        else
-                            local cx, cy, cz = getRoomCoordinates(targetID)
-                            if cx ~= tx or cy ~= ty or cz ~= tz then
-                                setRoomCoordinates(targetID, tx, ty, tz)
-                                movedCount = movedCount + 1
-                            end
-                            table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
+                        local cx, cy, cz = getRoomCoordinates(targetID)
+                        if cx ~= tx or cy ~= ty or cz ~= tz then
+                            setRoomCoordinates(targetID, tx, ty, tz)
+                            movedCount = movedCount + 1
                         end
+                        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
                     end
                 end
             end
@@ -1232,34 +1046,6 @@ function map.recalculate_room_layout()
     updateMap()
     echo("Topology recalculation repositioned " .. movedCount ..
         " room" .. (movedCount == 1 and "" or "s") .. ".\n")
-end
-
-function map.pin_room()
-    local roomID, areaID = get_current_area_context()
-    if not roomID or roomID < 1 then
-        echo("Cannot pin: current room is unknown.\n")
-        return
-    end
-    if areaID then
-        local policy = enforce_area_terrain_policy(areaID, { clearPins = true, applyGrid = true })
-        if policy.policyActive then
-            local areaName = get_area_name_by_id(areaID) or ("#" .. areaID)
-            echo("Cannot pin room in '" .. areaName .. "': terrain policy enforces grid mode and disallows pins.\n")
-            if policy.pinsCleared > 0 then
-                echo("Cleared " ..
-                    policy.pinsCleared ..
-                    " existing pin" .. (policy.pinsCleared == 1 and "" or "s") .. " in this area.\n")
-            end
-            if not policy.gridModeSupported then
-                echo("setGridMode is unavailable in this Mudlet version; area grid mode was not changed.\n")
-            end
-            return
-        end
-    end
-
-    setRoomUserData(roomID, "pinned", "true")
-    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") pinned.\n")
-    echo("  map normalize will not move this room but will position neighbors around it.\n")
 end
 
 function map.set_poi()
@@ -1287,56 +1073,6 @@ function map.remove_poi()
     end
     updateMap()
     echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") POI marker removed.\n")
-end
-
-function map.unpin_room()
-    local roomID, areaID = get_current_area_context()
-    if not roomID or roomID < 1 then
-        echo("Cannot unpin: current room is unknown.\n")
-        return
-    end
-    deleteRoomUserData(roomID, "pinned")
-    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") unpinned.\n")
-end
-
-function map.list_pins()
-    local _, areaID, areaName = get_current_area_context()
-    if not areaID then
-        echo("Cannot list pins: current area is unknown.\n")
-        return
-    end
-
-    local rooms = getAreaRooms(areaID)
-    if not rooms or #rooms == 0 then
-        echo("No rooms in current area.\n")
-        return
-    end
-
-    local pinned = {}
-    for _, roomID in ipairs(rooms) do
-        if is_room_pinned(roomID) then
-            local x, y, z = getRoomCoordinates(roomID)
-            table.insert(pinned, {
-                id = roomID,
-                name = getRoomName(roomID) or "unknown",
-                x = x,
-                y = y,
-                z = z
-            })
-        end
-    end
-
-    if #pinned == 0 then
-        echo("No pinned rooms in '" .. (areaName or ("#" .. areaID)) .. "'.\n")
-        return
-    end
-
-    echo(#pinned .. " pinned room" .. (#pinned == 1 and "" or "s") ..
-        " in '" .. (areaName or ("#" .. areaID)) .. "':\n")
-    for _, r in ipairs(pinned) do
-        echo("  [" .. r.id .. "] " .. r.name ..
-            " at (" .. r.x .. ", " .. r.y .. ", " .. r.z .. ")\n")
-    end
 end
 
 local function trim_whitespace(value)
@@ -1537,15 +1273,6 @@ function map.show_help()
     echo("  map clear-area-cache\n")
     echo("    Clear the GMCP area cache and remove stale area-key associations.\n")
     echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n\n")
-    echo("  map pin\n")
-    echo("    Pin the current room so 'map normalize' never moves it.\n")
-    echo("    Pinned rooms act as anchors: normalize positions all connected rooms relative to them.\n")
-    echo("    Use this after manually placing a room where you want it (e.g. 3 south and 3 west).\n")
-    echo("    NOTE: Pins are disallowed in grid-mode outdoor terrain areas (for example, surface Terrinor).\n\n")
-    echo("  map unpin\n")
-    echo("    Remove the pin from the current room, allowing normalize to reposition it freely.\n\n")
-    echo("  map pins\n")
-    echo("    List all pinned rooms in the current area with their coordinates.\n\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n\n")
     echo("  map auto-reconcile\n")
@@ -1553,12 +1280,6 @@ function map.show_help()
         (map.configs.auto_reconcile and "ON" or "OFF") .. ").\n")
     echo("    When ON (default), rooms are repositioned each move to keep exit vectors consistent.\n")
     echo("    Turn OFF to prevent shuffling when moving between areas. Use 'map normalize' to reposition manually.\n\n")
-    echo("  map auto-grid\n")
-    echo("    Toggle grid mode for the CURRENT AREA.\n")
-    echo("    Grid mode is auto-enabled when you first enter an area with outdoor terrain.\n")
-    echo("    Use this command to override the auto-detected setting for the current area.\n")
-    echo("    When ON, the area uses grid mode and pins are disallowed.\n")
-    echo("    When OFF, grid mode is disabled and pinning is allowed.\n\n")
     echo("  map apply-terrain\n")
     echo("    Apply the current room's terrain type to all unset rooms in the current area.\n")
     echo("    Rooms with no environment (env -1 or 0) inherit the current room's terrain color and type.\n")
@@ -1734,14 +1455,9 @@ local function handle_move(isLastInBatch)
                 setRoomUserData(rnum, "terrain", info.terrain)
             end
 
-            -- Auto-enable grid mode for areas with outdoor terrain on first visit
             if currentAreaID and currentAreaID > 0 then
-                local areaKey = tostring(currentAreaID)
-                if map.configs.area_auto_grid[areaKey] == nil and area_has_grid_mode_terrain(currentAreaID) then
-                    map.configs.area_auto_grid[areaKey] = true
-                    if type(setGridMode) == "function" then
-                        setGridMode(currentAreaID, true)
-                    end
+                if type(setGridMode) == "function" then
+                    setGridMode(currentAreaID, current_room_uses_grid_mode())
                 end
             end
 
