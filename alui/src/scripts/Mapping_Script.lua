@@ -317,6 +317,64 @@ local function get_shift_for_exit_key(dir)
     return move_vectors[normalized]
 end
 
+local function get_room_exit_target(roomID, dir)
+    if type(roomID) ~= "number" or roomID < 1 then
+        return nil
+    end
+
+    local exits = getRoomExits(roomID)
+    if type(exits) ~= "table" then
+        return nil
+    end
+
+    local normalized = normalize_exit_direction(dir) or dir
+    local numericDir = type(normalized) == "string" and stubmap[normalized] or nil
+    local target = exits[normalized]
+    if target == nil and numericDir ~= nil then
+        target = exits[numericDir]
+    end
+
+    if type(target) == "string" then
+        target = tonumber(target)
+    end
+
+    return type(target) == "number" and target or nil
+end
+
+local function room_has_exit_stub(roomID, dir)
+    if type(roomID) ~= "number" or roomID < 1 or type(getExitStubs1) ~= "function" then
+        return false
+    end
+
+    local normalized = normalize_exit_direction(dir) or dir
+    local numericDir = type(normalized) == "string" and stubmap[normalized] or nil
+    if numericDir == nil then
+        return false
+    end
+
+    local stubs = getExitStubs1(roomID)
+    if type(stubs) ~= "table" then
+        return false
+    end
+
+    for _, stubDir in ipairs(stubs) do
+        if stubDir == numericDir then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function ensure_exit_stub(roomID, dir)
+    if get_room_exit_target(roomID, dir) ~= nil or room_has_exit_stub(roomID, dir) then
+        return false
+    end
+
+    setExitStub(roomID, dir, true)
+    return true
+end
+
 -- Returns an iterator over exits in a stable canonical direction order, followed
 -- by any remaining exits not covered by the canonical list (e.g. special exits).
 -- Using this instead of pairs() ensures BFS traversal is deterministic across
@@ -501,11 +559,11 @@ local function create_neighbors_for_current_room(currentRoomID)
                     end
                 end
 
-                setExitStub(currentRoomID, dir, true)
+                ensure_exit_stub(currentRoomID, dir)
                 if targetID > 0 then
                     local reverseDir = reverse_move_vectors[dir]
                     if reverseDir then
-                        setExitStub(targetID, reverseDir, true)
+                        ensure_exit_stub(targetID, reverseDir)
                     end
                     connectExitStub(currentRoomID, targetID, dir)
                 end
@@ -702,7 +760,7 @@ local function make_room()
         -- need to see how special exits are represented to handle those properly here
         if type(id) == "string" then
             local rid = getRoomIDbyHash(id)
-            setExitStub(thisRoom, dir, true)
+            ensure_exit_stub(thisRoom, dir)
             if rid > 0 then
                 connectExitStub(thisRoom, rid, dir)
             end
@@ -1352,6 +1410,8 @@ function map.show_help()
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n\n")
     echo("  Mapper right-click travel\n")
     echo("    Select or right-click a room in the mapper, then choose Auto walk to selected room.\n\n")
+    echo("  stop\n")
+    echo("    Stop the current auto walk. If no auto walk is active, sends 'stop' to the game.\n\n")
     echo("  Mapper right-click POI\n")
     echo("    Select or right-click a terrain-mapped room, then choose Toggle POI on selected room.\n\n")
     echo("  map auto-reconcile\n")
@@ -1655,6 +1715,22 @@ end
 
 local function clear_active_walk_settings()
     map.walk_settings = nil
+end
+
+function map.stop_auto_walk()
+    if not walking then
+        return false
+    end
+
+    walking = false
+    map.walkDirs = {}
+    clear_active_walk_settings()
+    if timerID then
+        killTimer(timerID)
+        timerID = nil
+    end
+    echo("Auto walk stopped.\n")
+    return true
 end
 
 continue_walk = function(new_room)
