@@ -188,6 +188,10 @@ local function setBoxes()
         height = GUI.Map_Container:get_height() - (Gui_Padding * 4),
     }, GUI.Map_Container)
 
+    if map and type(map.register_mapper_context_menu) == "function" then
+        tempTimer(0, function() map.register_mapper_context_menu() end)
+    end
+
     -- Register Mapper with ResourceManager
     if RM then
         RM.registerUIElement("mapper", GUI.Mapper, "mapping")
@@ -347,6 +351,9 @@ GUI.resizeBoxes = function()
     GUI.Box7:show()
     GUI.Map_Container:show()
     GUI.Mapper:show()
+    if map and type(map.register_mapper_context_menu) == "function" then
+        tempTimer(0, function() map.register_mapper_context_menu() end)
+    end
     GUI.Room_Container:show()
     GUI.Components.roommini:show()
     GUI.Status_Container:show()

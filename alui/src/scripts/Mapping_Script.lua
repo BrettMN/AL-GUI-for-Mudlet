@@ -148,6 +148,51 @@ local function apply_room_environment(roomID, terrain)
     end
 end
 
+local function clear_room_user_data(roomID, key)
+    if type(deleteRoomUserData) == "function" then
+        deleteRoomUserData(roomID, key)
+    else
+        setRoomUserData(roomID, key, "")
+    end
+end
+
+local function apply_current_room_environment(roomID, terrain)
+    if type(terrain) == "string" and terrain ~= "" then
+        apply_room_environment(roomID, terrain)
+        return
+    end
+
+    local currentEnv = getRoomEnv(roomID)
+    local unvisitedEnv = terrain_types["unvisited"] and terrain_types["unvisited"].id or nil
+    if currentEnv == nil or currentEnv == -1 or currentEnv == 0 or currentEnv == unvisitedEnv then
+        apply_room_environment(roomID, "Inside")
+    end
+end
+
+local function get_room_terrain_name(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then
+        return nil
+    end
+
+    local storedTerrain = getRoomUserData(roomID, "terrain")
+    if type(storedTerrain) == "string" and storedTerrain ~= "" then
+        return storedTerrain
+    end
+
+    local envID = getRoomEnv(roomID)
+    if type(envID) ~= "number" then
+        return nil
+    end
+
+    for terrainName, spec in pairs(terrain_types) do
+        if type(spec) == "table" and spec.id == envID and terrainName ~= "Inside" and terrainName ~= "unvisited" then
+            return terrainName
+        end
+    end
+
+    return nil
+end
+
 local reverse_move_vectors = {}
 for dir, vec in pairs(move_vectors) do
     for rdir, rvec in pairs(move_vectors) do
@@ -646,7 +691,7 @@ local function make_room()
     setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
-    apply_room_environment(thisRoom, info.terrain)
+    apply_current_room_environment(thisRoom, info.terrain)
     if getRoomChar(thisRoom) == "#" then
         apply_room_environment(thisRoom, "Inside")
     end
@@ -911,11 +956,16 @@ local function get_area_name_by_id(areaID)
 end
 
 local function get_current_area_context()
-    if type(map.room_info.vnum) ~= "string" then
-        return nil, nil, nil
+    local roomID = nil
+
+    if type(map.room_info.vnum) == "string" then
+        roomID = getRoomIDbyHash(map.room_info.vnum)
     end
 
-    local roomID = getRoomIDbyHash(map.room_info.vnum)
+    if (type(roomID) ~= "number" or roomID < 1) and type(getPlayerRoom) == "function" then
+        roomID = getPlayerRoom()
+    end
+
     if type(roomID) ~= "number" or roomID < 1 then
         return nil, nil, nil
     end
@@ -1048,31 +1098,56 @@ function map.recalculate_room_layout()
         " room" .. (movedCount == 1 and "" or "s") .. ".\n")
 end
 
-function map.set_poi()
-    local roomID = get_current_area_context()
+function map.set_poi(roomID)
+    roomID = roomID or get_current_area_context()
     if not roomID or roomID < 1 then
         echo("Cannot set POI: current room is unknown.\n")
         return
     end
+    local terrain = get_room_terrain_name(roomID)
+    if type(terrain) ~= "string" or terrain == "" then
+        echo("Cannot set POI: selected room does not use terrain mapping.\n")
+        return
+    end
+    setRoomUserData(roomID, "terrain", terrain)
     setRoomChar(roomID, "#")
     apply_room_environment(roomID, "Inside")
     updateMap()
     echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") marked as POI (#).\n")
 end
 
-function map.remove_poi()
-    local roomID = get_current_area_context()
+function map.remove_poi(roomID)
+    roomID = roomID or get_current_area_context()
     if not roomID or roomID < 1 then
         echo("Cannot remove POI: current room is unknown.\n")
         return
     end
     setRoomChar(roomID, "")
-    local terrain = getRoomUserData(roomID, "terrain")
+    local terrain = get_room_terrain_name(roomID)
     if type(terrain) == "string" and terrain ~= "" then
         apply_room_environment(roomID, terrain)
     end
     updateMap()
     echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") POI marker removed.\n")
+end
+
+function map.toggle_poi_for_selected_room(event, action, ...)
+    local selection = getMapSelection()
+    local roomID = type(selection) == "table" and selection.center or nil
+    if (type(roomID) ~= "number" or roomID < 1) and type(selection) == "table"
+        and type(selection.rooms) == "table" then
+        roomID = selection.rooms[1]
+    end
+    if not roomID then
+        echo("Select a room on the mapper, then right-click it to toggle its POI marker.\n")
+        return
+    end
+
+    if getRoomChar(roomID) == "#" then
+        map.remove_poi(roomID)
+    else
+        map.set_poi(roomID)
+    end
 end
 
 local function trim_whitespace(value)
@@ -1275,6 +1350,10 @@ function map.show_help()
     echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n\n")
+    echo("  Mapper right-click travel\n")
+    echo("    Select or right-click a room in the mapper, then choose Auto walk to selected room.\n\n")
+    echo("  Mapper right-click POI\n")
+    echo("    Select or right-click a terrain-mapped room, then choose Toggle POI on selected room.\n\n")
     echo("  map auto-reconcile\n")
     echo("    Toggle automatic room repositioning on/off (currently " ..
         (map.configs.auto_reconcile and "ON" or "OFF") .. ").\n")
@@ -1428,7 +1507,7 @@ local function handle_move(isLastInBatch)
             local currentAreaID = getRoomArea(rnum)
             if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
                 debug_echo("Moving room " ..
-                rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                    rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
                 setRoomArea(rnum, correctAreaID)
                 currentAreaID = correctAreaID
             end
@@ -1441,7 +1520,7 @@ local function handle_move(isLastInBatch)
                 end
             end
 
-            apply_room_environment(rnum, info.terrain)
+            apply_current_room_environment(rnum, info.terrain)
             if getRoomChar(rnum) == "#" then
                 apply_room_environment(rnum, "Inside")
             end
@@ -1453,6 +1532,8 @@ local function handle_move(isLastInBatch)
             end
             if type(info.terrain) == "string" and info.terrain ~= "" then
                 setRoomUserData(rnum, "terrain", info.terrain)
+            else
+                clear_room_user_data(rnum, "terrain")
             end
 
             if currentAreaID and currentAreaID > 0 then
@@ -1558,17 +1639,37 @@ local function check_doors(roomID, exits)
 end
 
 local continue_walk, timerID
+local function get_active_speedwalk_delay()
+    if type(map.walk_settings) == "table" and type(map.walk_settings.delay) == "number" then
+        return map.walk_settings.delay
+    end
+    return map.configs.speedwalk_delay or 0
+end
+
+local function get_active_speedwalk_wait()
+    if type(map.walk_settings) == "table" and type(map.walk_settings.wait_for_room) == "boolean" then
+        return map.walk_settings.wait_for_room
+    end
+    return map.configs.speedwalk_wait == true
+end
+
+local function clear_active_walk_settings()
+    map.walk_settings = nil
+end
+
 continue_walk = function(new_room)
     if not walking then
+        clear_active_walk_settings()
         return
     end
     -- calculate wait time until next command, with randomness
-    local wait = map.configs.speedwalk_delay or 0
+    local wait = get_active_speedwalk_delay()
+    local waitForRoom = get_active_speedwalk_wait()
     if wait > 0 and map.configs.speedwalk_random then
         wait = wait * (1 + math.random(0, 100) / 100)
     end
     -- if no wait after new room, move immediately
-    if new_room and map.configs.speedwalk_wait and wait == 0 then
+    if new_room and waitForRoom and wait == 0 then
         new_room = false
     end
     -- send command if we don't need to wait
@@ -1577,10 +1678,11 @@ continue_walk = function(new_room)
         -- check to see if we are done
         if #map.walkDirs == 0 then
             walking = false
+            clear_active_walk_settings()
         end
     end
     -- make tempTimer to send next command if necessary
-    if walking and (not map.configs.speedwalk_wait or (map.configs.speedwalk_wait and wait > 0)) then
+    if walking and (not waitForRoom or (waitForRoom and wait > 0)) then
         if timerID then
             killTimer(timerID)
         end
@@ -1590,16 +1692,53 @@ continue_walk = function(new_room)
     end
 end
 
-function map.speedwalk(roomID, walkPath, walkDirs)
-    roomID = roomID or speedWalkPath[#speedWalkPath]
-    getPath(map.room_info.vnum, roomID)
-    walkPath = speedWalkPath
-    walkDirs = speedWalkDir
-    if #speedWalkPath == 0 then
+function map.speedwalk(roomID, walkPath, walkDirs, options)
+    local currentRoomID = get_current_area_context()
+    if not currentRoomID or currentRoomID < 1 then
+        echo("Cannot speedwalk: current room is unknown.\n")
+        return
+    end
+
+    options = options or {}
+    local providedPath = type(walkPath) == "table" and type(walkDirs) == "table" and #walkPath > 0
+    roomID = roomID or (providedPath and walkPath[#walkPath]) or speedWalkPath[#speedWalkPath]
+    if type(roomID) ~= "number" or roomID < 1 then
+        echo("Cannot speedwalk: target room is unknown.\n")
+        return
+    end
+
+    if providedPath then
+        local sourcePath = walkPath
+        local sourceDirs = walkDirs
+        walkPath = {}
+        walkDirs = {}
+        for i, v in ipairs(sourcePath) do
+            walkPath[i] = v
+        end
+        for i, v in ipairs(sourceDirs) do
+            walkDirs[i] = v
+        end
+    else
+        getPath(currentRoomID, roomID)
+        if #speedWalkPath == 0 then
+            echo("No path to chosen room found.\n")
+            return
+        end
+        walkPath = {}
+        walkDirs = {}
+        for i, v in ipairs(speedWalkPath) do
+            walkPath[i] = v
+        end
+        for i, v in ipairs(speedWalkDir) do
+            walkDirs[i] = v
+        end
+    end
+
+    if #walkPath == 0 or #walkDirs == 0 then
         echo("No path to chosen room found.\n")
         return
     end
-    table.insert(walkPath, 1, map.room_info.vnum)
+    table.insert(walkPath, 1, currentRoomID)
     -- go through dirs to find doors that need opened, etc
     -- add in necessary extra commands to walkDirs table
     local k = 1
@@ -1631,7 +1770,11 @@ function map.speedwalk(roomID, walkPath, walkDirs)
     end
     -- perform walk
     walking = true
-    if map.configs.speedwalk_wait or map.configs.speedwalk_delay > 0 then
+    map.walk_settings = {
+        wait_for_room = options.wait_for_room,
+        delay = options.delay,
+    }
+    if get_active_speedwalk_wait() or get_active_speedwalk_delay() > 0 then
         map.walkDirs = walkDirs
         continue_walk()
     else
@@ -1639,6 +1782,7 @@ function map.speedwalk(roomID, walkPath, walkDirs)
             send(dir)
         end
         walking = false
+        clear_active_walk_settings()
     end
 end
 
@@ -1649,6 +1793,157 @@ function doSpeedWalk()
         echo("No path to chosen room found.\n")
     end
 end
+
+local function get_selected_map_room()
+    local selection = getMapSelection()
+    if type(selection) ~= "table" then
+        return nil
+    end
+
+    if type(selection.center) == "number" and selection.center > 0 then
+        return selection.center
+    end
+
+    if type(selection.rooms) == "table" and type(selection.rooms[1]) == "number" and selection.rooms[1] > 0 then
+        return selection.rooms[1]
+    end
+
+    return nil
+end
+
+local function should_avoid_pois_for_autowalk(currentRoomID, targetRoomID)
+    return type(get_room_terrain_name(currentRoomID)) == "string"
+        or type(get_room_terrain_name(targetRoomID)) == "string"
+        or current_room_uses_grid_mode()
+end
+
+local function compute_autowalk_path(currentRoomID, targetRoomID)
+    if not should_avoid_pois_for_autowalk(currentRoomID, targetRoomID)
+        or type(getRooms) ~= "function"
+        or type(lockRoom) ~= "function"
+        or type(roomLocked) ~= "function" then
+        local ok = getPath(currentRoomID, targetRoomID)
+        if not ok or #speedWalkPath == 0 then
+            return false, nil, nil
+        end
+        local walkPath = {}
+        local walkDirs = {}
+        for i, v in ipairs(speedWalkPath) do
+            walkPath[i] = v
+        end
+        for i, v in ipairs(speedWalkDir) do
+            walkDirs[i] = v
+        end
+        return true, walkPath, walkDirs
+    end
+
+    local temporarilyLocked = {}
+    for roomID, _ in pairs(getRooms()) do
+        if type(roomID) == "number"
+            and roomID ~= currentRoomID
+            and roomID ~= targetRoomID
+            and getRoomChar(roomID) == "#"
+            and type(get_room_terrain_name(roomID)) == "string"
+            and not roomLocked(roomID) then
+            lockRoom(roomID, true)
+            temporarilyLocked[#temporarilyLocked + 1] = roomID
+        end
+    end
+
+    local ok = getPath(currentRoomID, targetRoomID)
+    local walkPath = nil
+    local walkDirs = nil
+    if ok and #speedWalkPath > 0 then
+        walkPath = {}
+        walkDirs = {}
+        for i, v in ipairs(speedWalkPath) do
+            walkPath[i] = v
+        end
+        for i, v in ipairs(speedWalkDir) do
+            walkDirs[i] = v
+        end
+    end
+
+    for _, roomID in ipairs(temporarilyLocked) do
+        lockRoom(roomID, false)
+    end
+
+    return ok and walkPath ~= nil, walkPath, walkDirs
+end
+
+function map.travel_to_selected_room(event, action, ...)
+    local targetRoomID = get_selected_map_room()
+    if not targetRoomID then
+        echo("Select a room on the mapper, then right-click it to travel there.\n")
+        return
+    end
+
+    local currentRoomID = get_current_area_context()
+    if not currentRoomID or currentRoomID < 1 then
+        echo("Cannot travel: current room is unknown.\n")
+        return
+    end
+
+    if currentRoomID == targetRoomID then
+        echo("Already at the selected room.\n")
+        return
+    end
+
+    local pathFound, walkPath, walkDirs = compute_autowalk_path(currentRoomID, targetRoomID)
+    if not pathFound or type(walkPath) ~= "table" or #walkPath == 0 then
+        echo("No path to selected room found.\n")
+        return
+    end
+
+    local resolvedAction = action
+    if action == "alui-mapper-autowalk" then
+        resolvedAction = "autowalk"
+    end
+
+    if resolvedAction == "autowalk" then
+        map.speedwalk(targetRoomID, walkPath, walkDirs, { wait_for_room = true, delay = 0 })
+    else
+        echo("Unknown mapper travel action '" .. tostring(action) .. "'.\n")
+    end
+end
+
+local function register_mapper_context_menu()
+    if type(addMapEvent) ~= "function" then
+        return
+    end
+
+    if type(removeMapEvent) == "function" then
+        removeMapEvent("alui-mapper-autowalk")
+        removeMapEvent("alui-mapper-speedwalk")
+        removeMapEvent("alui-mapper-toggle-poi")
+    end
+    if type(removeMapMenu) == "function" then
+        removeMapMenu("alui-mapper-travel")
+    end
+
+    local autoWalkOk, autoWalkErr = addMapEvent(
+        "alui-mapper-autowalk",
+        "aluiMapperTravel",
+        nil,
+        "Auto walk to selected room",
+        "autowalk"
+    )
+    local poiOk, poiErr = addMapEvent(
+        "alui-mapper-toggle-poi",
+        "aluiMapperTogglePoi",
+        nil,
+        "Toggle POI on selected room"
+    )
+    if autoWalkOk and poiOk then
+        map.mapper_context_menu_registered = true
+        map.mapper_context_menu_error = nil
+    else
+        map.mapper_context_menu_registered = false
+        map.mapper_context_menu_error = autoWalkErr or poiErr
+    end
+end
+
+map.register_mapper_context_menu = register_mapper_context_menu
 
 function map.eventHandler(event, ...)
     if event == "gmcp.Room.Info" then
@@ -1676,6 +1971,9 @@ function map.eventHandler(event, ...)
             queue_processing = true
             queue_drain_timer = tempTimer(0, function() process_room_queue() end)
         end
+        if walking and get_active_speedwalk_wait() and get_active_speedwalk_delay() <= 0 then
+            continue_walk(true)
+        end
     elseif event == "shiftRoom" then
         local args = { ... }
         local dir = exitmap[args[1]] or args[1]
@@ -1686,9 +1984,19 @@ function map.eventHandler(event, ...)
         end
     elseif event == "sysConnectionEvent" then
         config()
+        register_mapper_context_menu()
     end
 end
 
+register_mapper_context_menu()
 registerAnonymousEventHandler("gmcp.Room.Info", "map.eventHandler")
 registerAnonymousEventHandler("shiftRoom", "map.eventHandler")
 registerAnonymousEventHandler("sysConnectionEvent", "map.eventHandler")
+if not map.mapper_travel_menu_handler_registered then
+    registerAnonymousEventHandler("aluiMapperTravel", "map.travel_to_selected_room")
+    map.mapper_travel_menu_handler_registered = true
+end
+if not map.mapper_poi_menu_handler_registered then
+    registerAnonymousEventHandler("aluiMapperTogglePoi", "map.toggle_poi_for_selected_room")
+    map.mapper_poi_menu_handler_registered = true
+end
