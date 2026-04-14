@@ -379,9 +379,12 @@ end
 -- by any remaining exits not covered by the canonical list (e.g. special exits).
 -- Using this instead of pairs() ensures BFS traversal is deterministic across
 -- runs, which is required for normalize to converge to the same layout every time.
+-- Cardinals before diagonals so that when multiple exits lead to the same
+-- target room, the cardinal direction is used for positioning (the first BFS
+-- visit or the first auto-reconcile pass wins).
 local exit_canonical_order = {
-    "north", "northeast", "east", "southeast",
-    "south", "southwest", "west", "northwest",
+    "north", "east", "south", "west",
+    "northeast", "southeast", "southwest", "northwest",
     "up", "down"
 }
 
@@ -495,6 +498,100 @@ local function guess_vertical_shift(exitName)
     return nil
 end
 
+-- Name patterns that indicate a room is underground (cave, tunnel, etc.).
+-- During recalculate, rooms matching these patterns are placed on a separate
+-- z-level so they don't visually overlap with surface rooms in the mapper.
+local underground_name_patterns = {
+    "cave", "tunnel", "underground", "beneath", "cavern", "subterranean",
+}
+
+local function is_underground_room_name(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local lower = string.lower(name)
+    for _, pattern in ipairs(underground_name_patterns) do
+        if lower:find(pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Classify whether a room should be placed on the underground z-level.
+-- Rooms whose names match underground_name_patterns are underground.
+-- Placeholder rooms (name == hash) inherit their parent's classification
+-- so stub rooms inside tunnels stay with the tunnel network.
+local function classify_room_underground(roomID, parentIsUnderground)
+    local name = getRoomName(roomID)
+    if is_underground_room_name(name) then return true end
+    -- Placeholder rooms have their hash as name — inherit parent status
+    local hash = type(getRoomHashByID) == "function" and getRoomHashByID(roomID) or nil
+    if type(hash) == "string" and name == hash then
+        return parentIsUnderground
+    end
+    return false
+end
+
+-- Finds the nearest unoccupied position on the same z-level.
+-- When an optional exit-direction shift is provided, positions along that axis
+-- are probed first so that nudged rooms keep their directional alignment
+-- (e.g. an east-west chain stays on the same y-coordinate).  Falls back to
+-- expanding square ring probes for diagonal exits or when the axis is full.
+local function find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius)
+    maxRadius = maxRadius or 50
+
+    -- Phase 1: for pure cardinal exits, slide along the exit axis first.
+    if type(shift) == "table" then
+        local ax, ay = shift[1], shift[2]
+        if ax ~= 0 and ay == 0 then
+            -- East/west exit: keep y fixed, probe along x
+            local dir = ax > 0 and 1 or -1
+            for r = 1, maxRadius do
+                local key = (x + r * dir) .. "," .. y .. "," .. z
+                if not occupied[key] then return x + r * dir, y, z end
+                key = (x - r * dir) .. "," .. y .. "," .. z
+                if not occupied[key] then return x - r * dir, y, z end
+            end
+        elseif ay ~= 0 and ax == 0 then
+            -- North/south exit: keep x fixed, probe along y
+            local dir = ay > 0 and 1 or -1
+            for r = 1, maxRadius do
+                local key = x .. "," .. (y + r * dir) .. "," .. z
+                if not occupied[key] then return x, y + r * dir, z end
+                key = x .. "," .. (y - r * dir) .. "," .. z
+                if not occupied[key] then return x, y - r * dir, z end
+            end
+        end
+    end
+
+    -- Phase 2: expanding ring probes (diagonal exits or axis-full fallback).
+    for r = 1, maxRadius do
+        -- Cardinals first (N, E, S, W), then diagonals, then remaining ring cells
+        local probes = {
+            { x,     y + r }, { x + r, y }, { x, y - r }, { x - r, y },
+            { x + r, y + r }, { x + r, y - r }, { x - r, y - r }, { x - r, y + r },
+        }
+        -- Fill in the rest of the ring edges (between corners and cardinals)
+        for i = 1, r - 1 do
+            probes[#probes + 1] = { x + i, y + r }
+            probes[#probes + 1] = { x - i, y + r }
+            probes[#probes + 1] = { x + i, y - r }
+            probes[#probes + 1] = { x - i, y - r }
+            probes[#probes + 1] = { x + r, y + i }
+            probes[#probes + 1] = { x + r, y - i }
+            probes[#probes + 1] = { x - r, y + i }
+            probes[#probes + 1] = { x - r, y - i }
+        end
+        for _, p in ipairs(probes) do
+            local key = p[1] .. "," .. p[2] .. "," .. z
+            if not occupied[key] then
+                return p[1], p[2], z
+            end
+        end
+    end
+    -- Extremely unlikely fallback: return original position
+    return x, y, z
+end
+
 local function create_neighbors_for_current_room(currentRoomID)
     local info = map.room_info
     if type(info.exits) ~= "table" then
@@ -511,19 +608,44 @@ local function create_neighbors_for_current_room(currentRoomID)
         return
     end
 
+    -- Track targets already positioned this iteration so that when multiple
+    -- exits lead to the same room, only the first (cardinal-preferred) direction
+    -- determines its position.  Stubs and connections are still created for all.
+    local positioned = {}
+
     for dir, targetVnum in sorted_exit_pairs(info.exits) do
         if type(targetVnum) == "string" then
             if move_vectors[dir] then
                 local shift = move_vectors[dir]
                 local coords = { cx + shift[1], cy + shift[2], cz + shift[3] }
                 local targetID = getRoomIDbyHash(targetVnum)
+
+                -- When crossing a surface/underground boundary via a horizontal
+                -- exit, preserve the target's existing z so that recalculate's
+                -- z-separation is not undone by auto-reconcile.
+                if shift[3] == 0 and targetID > 0 then
+                    local currentUG = classify_room_underground(currentRoomID, false)
+                    local targetUG  = classify_room_underground(targetID, currentUG)
+                    if currentUG ~= targetUG then
+                        local _, _, tz = getRoomCoordinates(targetID)
+                        if tz ~= nil then
+                            coords[3] = tz
+                        end
+                    end
+                end
+
                 if targetID > 0 then
-                    local tx, ty, tz = getRoomCoordinates(targetID)
-                    local targetAreaID = getRoomArea(targetID)
-                    if map.configs.auto_reconcile and targetAreaID == areaID
-                        and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
-                        move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift,
-                            should_skip_stretch_for_area(areaID))
+                    -- Only reposition a target once per iteration; the first
+                    -- direction (cardinal-preferred due to sort order) wins.
+                    if not positioned[targetVnum] then
+                        positioned[targetVnum] = true
+                        local tx, ty, tz = getRoomCoordinates(targetID)
+                        local targetAreaID = getRoomArea(targetID)
+                        if map.configs.auto_reconcile and targetAreaID == areaID
+                            and (tx ~= coords[1] or ty ~= coords[2] or tz ~= coords[3]) then
+                            move_room_to_expected_position(targetID, targetVnum, areaID, coords, shift,
+                                should_skip_stretch_for_area(areaID))
+                        end
                     end
                 else
                     local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
@@ -803,8 +925,11 @@ local function reconcile_current_room_position(currentRoomID)
         return
     end
 
+    -- Use sorted_exit_pairs (cardinals first) so that when multiple exits
+    -- lead back to the previous room, the cardinal direction is preferred,
+    -- giving a consistent and correct position computation.
     local shift
-    for dir, targetVnum in pairs(map.room_info.exits) do
+    for dir, targetVnum in sorted_exit_pairs(map.room_info.exits) do
         if targetVnum == map.prev_info.vnum and move_vectors[dir] then
             shift = move_vectors[dir]
             break
@@ -817,6 +942,18 @@ local function reconcile_current_room_position(currentRoomID)
 
     local prevX, prevY, prevZ = getRoomCoordinates(prevID)
     local expected = { prevX - shift[1], prevY - shift[2], prevZ - shift[3] }
+
+    -- When crossing a surface/underground boundary via a horizontal exit,
+    -- preserve the current room's z so recalculate's z-separation is not undone.
+    if shift[3] == 0 then
+        local currentUG = classify_room_underground(currentRoomID, false)
+        local prevUG    = classify_room_underground(prevID, false)
+        if currentUG ~= prevUG then
+            local currentX, currentY, currentZ = getRoomCoordinates(currentRoomID)
+            expected[3] = currentZ
+        end
+    end
+
     local currentX, currentY, currentZ = getRoomCoordinates(currentRoomID)
 
     if currentX ~= expected[1] or currentY ~= expected[2] or currentZ ~= expected[3] then
@@ -856,6 +993,12 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
             local exits = getRoomExits(roomID)
 
             if areaID and rx ~= nil and ry ~= nil and rz ~= nil and type(exits) == "table" then
+                -- Track targets already positioned from this room so that when
+                -- multiple exits lead to the same target (e.g. south + southeast
+                -- + southwest + west all go to the same room), only the first
+                -- (cardinal-preferred) direction determines the position.
+                local positionedFromHere = {}
+
                 for dir, targetID in sorted_exit_pairs(exits) do
                     local shift = get_shift_for_exit_key(dir)
                     if type(targetID) == "string" then
@@ -868,7 +1011,8 @@ local function reconcile_connected_rooms(seedRoomID, maxPasses, maxMoves)
                             if not visited[targetID] then
                                 visited[targetID] = true
                             end
-                        else
+                        elseif not positionedFromHere[targetID] then
+                            positionedFromHere[targetID] = true
                             local tx, ty, tz = getRoomCoordinates(targetID)
                             -- For horizontal exits, preserve the target's current z so that
                             -- flatten_cardinal_connected_rooms has sole authority on elevation
@@ -1113,10 +1257,27 @@ function map.recalculate_room_layout()
         return
     end
 
-    -- FIFO queue: each entry carries the coordinates to use as base for that room's exits.
-    local queue      = { { id = seedID, x = sx, y = sy, z = sz } }
-    local visited    = { [seedID] = true }
-    local movedCount = 0
+    -- Determine whether the seed room is underground so we know the
+    -- base z-level for each classification (surface vs underground).
+    local seedUG        = classify_room_underground(seedID, false)
+    local surfaceZ      = seedUG and (sz + 1) or sz
+    local undergroundZ  = surfaceZ - 1
+
+    -- FIFO queue: each entry carries position and underground flag for z-separation.
+    local queue         = { { id = seedID, x = sx, y = sy, z = sz, underground = seedUG } }
+    local visited       = { [seedID] = true }
+    local occupied      = { [sx .. "," .. sy .. "," .. sz] = seedID }
+    local movedCount    = 0
+    local nudgeCount    = 0
+    local levelCount    = 0
+    local separateCount = 0
+
+    -- Build a reverse lookup: roomID → { x, y, z } for the post-BFS separation pass.
+    local roomPositions = { [seedID] = { x = sx, y = sy, z = sz } }
+    -- Track parent shift for each room so the separation pass knows the axis to extend along.
+    local roomShifts    = {}
+    -- Track BFS parent so the separation pass can shift entire subtrees.
+    local roomParents   = {}
 
     while #queue > 0 do
         local entry = table.remove(queue, 1)
@@ -1139,21 +1300,191 @@ function map.recalculate_room_layout()
                         local ty = entry.y + shift[2]
                         local tz = entry.z + shift[3]
 
+                        -- Auto-detect underground rooms and place them on a
+                        -- separate z-level so they don't visually overlap
+                        -- with surface rooms in the mapper.
+                        local targetUG = classify_room_underground(targetID, entry.underground)
+                        if not entry.underground and targetUG then
+                            -- Transition surface → underground
+                            tz = undergroundZ
+                            levelCount = levelCount + 1
+                        elseif entry.underground and not targetUG then
+                            -- Transition underground → surface
+                            tz = surfaceZ
+                            levelCount = levelCount + 1
+                        end
+
+                        -- Collision avoidance: if the ideal position is already
+                        -- taken by an earlier BFS room, nudge to the nearest
+                        -- free spot so rooms don't stack on top of each other.
+                        local posKey = tx .. "," .. ty .. "," .. tz
+                        if occupied[posKey] then
+                            tx, ty, tz = find_nearest_unoccupied(occupied, tx, ty, tz, shift)
+                            posKey = tx .. "," .. ty .. "," .. tz
+                            nudgeCount = nudgeCount + 1
+                        end
+
+                        occupied[posKey] = targetID
+                        roomPositions[targetID] = { x = tx, y = ty, z = tz }
+                        roomShifts[targetID] = shift
+                        roomParents[targetID] = entry.id
+
                         local cx, cy, cz = getRoomCoordinates(targetID)
                         if cx ~= tx or cy ~= ty or cz ~= tz then
                             setRoomCoordinates(targetID, tx, ty, tz)
                             movedCount = movedCount + 1
                         end
-                        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
+                        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz, underground = targetUG })
                     end
                 end
             end
         end
     end
 
+    -- Post-BFS separation pass: now that ALL rooms are placed, check each room
+    -- that arrived via a pure cardinal exit.  If its perpendicular neighbours
+    -- are unconnected rooms (i.e. it visually blends into an unrelated line),
+    -- shift its entire BFS subtree further along the exit direction to create
+    -- a visible gap.  Moving the whole subtree keeps relative positions intact.
+
+    -- Build children lookup from parent tracking.
+    local bfsChildren = {}
+    for childID, parentID in pairs(roomParents) do
+        if not bfsChildren[parentID] then bfsChildren[parentID] = {} end
+        bfsChildren[parentID][#bfsChildren[parentID] + 1] = childID
+    end
+
+    -- Collect all BFS descendants of a room (inclusive).
+    local function collectSubtree(rootID)
+        local subtree = { rootID }
+        local stack   = { rootID }
+        while #stack > 0 do
+            local cur = table.remove(stack)
+            if bfsChildren[cur] then
+                for _, cid in ipairs(bfsChildren[cur]) do
+                    subtree[#subtree + 1] = cid
+                    stack[#stack + 1]     = cid
+                end
+            end
+        end
+        return subtree
+    end
+
+    -- Helper: are two rooms connected by an exit in either direction?
+    local function rooms_connected(idA, idB)
+        local exA = getRoomExits(idA)
+        if type(exA) == "table" then
+            for _, eid in pairs(exA) do
+                if tonumber(eid) == idB then return true end
+            end
+        end
+        local exB = getRoomExits(idB)
+        if type(exB) == "table" then
+            for _, eid in pairs(exB) do
+                if tonumber(eid) == idA then return true end
+            end
+        end
+        return false
+    end
+
+    local shifted = {} -- rooms already moved as part of a subtree
+
+    for roomID, pos in pairs(roomPositions) do
+        if shifted[roomID] then goto continue_sep end
+        local shift = roomShifts[roomID]
+        if not shift then goto continue_sep end -- seed room, no shift
+        -- Only for pure cardinal horizontal exits
+        if shift[3] ~= 0 then goto continue_sep end
+        if not ((shift[1] == 0) ~= (shift[2] == 0)) then goto continue_sep end
+
+        local tx, ty, tz = pos.x, pos.y, pos.z
+        local perpPositions
+        if shift[1] ~= 0 and shift[2] == 0 then
+            perpPositions = { { tx, ty + 1, tz }, { tx, ty - 1, tz } }
+        else
+            perpPositions = { { tx + 1, ty, tz }, { tx - 1, ty, tz } }
+        end
+
+        local needsSeparation = false
+        for _, pp in ipairs(perpPositions) do
+            local perpKey = pp[1] .. "," .. pp[2] .. "," .. pp[3]
+            local perpRoomID = occupied[perpKey]
+            if perpRoomID and not rooms_connected(roomID, perpRoomID) then
+                needsSeparation = true
+                break
+            end
+        end
+
+        if needsSeparation then
+            local subtree    = collectSubtree(roomID)
+            local subtreeSet = {}
+            for _, rid in ipairs(subtree) do subtreeSet[rid] = true end
+
+            -- Probe increasing distances along the arrival direction until
+            -- the entire subtree fits without colliding with non-subtree rooms.
+            local dx, dy  = shift[1], shift[2]
+            local maxDist = 5
+            local found   = false
+            local dist    = 1
+            while dist <= maxDist do
+                local ok = true
+                for _, rid in ipairs(subtree) do
+                    local rp = roomPositions[rid]
+                    local nk = (rp.x + dx * dist) .. "," .. (rp.y + dy * dist) .. "," .. rp.z
+                    local occupant = occupied[nk]
+                    if occupant and not subtreeSet[occupant] then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then
+                    found = true; break
+                end
+                dist = dist + 1
+            end
+
+            if found then
+                -- Remove old positions from occupied.
+                for _, rid in ipairs(subtree) do
+                    local rp       = roomPositions[rid]
+                    local oKey     = rp.x .. "," .. rp.y .. "," .. rp.z
+                    occupied[oKey] = nil
+                end
+                -- Place at new positions.
+                for _, rid in ipairs(subtree) do
+                    local rp = roomPositions[rid]
+                    rp.x = rp.x + dx * dist
+                    rp.y = rp.y + dy * dist
+                    local nKey = rp.x .. "," .. rp.y .. "," .. rp.z
+                    occupied[nKey] = rid
+                    setRoomCoordinates(rid, rp.x, rp.y, rp.z)
+                    shifted[rid] = true
+                    movedCount = movedCount + 1
+                end
+                separateCount = separateCount + #subtree
+            end
+        end
+
+        ::continue_sep::
+    end
+
     updateMap()
-    echo("Topology recalculation repositioned " .. movedCount ..
-        " room" .. (movedCount == 1 and "" or "s") .. ".\n")
+    local msg = "Topology recalculation repositioned " .. movedCount ..
+        " room" .. (movedCount == 1 and "" or "s")
+    local details = {}
+    if nudgeCount > 0 then
+        details[#details + 1] = nudgeCount .. " nudged to avoid overlap"
+    end
+    if levelCount > 0 then
+        details[#details + 1] = levelCount .. " moved to separate z-level"
+    end
+    if separateCount > 0 then
+        details[#details + 1] = separateCount .. " extended for visual separation"
+    end
+    if #details > 0 then
+        msg = msg .. " (" .. table.concat(details, ", ") .. ")"
+    end
+    echo(msg .. ".\n")
 end
 
 function map.set_poi(roomID)
@@ -1427,6 +1758,10 @@ function map.show_help()
     echo("  map recalculate\n")
     echo("    Rebuild all room coordinates from scratch using exit topology from the current room.\n")
     echo("    Each room is placed at parent-coords + exit-direction. First BFS path to each room wins.\n")
+    echo("    Rooms that would land on an already-occupied position are nudged to the nearest free spot.\n")
+    echo("    Underground rooms (caves, tunnels, etc.) are automatically placed on a separate z-level\n")
+    echo("    so they don't visually overlap with surface rooms. Use the mapper's z-level selector to\n")
+    echo("    switch between surface and underground views.\n")
     echo("    More reliable than normalize when large groups of rooms have badly wrong coordinates\n")
     echo("    (e.g. two independently mapped groups linked by exits, or vertical stubs stuck at z:0).\n")
     echo("    Pinned rooms are not moved; their position is used as an anchor for surrounding rooms.\n\n")

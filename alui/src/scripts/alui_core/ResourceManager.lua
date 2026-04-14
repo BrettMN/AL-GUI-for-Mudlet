@@ -36,8 +36,7 @@ RM.createTimer = function(name, delay, callback, recurring, category)
     RM.killTimer(name)
 
     -- Create new timer
-    local timerFunction = recurring and tempTimer or tempTimer
-    local timerId = timerFunction(delay, callback)
+    local timerId = recurring and tempTimer(delay, callback) or setTimer(callback, delay)
 
     -- Cache epoch to avoid multiple system calls
     local currentEpoch = getEpoch()
