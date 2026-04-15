@@ -903,7 +903,7 @@ local function shift_room(dir)
     if type(map.room_info.vnum) == "string" then
         local ID = getRoomIDbyHash(map.room_info.vnum)
         local x, y, z = getRoomCoordinates(ID)
-        local x1, y1, z1 = table.unpack(move_vectors[dir])
+        local x1, y1, z1 = unpack(move_vectors[dir])
         x = x + x1
         y = y + y1
         z = z + z1
