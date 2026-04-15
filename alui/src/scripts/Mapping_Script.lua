@@ -1390,82 +1390,79 @@ function map.recalculate_room_layout()
     local shifted = {} -- rooms already moved as part of a subtree
 
     for roomID, pos in pairs(roomPositions) do
-        if shifted[roomID] then goto continue_sep end
         local shift = roomShifts[roomID]
-        if not shift then goto continue_sep end -- seed room, no shift
-        -- Only for pure cardinal horizontal exits
-        if shift[3] ~= 0 then goto continue_sep end
-        if not ((shift[1] == 0) ~= (shift[2] == 0)) then goto continue_sep end
-
-        local tx, ty, tz = pos.x, pos.y, pos.z
-        local perpPositions
-        if shift[1] ~= 0 and shift[2] == 0 then
-            perpPositions = { { tx, ty + 1, tz }, { tx, ty - 1, tz } }
-        else
-            perpPositions = { { tx + 1, ty, tz }, { tx - 1, ty, tz } }
-        end
-
-        local needsSeparation = false
-        for _, pp in ipairs(perpPositions) do
-            local perpKey = pp[1] .. "," .. pp[2] .. "," .. pp[3]
-            local perpRoomID = occupied[perpKey]
-            if perpRoomID and not rooms_connected(roomID, perpRoomID) then
-                needsSeparation = true
-                break
+        -- Only process rooms that arrived via a pure cardinal horizontal exit
+        if shift and not shifted[roomID]
+            and shift[3] == 0
+            and ((shift[1] == 0) ~= (shift[2] == 0)) then
+            local tx, ty, tz = pos.x, pos.y, pos.z
+            local perpPositions
+            if shift[1] ~= 0 and shift[2] == 0 then
+                perpPositions = { { tx, ty + 1, tz }, { tx, ty - 1, tz } }
+            else
+                perpPositions = { { tx + 1, ty, tz }, { tx - 1, ty, tz } }
             end
-        end
 
-        if needsSeparation then
-            local subtree    = collectSubtree(roomID)
-            local subtreeSet = {}
-            for _, rid in ipairs(subtree) do subtreeSet[rid] = true end
+            local needsSeparation = false
+            for _, pp in ipairs(perpPositions) do
+                local perpKey = pp[1] .. "," .. pp[2] .. "," .. pp[3]
+                local perpRoomID = occupied[perpKey]
+                if perpRoomID and not rooms_connected(roomID, perpRoomID) then
+                    needsSeparation = true
+                    break
+                end
+            end
 
-            -- Probe increasing distances along the arrival direction until
-            -- the entire subtree fits without colliding with non-subtree rooms.
-            local dx, dy  = shift[1], shift[2]
-            local maxDist = 5
-            local found   = false
-            local dist    = 1
-            while dist <= maxDist do
-                local ok = true
-                for _, rid in ipairs(subtree) do
-                    local rp = roomPositions[rid]
-                    local nk = (rp.x + dx * dist) .. "," .. (rp.y + dy * dist) .. "," .. rp.z
-                    local occupant = occupied[nk]
-                    if occupant and not subtreeSet[occupant] then
-                        ok = false
-                        break
+            if needsSeparation then
+                local subtree    = collectSubtree(roomID)
+                local subtreeSet = {}
+                for _, rid in ipairs(subtree) do subtreeSet[rid] = true end
+
+                -- Probe increasing distances along the arrival direction until
+                -- the entire subtree fits without colliding with non-subtree rooms.
+                local dx, dy  = shift[1], shift[2]
+                local maxDist = 5
+                local found   = false
+                local dist    = 1
+                while dist <= maxDist do
+                    local ok = true
+                    for _, rid in ipairs(subtree) do
+                        local rp = roomPositions[rid]
+                        local nk = (rp.x + dx * dist) .. "," .. (rp.y + dy * dist) .. "," .. rp.z
+                        local occupant = occupied[nk]
+                        if occupant and not subtreeSet[occupant] then
+                            ok = false
+                            break
+                        end
                     end
+                    if ok then
+                        found = true; break
+                    end
+                    dist = dist + 1
                 end
-                if ok then
-                    found = true; break
-                end
-                dist = dist + 1
-            end
 
-            if found then
-                -- Remove old positions from occupied.
-                for _, rid in ipairs(subtree) do
-                    local rp       = roomPositions[rid]
-                    local oKey     = rp.x .. "," .. rp.y .. "," .. rp.z
-                    occupied[oKey] = nil
+                if found then
+                    -- Remove old positions from occupied.
+                    for _, rid in ipairs(subtree) do
+                        local rp       = roomPositions[rid]
+                        local oKey     = rp.x .. "," .. rp.y .. "," .. rp.z
+                        occupied[oKey] = nil
+                    end
+                    -- Place at new positions.
+                    for _, rid in ipairs(subtree) do
+                        local rp = roomPositions[rid]
+                        rp.x = rp.x + dx * dist
+                        rp.y = rp.y + dy * dist
+                        local nKey = rp.x .. "," .. rp.y .. "," .. rp.z
+                        occupied[nKey] = rid
+                        setRoomCoordinates(rid, rp.x, rp.y, rp.z)
+                        shifted[rid] = true
+                        movedCount = movedCount + 1
+                    end
+                    separateCount = separateCount + #subtree
                 end
-                -- Place at new positions.
-                for _, rid in ipairs(subtree) do
-                    local rp = roomPositions[rid]
-                    rp.x = rp.x + dx * dist
-                    rp.y = rp.y + dy * dist
-                    local nKey = rp.x .. "," .. rp.y .. "," .. rp.z
-                    occupied[nKey] = rid
-                    setRoomCoordinates(rid, rp.x, rp.y, rp.z)
-                    shifted[rid] = true
-                    movedCount = movedCount + 1
-                end
-                separateCount = separateCount + #subtree
             end
         end
-
-        ::continue_sep::
     end
 
     updateMap()
@@ -1536,6 +1533,61 @@ function map.toggle_poi_for_selected_room(event, action, ...)
         map.remove_poi(roomID)
     else
         map.set_poi(roomID)
+    end
+end
+
+-- Underworld entrance marker: marks a room with a door-like character
+-- and colours it to match "light forest" so it stands out as a portal.
+local UNDERWORLD_ENTRANCE_CHAR = "\226\140\130" -- ⌂ (U+2302)
+
+function map.set_underworld_entrance(roomID)
+    roomID = roomID or get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot set underworld entrance: current room is unknown.\n")
+        return
+    end
+    -- Preserve the original terrain so we can restore it later.
+    local terrain = get_room_terrain_name(roomID)
+    if type(terrain) == "string" and terrain ~= "" then
+        setRoomUserData(roomID, "terrain", terrain)
+    end
+    setRoomChar(roomID, UNDERWORLD_ENTRANCE_CHAR)
+    apply_room_environment(roomID, "light forest")
+    updateMap()
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") marked as underworld entrance.\n")
+end
+
+function map.remove_underworld_entrance(roomID)
+    roomID = roomID or get_current_area_context()
+    if not roomID or roomID < 1 then
+        echo("Cannot remove underworld entrance: current room is unknown.\n")
+        return
+    end
+    setRoomChar(roomID, "")
+    local terrain = get_room_terrain_name(roomID)
+    if type(terrain) == "string" and terrain ~= "" then
+        apply_room_environment(roomID, terrain)
+    end
+    updateMap()
+    echo("Room " .. roomID .. " (" .. (getRoomName(roomID) or "unknown") .. ") underworld entrance removed.\n")
+end
+
+function map.toggle_underworld_entrance_for_selected_room(event, action, ...)
+    local selection = getMapSelection()
+    local roomID = type(selection) == "table" and selection.center or nil
+    if (type(roomID) ~= "number" or roomID < 1) and type(selection) == "table"
+        and type(selection.rooms) == "table" then
+        roomID = selection.rooms[1]
+    end
+    if not roomID then
+        echo("Select a room on the mapper, then right-click it to toggle its underworld entrance marker.\n")
+        return
+    end
+
+    if getRoomChar(roomID) == UNDERWORLD_ENTRANCE_CHAR then
+        map.remove_underworld_entrance(roomID)
+    else
+        map.set_underworld_entrance(roomID)
     end
 end
 
@@ -2327,6 +2379,7 @@ local function register_mapper_context_menu()
         removeMapEvent("alui-mapper-autowalk")
         removeMapEvent("alui-mapper-speedwalk")
         removeMapEvent("alui-mapper-toggle-poi")
+        removeMapEvent("alui-mapper-toggle-uw-entrance")
     end
     if type(removeMapMenu) == "function" then
         removeMapMenu("alui-mapper-travel")
@@ -2345,12 +2398,18 @@ local function register_mapper_context_menu()
         nil,
         "Toggle POI on selected room"
     )
-    if autoWalkOk and poiOk then
+    local uwOk, uwErr = addMapEvent(
+        "alui-mapper-toggle-uw-entrance",
+        "aluiMapperToggleUwEntrance",
+        nil,
+        "Toggle Underworld Entrance"
+    )
+    if autoWalkOk and poiOk and uwOk then
         map.mapper_context_menu_registered = true
         map.mapper_context_menu_error = nil
     else
         map.mapper_context_menu_registered = false
-        map.mapper_context_menu_error = autoWalkErr or poiErr
+        map.mapper_context_menu_error = autoWalkErr or poiErr or uwErr
     end
 end
 
@@ -2410,4 +2469,8 @@ end
 if not map.mapper_poi_menu_handler_registered then
     registerAnonymousEventHandler("aluiMapperTogglePoi", "map.toggle_poi_for_selected_room")
     map.mapper_poi_menu_handler_registered = true
+end
+if not map.mapper_uw_entrance_menu_handler_registered then
+    registerAnonymousEventHandler("aluiMapperToggleUwEntrance", "map.toggle_underworld_entrance_for_selected_room")
+    map.mapper_uw_entrance_menu_handler_registered = true
 end
