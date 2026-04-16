@@ -1,0 +1,22 @@
+[
+    {
+        "name": "Data",
+        "isActive": "yes"
+    },
+    {
+        "name": "Helpers",
+        "isActive": "yes"
+    },
+    {
+        "name": "Layout",
+        "isActive": "yes"
+    },
+    {
+        "name": "Core",
+        "isActive": "yes"
+    },
+    {
+        "name": "Commands",
+        "isActive": "yes"
+    }
+]

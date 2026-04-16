@@ -4,8 +4,24 @@
         "regex": "^map\\s+help$"
     },
     {
+        "name": "map normalize all areas",
+        "regex": "^map\\s+normalize\\s+all\\s+areas$"
+    },
+    {
+        "name": "map normalize area all",
+        "regex": "^map\\s+normalize\\s+area\\s+(.+?)\\s+all$"
+    },
+    {
+        "name": "map normalize area",
+        "regex": "^map\\s+normalize\\s+area\\s+(.+)$"
+    },
+    {
+        "name": "map normalize all",
+        "regex": "^map\\s+normalize\\s+all$"
+    },
+    {
         "name": "map normalize",
-        "regex": "^map\\s+normalize(?:\\s+(\\d+)\\s+(\\d+))?$"
+        "regex": "^map\\s+normalize(?:\\s+([\\d,]+)(?:\\s+([\\d,]+))?)?$"
     },
     {
         "name": "map area-name",
