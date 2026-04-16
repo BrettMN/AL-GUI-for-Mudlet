@@ -4,8 +4,8 @@
 --   flatten_cardinal_connected_rooms, map.normalize_room_layout,
 --   map.recalculate_room_layout.
 
-map   = map or {}
-map._ = map._ or {}
+map     = map or {}
+map._   = map._ or {}
 local _ = map._
 
 -- --------------------------------------------------------------------------
@@ -89,8 +89,12 @@ end
 -- Placement: reconcile helpers
 -- --------------------------------------------------------------------------
 
--- Build a table mapping "x,y,z" → roomID for all rooms in the area that have
--- coordinates.  Much cheaper than calling getRoomsByPosition per BFS node.
+-- Fast position-cache key. Using a local upvalue avoids repeated global lookups
+-- and the inline string.format overhead in the BFS hot loop.
+local function pos_key(x, y, z) return x .. "," .. y .. "," .. z end
+
+-- Build a table mapping pos_key(x,y,z) → roomID for all rooms in the area
+-- that have coordinates.  Much cheaper than calling getRoomsByPosition per BFS node.
 local function build_pos_cache(areaID)
     local cache = {}
     local rooms = getAreaRooms(areaID)
@@ -98,7 +102,7 @@ local function build_pos_cache(areaID)
     for _, id in ipairs(rooms) do
         local x, y, z = getRoomCoordinates(id)
         if x ~= nil then
-            cache[x .. "," .. y .. "," .. z] = id
+            cache[pos_key(x, y, z)] = id
         end
     end
     return cache
@@ -205,7 +209,7 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                                     local expectedY       = cy + shift[2]
                                     local expectedZ       = cz + shift[3]
 
-                                    local posKey          = expectedX .. "," .. expectedY .. "," .. expectedZ
+                                    local posKey          = pos_key(expectedX, expectedY, expectedZ)
                                     local occupantID      = posCache[posKey]
                                     local alreadyOccupied = occupantID ~= nil and occupantID ~= targetID
 
@@ -217,9 +221,9 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                                             if tx ~= expectedX or ty ~= expectedY or tz ~= finalZ then
                                                 -- Update cache: remove old position, add new.
                                                 if tx ~= nil then
-                                                    posCache[tx .. "," .. ty .. "," .. tz] = nil
+                                                    posCache[pos_key(tx, ty, tz)] = nil
                                                 end
-                                                posCache[expectedX .. "," .. expectedY .. "," .. finalZ] = targetID
+                                                posCache[pos_key(expectedX, expectedY, finalZ)] = targetID
                                                 setRoomCoordinates(targetID, expectedX, expectedY, finalZ)
                                                 passMove = passMove + 1
                                                 moved    = moved + 1
@@ -369,8 +373,8 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
 end
 
 function map.normalize_all_areas(maxPasses, maxMoves)
-    maxPasses = maxPasses or map.configs.reconcile_deep_max_passes
-    maxMoves  = maxMoves or map.configs.reconcile_deep_max_moves
+    maxPasses   = maxPasses or map.configs.reconcile_deep_max_passes
+    maxMoves    = maxMoves or map.configs.reconcile_deep_max_moves
 
     local areas = getAreaTable()
     if type(areas) ~= "table" then
@@ -378,9 +382,9 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         return
     end
 
-    local totalMoved   = 0
-    local areaCount    = 0
-    local areaNames    = {}
+    local totalMoved = 0
+    local areaCount  = 0
+    local areaNames  = {}
     for name, _ in pairs(areas) do areaNames[#areaNames + 1] = name end
     table.sort(areaNames)
 
@@ -405,6 +409,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         " across " .. areaCount .. " area" .. (areaCount == 1 and "" or "s") .. ".\n")
 end
 
+function map.recalculate_room_layout()
     local seedID = getRoomIDbyHash(map.room_info.vnum)
     if type(seedID) ~= "number" or seedID < 1 then
         echo("Cannot recalculate: current room is unknown.\n")
@@ -434,7 +439,7 @@ end
     local queue         = { { id = seedID, x = sx, y = sy, z = sz, underground = seedUG, elevated = seedEL } }
     local qHead         = 1
     local visited       = { [seedID] = true }
-    local occupied      = { [sx .. "," .. sy .. "," .. sz] = seedID }
+    local occupied      = { [pos_key(sx, sy, sz)] = seedID }
     local movedCount    = 0
     local nudgeCount    = 0
     local levelCount    = 0
@@ -496,10 +501,10 @@ end
                         -- Collision avoidance: if the ideal position is already
                         -- taken by an earlier BFS room, nudge to the nearest
                         -- free spot so rooms don't stack on top of each other.
-                        local posKey = tx .. "," .. ty .. "," .. tz
+                        local posKey = pos_key(tx, ty, tz)
                         if occupied[posKey] then
                             tx, ty, tz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift)
-                            posKey = tx .. "," .. ty .. "," .. tz
+                            posKey = pos_key(tx, ty, tz)
                             nudgeCount = nudgeCount + 1
                         end
 
@@ -585,7 +590,7 @@ end
 
             local needsSeparation = false
             for _, pp in ipairs(perpPositions) do
-                local perpKey    = pp[1] .. "," .. pp[2] .. "," .. pp[3]
+                local perpKey    = pos_key(pp[1], pp[2], pp[3])
                 local perpRoomID = occupied[perpKey]
                 if perpRoomID and not rooms_connected(roomID, perpRoomID) then
                     needsSeparation = true
@@ -608,7 +613,7 @@ end
                     local ok = true
                     for _, rid in ipairs(subtree) do
                         local rp = roomPositions[rid]
-                        local nk = (rp.x + dx * dist) .. "," .. (rp.y + dy * dist) .. "," .. rp.z
+                        local nk = pos_key(rp.x + dx * dist, rp.y + dy * dist, rp.z)
                         local occupant = occupied[nk]
                         if occupant and not subtreeSet[occupant] then
                             ok = false
@@ -625,7 +630,7 @@ end
                     -- Remove old positions from occupied.
                     for _, rid in ipairs(subtree) do
                         local rp       = roomPositions[rid]
-                        local oKey     = rp.x .. "," .. rp.y .. "," .. rp.z
+                        local oKey     = pos_key(rp.x, rp.y, rp.z)
                         occupied[oKey] = nil
                     end
                     -- Place at new positions.
@@ -633,7 +638,7 @@ end
                         local rp = roomPositions[rid]
                         rp.x = rp.x + dx * dist
                         rp.y = rp.y + dy * dist
-                        local nKey = rp.x .. "," .. rp.y .. "," .. rp.z
+                        local nKey = pos_key(rp.x, rp.y, rp.z)
                         occupied[nKey] = rid
                         setRoomCoordinates(rid, rp.x, rp.y, rp.z)
                         shifted[rid] = true

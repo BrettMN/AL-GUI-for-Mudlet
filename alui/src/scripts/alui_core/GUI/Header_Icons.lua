@@ -53,12 +53,6 @@ local function createInfoCSS()
       background-repeat: no-repeat;
       background-size: auto 50%%;
     ]], neutralBg))
-
-    -- Register CSS with ResourceManager
-    if RM then
-        RM.registerCSS("headerInfoCSS", css, "header")
-    end
-
     return css
 end
 
@@ -74,18 +68,16 @@ local function createActionCSS()
       background-repeat: no-repeat;
       background-size: auto 50%%;
     ]], neutralBg))
-
-    -- Register CSS with ResourceManager
-    if RM then
-        RM.registerCSS("headerActionCSS", css, "header")
-    end
-
     return css
 end
 
--- Legacy CSS objects for backward compatibility
+-- Legacy CSS objects for backward compatibility (registered once)
 GUI.InfoCSS = createInfoCSS()
 GUI.ActionCSS = createActionCSS()
+if RM then
+    RM.registerCSS("headerInfoCSS", GUI.InfoCSS, "header")
+    RM.registerCSS("headerActionCSS", GUI.ActionCSS, "header")
+end
 
 -- Core menu item creation function with ResourceManager integration
 local function createMenuItem(name, updateFunction, parent)

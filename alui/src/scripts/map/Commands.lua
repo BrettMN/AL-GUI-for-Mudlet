@@ -382,13 +382,8 @@ function map.apply_area_terrain()
         return
     end
 
-    -- Build reverse lookup: envID -> terrain name (first match)
-    local envToTerrain = {}
-    for terrainName, spec in pairs(_.terrain_types) do
-        if type(spec) == "table" and not envToTerrain[spec.id] then
-            envToTerrain[spec.id] = terrainName
-        end
-    end
+    -- Use the pre-built reverse lookup from Data.lua instead of rebuilding per call.
+    local envToTerrain      = _.envID_to_terrain or {}
 
     local envApplied        = 0
     local terrainBackfilled = 0
@@ -471,6 +466,11 @@ end
 
 local continue_walk, timerID
 
+-- Initialise walk state on map.* so these are never nil globals.
+map.walking  = map.walking or false
+map.walkDirs = map.walkDirs or {}
+
+
 local function get_active_speedwalk_delay()
     if type(map.walk_settings) == "table" and type(map.walk_settings.delay) == "number" then
         return map.walk_settings.delay
@@ -494,8 +494,8 @@ _.get_active_speedwalk_delay = get_active_speedwalk_delay
 _.get_active_speedwalk_wait  = get_active_speedwalk_wait
 
 function map.stop_auto_walk()
-    if not walking then return false end
-    walking      = false
+    if not map.walking then return false end
+    map.walking  = false
     map.walkDirs = {}
     clear_active_walk_settings()
     if timerID then
@@ -507,7 +507,13 @@ function map.stop_auto_walk()
 end
 
 continue_walk = function(new_room)
-    if not walking then
+    if not map.walking then
+        clear_active_walk_settings()
+        return
+    end
+    -- Nothing left to walk — clear state without scheduling another timer.
+    if #map.walkDirs == 0 then
+        map.walking = false
         clear_active_walk_settings()
         return
     end
@@ -522,11 +528,11 @@ continue_walk = function(new_room)
     if not new_room then
         send(table.remove(map.walkDirs, 1))
         if #map.walkDirs == 0 then
-            walking = false
+            map.walking = false
             clear_active_walk_settings()
         end
     end
-    if walking and (not waitForRoom or (waitForRoom and wait > 0)) then
+    if map.walking and (not waitForRoom or (waitForRoom and wait > 0)) then
         if timerID then killTimer(timerID) end
         timerID = tempTimer(wait, function() continue_walk() end)
     end
@@ -539,6 +545,7 @@ local function check_doors(roomID, exits)
     if type(exits) == "string" then exits = { exits } end
     local statuses = {}
     local doors    = getDoors(roomID)
+    if type(doors) ~= "table" then return false end
     local dir
     for k, v in pairs(exits) do
         dir = _.short[k] or _.short[v]
@@ -619,7 +626,7 @@ function map.speedwalk(roomID, walkPath, walkDirs, options)
         end
     end
 
-    walking           = true
+    map.walking       = true
     map.walk_settings = {
         wait_for_room = options.wait_for_room,
         delay         = options.delay,
@@ -629,7 +636,7 @@ function map.speedwalk(roomID, walkPath, walkDirs, options)
         continue_walk()
     else
         for _, dir in ipairs(walkDirs) do send(dir) end
-        walking = false
+        map.walking = false
         clear_active_walk_settings()
     end
 end

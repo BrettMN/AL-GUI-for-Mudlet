@@ -92,6 +92,9 @@ local resizeHandler = function()
             GUI.Timers.resize = nil
         end
         GUI.Timers.resize = tempTimer(RESIZE_TIMER_DELAY, function()
+            -- Nil the stored ID first so a rapid second resize can safely
+            -- schedule a new timer even while this callback is running.
+            GUI.Timers.resize = nil
             local success, error_msg = pcall(function()
                 if GUI then
                     if GUI.setBorders then GUI.setBorders() end
@@ -101,7 +104,6 @@ local resizeHandler = function()
                     if GUI.Logic and GUI.Logic.StyleUpdate then GUI.Logic.StyleUpdate() end
                 end
             end)
-            GUI.Timers.resize = nil
             if not success then
                 echo(string.format("Error during resize operations: %s\n", tostring(error_msg)))
             end
@@ -110,5 +112,5 @@ local resizeHandler = function()
 end
 
 -- Register the event handler in ALUI namespace
-ALUI.GUI.Events.resize = registerNamedEventHandler(profileName, 'ALUI.events.resize', "sysWindowResizeEvent",
+ALUI.GUI.Events.resize = registerNamedEventHandler(getProfileName(), 'ALUI.events.resize', "sysWindowResizeEvent",
     resizeHandler, false)

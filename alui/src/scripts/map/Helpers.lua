@@ -100,13 +100,7 @@ function _.get_room_terrain_name(roomID)
     local envID = getRoomEnv(roomID)
     if type(envID) ~= "number" then return nil end
 
-    for terrainName, spec in pairs(_.terrain_types) do
-        if type(spec) == "table" and spec.id == envID
-            and terrainName ~= "Inside" and terrainName ~= "unvisited" then
-            return terrainName
-        end
-    end
-    return nil
+    return _.envID_to_terrain[envID] or nil
 end
 
 function _.is_horizontal_shift(shift)
@@ -144,12 +138,11 @@ function _.get_forced_z_for_room(roomID)
 
     local envID = getRoomEnv(roomID)
     if type(envID) == "number" then
-        for terrainName, spec in pairs(_.terrain_types) do
-            if type(spec) == "table" and spec.id == envID then
-                local normalized = _.normalize_terrain_name(terrainName)
-                local forcedZ = normalized and _.forced_z_by_terrain_name[normalized] or nil
-                if type(forcedZ) == "number" then return forcedZ end
-            end
+        local terrainName = _.envID_to_terrain[envID]
+        if terrainName then
+            local normalized = _.normalize_terrain_name(terrainName)
+            local forcedZ = normalized and _.forced_z_by_terrain_name[normalized] or nil
+            if type(forcedZ) == "number" then return forcedZ end
         end
     end
     return nil
@@ -373,7 +366,8 @@ end
 -- When an exit-direction shift is provided, positions along that axis are
 -- probed first so nudged rooms keep their directional alignment.
 function _.find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius)
-    maxRadius = maxRadius or 50
+    -- Cap radius; at r=20 the ring search already covers 1600 candidate positions.
+    maxRadius = math.min(maxRadius or 20, 20)
 
     if type(shift) == "table" then
         local ax, ay = shift[1], shift[2]
@@ -396,22 +390,29 @@ function _.find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius)
         end
     end
 
+    -- Generic ring search: probe each ring inline without building a table first.
     for r = 1, maxRadius do
-        local probes = {
-            { x,     y + r }, { x + r, y }, { x, y - r }, { x - r, y },
-            { x + r, y + r }, { x + r, y - r }, { x - r, y - r }, { x - r, y + r },
+        -- Cardinal probes first (4 positions at distance r)
+        local candidates = {
+            { x, y + r }, { x + r, y }, { x, y - r }, { x - r, y },
         }
+        -- Diagonal corners
+        candidates[5] = { x + r, y + r }
+        candidates[6] = { x + r, y - r }
+        candidates[7] = { x - r, y - r }
+        candidates[8] = { x - r, y + r }
+        -- Fill remaining edge positions
         for i = 1, r - 1 do
-            probes[#probes + 1] = { x + i, y + r }
-            probes[#probes + 1] = { x - i, y + r }
-            probes[#probes + 1] = { x + i, y - r }
-            probes[#probes + 1] = { x - i, y - r }
-            probes[#probes + 1] = { x + r, y + i }
-            probes[#probes + 1] = { x + r, y - i }
-            probes[#probes + 1] = { x - r, y + i }
-            probes[#probes + 1] = { x - r, y - i }
+            candidates[#candidates + 1] = { x + i, y + r }
+            candidates[#candidates + 1] = { x - i, y + r }
+            candidates[#candidates + 1] = { x + i, y - r }
+            candidates[#candidates + 1] = { x - i, y - r }
+            candidates[#candidates + 1] = { x + r, y + i }
+            candidates[#candidates + 1] = { x + r, y - i }
+            candidates[#candidates + 1] = { x - r, y + i }
+            candidates[#candidates + 1] = { x - r, y - i }
         end
-        for _, p in ipairs(probes) do
+        for _, p in ipairs(candidates) do
             local key = p[1] .. "," .. p[2] .. "," .. z
             if not occupied[key] then return p[1], p[2], z end
         end

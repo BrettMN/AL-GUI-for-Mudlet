@@ -84,16 +84,19 @@ ALUI.Events.registerHandler = function(eventName, handlerName, callback)
 
     ALUI.Events.handlers[eventName][handlerName] = callback
 
-    -- Register with Mudlet's event system
-    local mudletHandler = registerNamedEventHandler(profileName or "ALUI", handlerName, eventName, callback)
-    ALUI.Events.registered[handlerName] = mudletHandler
+    -- Use getProfileName() for a reliable profile identifier at registration time.
+    local profile = getProfileName()
+    registerNamedEventHandler(profile, handlerName, eventName, callback)
+    -- Store the profile so unregisterHandler can delete against the same name.
+    ALUI.Events.registered[handlerName] = profile
 
-    return mudletHandler
+    return handlerName
 end
 
 ALUI.Events.unregisterHandler = function(handlerName)
     if ALUI.Events.registered[handlerName] then
-        killAnonymousEventHandler(ALUI.Events.registered[handlerName])
+        local profile = ALUI.Events.registered[handlerName]
+        deleteNamedEventHandler(profile, handlerName)
         ALUI.Events.registered[handlerName] = nil
 
         -- Remove from our internal tracking

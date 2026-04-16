@@ -61,6 +61,18 @@ _.terrain_types = {
     ["unvisited"] = { id = 46, r = 50, g = 50, b = 50 }, -- light grey placeholder
 }
 
+-- Reverse lookup: envID → terrain name (first non-special match wins).
+-- Built once here so Helpers.lua never has to scan terrain_types in a loop.
+_.envID_to_terrain = {}
+do
+    local skip = { Inside = true, unvisited = true }
+    for name, spec in pairs(_.terrain_types) do
+        if type(spec) == "table" and not _.envID_to_terrain[spec.id] and not skip[name] then
+            _.envID_to_terrain[spec.id] = name
+        end
+    end
+end
+
 -- list of possible movement directions and appropriate coordinate changes
 _.move_vectors = {
     north = { 0, 1, 0 },

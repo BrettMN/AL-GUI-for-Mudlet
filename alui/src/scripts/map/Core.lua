@@ -2,19 +2,26 @@
 -- Room creation, GMCP event queue, handle_move, shift_room.
 
 -- Guard: ensure map._ exists even if Data.lua evaluated after this chunk.
-map                     = map or {}
-map._                   = map._ or {}
-local _                 = map._
+map     = map or {}
+map._   = map._ or {}
+local _ = map._
+
+-- Lua 5.1 does not have table.is_empty; Mudlet adds it but provide a fallback
+-- so the script is not fragile if Mudlet's version is unavailable.
+local function is_empty_t(t)
+    return t == nil or next(t) == nil
+end
 
 -- --------------------------------------------------------------------------
 -- Queue state (local to this chunk, only needed by handle_move and eventHandler)
 -- --------------------------------------------------------------------------
-local room_event_queue  = {}
-local queue_processing  = false
-local queue_drain_timer = nil
+local room_event_queue    = {}
+local queue_processing    = false
+local queue_drain_timer   = nil
+local queue_timer_pending = false -- prevents scheduling a second drain timer
 
 -- vertical directions used by check_doors (exposed here for event handler)
-local verticalDirs      = { u = true, up = true, d = true, down = true }
+local verticalDirs        = { u = true, up = true, d = true, down = true }
 
 -- --------------------------------------------------------------------------
 -- Room creation helpers
@@ -116,7 +123,7 @@ local function make_room()
                 local probes = { { 0, 0, 1 }, { 0, 0, -1 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 } }
                 for _, probe in ipairs(probes) do
                     local testCoords = { coords[1] + probe[1], coords[2] + probe[2], coords[3] + probe[3] }
-                    if table.is_empty(getRoomsByPosition(areaID, testCoords[1], testCoords[2], testCoords[3])) then
+                    if is_empty_t(getRoomsByPosition(areaID, testCoords[1], testCoords[2], testCoords[3])) then
                         shift = { -probe[1], -probe[2], -probe[3] }
                         break
                     end
@@ -128,7 +135,7 @@ local function make_room()
             -- Map stretching (skip while grid mode is active)
             if not _.should_skip_stretch_for_area(areaID) then
                 local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-                if not table.is_empty(overlap) then
+                if not is_empty_t(overlap) then
                     local rooms = getAreaRooms(areaID)
                     local rcoords
                     for _, id in ipairs(rooms) do
@@ -218,10 +225,11 @@ local function handle_move(isLastInBatch)
 
     if type(info.vnum) == "string" then
         local rnum = getRoomIDbyHash(info.vnum)
-        _.debug_echo("Current room ID: " .. rnum .. "\n")
+        if type(rnum) ~= "number" then rnum = -1 end
         if rnum < 1 then
             make_room()
             rnum = getRoomIDbyHash(info.vnum)
+            if type(rnum) ~= "number" then rnum = -1 end
         end
 
         if rnum > 0 then
@@ -289,12 +297,12 @@ local function handle_move(isLastInBatch)
             if stubs then
                 for _i, n in ipairs(stubs) do
                     local dir = _.stubmapFlipped[n]
-                    if info.exits and type(info.exits[dir]) == "string" then
+                    if type(dir) ~= "string" then
+                        -- stub number has no named direction; skip
+                    elseif info.exits and type(info.exits[dir]) == "string" then
                         local targetVnum = info.exits[dir]
                         local id         = getRoomIDbyHash(targetVnum)
-                        _.debug_echo("Processing exit stub in direction '" ..
-                            dir .. "' with target room ID: " .. id .. " and a target vnum: " .. targetVnum .. "\n")
-                        if (id > 0) and getRoomName(id) then
+                        if type(id) == "number" and id > 0 and getRoomName(id) then
                             connectExitStub(rnum, id, dir)
                         end
                     end
@@ -321,6 +329,7 @@ end
 -- --------------------------------------------------------------------------
 
 local function process_room_queue()
+    queue_timer_pending = false
     while #room_event_queue > 0 do
         local snapshot = table.remove(room_event_queue, 1)
         local ok, err  = pcall(function()
@@ -371,11 +380,12 @@ function map.eventHandler(event, ...)
             exits   = exits,
         }
         table.insert(room_event_queue, snapshot)
-        if not queue_processing then
-            queue_processing  = true
-            queue_drain_timer = tempTimer(0, function() process_room_queue() end)
+        if not queue_processing and not queue_timer_pending then
+            queue_timer_pending = true
+            queue_processing    = true
+            queue_drain_timer   = tempTimer(0, function() process_room_queue() end)
         end
-        if walking and _.get_active_speedwalk_wait and _.get_active_speedwalk_wait()
+        if map.walking and _.get_active_speedwalk_wait and _.get_active_speedwalk_wait()
             and _.get_active_speedwalk_delay and _.get_active_speedwalk_delay() <= 0 then
             if _.continue_walk then _.continue_walk(true) end
         end

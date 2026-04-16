@@ -188,84 +188,81 @@ function ConfigGUI.create()
     ]])
 
     -- Toolbar buttons
-    ConfigGUI.saveBtn = Geyser.Label:new({
+    ConfigGUI.saveBtn = Geyser.Button:new({
         name = "ALUI_SaveBtn",
         width = 80,
-        height = 30
+        height = 30,
+        style = string.format([[
+            QPushButton {
+                background: %s;
+                color: %s;
+                border: %s;
+                border-radius: %s;
+                padding: %s;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: %s;
+            }
+        ]], ConfigGUI.styles.button.background,
+            ConfigGUI.styles.button.color,
+            ConfigGUI.styles.button.border,
+            ConfigGUI.styles.button.borderRadius,
+            ConfigGUI.styles.button.padding,
+            ConfigGUI.styles.button.hoverBackground),
+        msg = "Save",
     }, ConfigGUI.toolbar)
 
-    ConfigGUI.saveBtn:setStyleSheet(string.format([[
-        QLabel {
-            background: %s;
-            color: %s;
-            border: %s;
-            border-radius: %s;
-            padding: %s;
-            font-weight: bold;
-        }
-        QLabel:hover {
-            background: %s;
-        }
-    ]], ConfigGUI.styles.button.background,
-        ConfigGUI.styles.button.color,
-        ConfigGUI.styles.button.border,
-        ConfigGUI.styles.button.borderRadius,
-        ConfigGUI.styles.button.padding,
-        ConfigGUI.styles.button.hoverBackground))
-
-    ConfigGUI.saveBtn:echo("<center>Save</center>")
     ConfigGUI.saveBtn:setClickCallback(function()
         ConfigGUI.save()
     end)
 
     -- Reset button
-    ConfigGUI.resetBtn = Geyser.Label:new({
+    ConfigGUI.resetBtn = Geyser.Button:new({
         name = "ALUI_ResetBtn",
         width = 80,
-        height = 30
+        height = 30,
+        style = [[
+            QPushButton {
+                background: #CC3333;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #DD4444;
+            }
+        ]],
+        msg = "Reset",
     }, ConfigGUI.toolbar)
 
-    ConfigGUI.resetBtn:setStyleSheet([[
-        QLabel {
-            background: #CC3333;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            padding: 8px 16px;
-            font-weight: bold;
-        }
-        QLabel:hover {
-            background: #DD4444;
-        }
-    ]])
-
-    ConfigGUI.resetBtn:echo("<center>Reset</center>")
     ConfigGUI.resetBtn:setClickCallback(function()
         ConfigGUI.resetCategory()
     end)
 
     -- Close button
-    ConfigGUI.closeBtn = Geyser.Label:new({
+    ConfigGUI.closeBtn = Geyser.Button:new({
         name = "ALUI_CloseBtn",
         width = 80,
-        height = 30
+        height = 30,
+        style = [[
+            QPushButton {
+                background: #666666;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #777777;
+            }
+        ]],
+        msg = "Close",
     }, ConfigGUI.toolbar)
 
-    ConfigGUI.closeBtn:setStyleSheet([[
-        QLabel {
-            background: #666666;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            padding: 8px 16px;
-            font-weight: bold;
-        }
-        QLabel:hover {
-            background: #777777;
-        }
-    ]])
-
-    ConfigGUI.closeBtn:echo("<center>Close</center>")
     ConfigGUI.closeBtn:setClickCallback(function()
         ConfigGUI.close()
     end)
@@ -323,7 +320,7 @@ function ConfigGUI.buildCategoryContent(categoryId)
     local categoryConfig = Config.current[categoryId]
     if not categoryConfig then
         ConfigGUI.content:echo("<center><span style='color: #FF6666;'>Category not found: " ..
-        categoryId .. "</span></center>")
+            categoryId .. "</span></center>")
         return
     end
 

@@ -14,6 +14,9 @@ local function setBoxes()
     if RM then
         RM.cleanupByCategory("boxes")
         RM.cleanupByCategory("gauges")
+        RM.cleanupByCategory("mapping")
+        RM.cleanupByCategory("interface")
+        RM.cleanupByCategory("buttons")
     end
 
     -- Use configuration values for styling with fallbacks

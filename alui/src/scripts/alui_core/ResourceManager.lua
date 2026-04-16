@@ -107,7 +107,8 @@ RM.destroyUIElement = function(name)
 end
 
 -- Track CSS objects
-RM.rlocal currentEpoch = getEpoch()
+RM.registerCSS = function(name, cssObject, category)
+    local currentEpoch = getEpoch()
     RM.resources.cssObjects[name] = {
         object = cssObject,
         category = category or "style",
@@ -115,7 +116,6 @@ RM.rlocal currentEpoch = getEpoch()
     }
 
     RM.metadata.creationTimes[name] = currentEpoch
-    RM.metadata.creationTimes[name] = getEpoch()
 end
 
 -- Clean up CSS objects
@@ -130,7 +130,8 @@ RM.destroyCSS = function(name)
 end
 
 -- Enhanced event handler tracking
-RM.rlocal currentEpoch = getEpoch()
+RM.registerEventHandler = function(name, handlerId, eventName, category)
+    local currentEpoch = getEpoch()
     RM.resources.eventHandlers[name] = {
         id = handlerId,
         eventName = eventName,
@@ -139,7 +140,6 @@ RM.rlocal currentEpoch = getEpoch()
     }
 
     RM.metadata.creationTimes[name] = currentEpoch
-    RM.metadata.creationTimes[name] = getEpoch()
     RM.metadata.usageCount[name] = 0
 end
 
