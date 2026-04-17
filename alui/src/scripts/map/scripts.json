@@ -18,5 +18,9 @@
     {
         "name": "Commands",
         "isActive": "yes"
+    },
+    {
+        "name": "Menu",
+        "isActive": "yes"
     }
 ]

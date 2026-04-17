@@ -405,11 +405,55 @@ function map.apply_area_terrain()
         end
     end
 
+    -- Second pass: sky rooms inherit the env colour of the first non-sky room
+    -- directly beneath them (same x,y, decreasing z).  The stored terrain
+    -- user-data stays "sky"; we only recolour for visual clarity.
+    local skySpec       = _.terrain_types and _.terrain_types["sky"]
+    local skyEnvID      = skySpec and skySpec.id
+    local skyRecoloured = 0
+    if skyEnvID then
+        -- Build an (x,y,z) -> roomID lookup across the area.
+        local posByKey = {}
+        for _i, rid in pairs(rooms) do
+            local x, y, z = getRoomCoordinates(rid)
+            if x ~= nil then
+                posByKey[x .. "," .. y .. "," .. z] = rid
+            end
+        end
+
+        for _i, rid in pairs(rooms) do
+            if getRoomEnv(rid) == skyEnvID then
+                local x, y, z = getRoomCoordinates(rid)
+                if x ~= nil then
+                    local inheritedEnv
+                    for dz = 1, 50 do
+                        local belowID = posByKey[x .. "," .. y .. "," .. (z - dz)]
+                        if belowID then
+                            local belowEnv = getRoomEnv(belowID)
+                            if type(belowEnv) == "number"
+                                and belowEnv > 0
+                                and belowEnv ~= skyEnvID then
+                                inheritedEnv = belowEnv
+                                break
+                            end
+                        end
+                    end
+                    if inheritedEnv and inheritedEnv ~= getRoomEnv(rid) then
+                        setRoomEnv(rid, inheritedEnv)
+                        skyRecoloured = skyRecoloured + 1
+                    end
+                end
+            end
+        end
+    end
+
     updateMap()
     echo("Area '" .. (areaName or ("#" .. areaID)) .. "': applied terrain to " ..
         envApplied .. " unset room" .. (envApplied == 1 and "" or "s") ..
         ", back-filled terrain data on " .. terrainBackfilled .. " room" ..
-        (terrainBackfilled == 1 and "" or "s") .. ".\n")
+        (terrainBackfilled == 1 and "" or "s") ..
+        ", recoloured " .. skyRecoloured .. " sky room" ..
+        (skyRecoloured == 1 and "" or "s") .. " from below.\n")
 end
 
 function map.export_rooms()
