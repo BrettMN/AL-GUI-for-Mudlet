@@ -103,6 +103,79 @@ function _.get_room_terrain_name(roomID)
     return _.envID_to_terrain[envID] or nil
 end
 
+-- Returns the mapper room ID of a placeholder that should be adopted for the
+-- given arrival, or nil if no adoptable placeholder is found.
+--
+-- A "placeholder" is a room created by create_neighbors_for_current_room
+-- before the player has visited it:  env == unvisited (46) and its name is
+-- a bare hash string (no spaces, exactly 32 hex chars) OR it has no linked
+-- exits of its own.
+--
+-- Lookup order:
+--  1. The room Mudlet already thinks is the target of prevRoomID's exit in
+--     arrivalDir — most reliable, uses Mudlet's own exit table.
+--  2. getRoomsByPosition at the expected adjacent coordinate — fallback for
+--     cases where the exit hadn't been wired yet.
+local function is_placeholder(roomID)
+    local unvisitedID = _.terrain_types["unvisited"] and _.terrain_types["unvisited"].id or 46
+    if getRoomEnv(roomID) ~= unvisitedID then return false end
+    -- Name is the raw hash (32 hex chars, no spaces) — as set in Layout.lua
+    local name = getRoomName(roomID) or ""
+    if name:match("^[0-9a-f]+$") and #name >= 20 then return true end
+    -- No linked exits either way = definitely placeholder
+    local exits = getRoomExits(roomID)
+    if type(exits) ~= "table" then return true end
+    for _ in pairs(exits) do return false end
+    return true
+end
+
+function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
+    if type(prevRoomID) ~= "number" or prevRoomID < 1 then return nil end
+    if type(arrivalDir) ~= "string" or arrivalDir == "" then return nil end
+
+    -- Strategy 1: use the exit Mudlet has already wired from prev room.
+    local exitTarget = _.get_room_exit_target(prevRoomID, arrivalDir)
+    if type(exitTarget) == "number" and exitTarget > 0 then
+        -- Only adopt if it is genuinely unvisited (hash-named placeholder).
+        if is_placeholder(exitTarget) then
+            return exitTarget
+        end
+        -- The exit is already a real room — don't adopt it.
+        return nil
+    end
+
+    -- Strategy 2: coordinate scan.
+    local shift = _.get_shift_for_exit_key(arrivalDir)
+    if not shift then return nil end
+    local px, py, pz = getRoomCoordinates(prevRoomID)
+    if px == nil then return nil end
+    local tx, ty, tz = px + shift[1], py + shift[2], pz + shift[3]
+    if type(getRoomsByPosition) ~= "function" then return nil end
+    local areaID   = getRoomArea(prevRoomID)
+    local nearbyID = getRoomsByPosition(areaID, tx, ty, tz)
+    if type(nearbyID) == "number" and nearbyID > 0 and is_placeholder(nearbyID) then
+        return nearbyID
+    end
+    if type(nearbyID) == "table" then
+        for _, rid in ipairs(nearbyID) do
+            if type(rid) == "number" and rid > 0 and is_placeholder(rid) then
+                return rid
+            end
+        end
+    end
+    return nil
+end
+
+_.find_placeholder_for_arrival = _.find_placeholder_for_arrival
+
+-- Signal that the map has grown during an active autowalk so continue_walk
+-- can re-evaluate the route on the next arrival.
+function _.mark_autowalk_dirty()
+    if map.walking then
+        map.autowalk_dirty = true
+    end
+end
+
 function _.is_horizontal_shift(shift)
     return type(shift) == "table" and shift[3] == 0
 end

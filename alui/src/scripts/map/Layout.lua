@@ -79,8 +79,21 @@ function _.create_neighbors_for_current_room(roomID)
             -- One-directional is intentional: GMCP is authoritative, the reverse
             -- will be set properly when the player actually enters that room.
             -- map recalculate only needs forward exits to BFS-position rooms.
-            setExit(roomID, targetID, dir)
+            -- setExit only accepts the 12 standard Mudlet direction names; skip
+            -- any non-standard GMCP exit key (portals, custom commands, etc.)
+            -- to avoid the "direction as number or string expected" error.
+            local exitDir = _.normalize_exit_direction(dir)
+            if not exitDir then
+                local d = type(dir) == "string" and string.lower(dir) or nil
+                if d == "in" or d == "out" then exitDir = d end
+            end
+            if exitDir then
+                setExit(roomID, targetID, exitDir)
+            end
         end
+    end
+    if createdCount > 0 then
+        _.mark_autowalk_dirty()
     end
     return createdCount
 end

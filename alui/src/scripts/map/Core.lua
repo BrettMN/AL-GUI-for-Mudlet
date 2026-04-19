@@ -73,7 +73,11 @@ local function make_room()
         return
     else
         if type(map.prev_info.vnum) == "string" then
-            coords = { getRoomCoordinates(getRoomIDbyHash(map.prev_info.vnum)) }
+            local prevID = getRoomIDbyHash(map.prev_info.vnum)
+            if type(prevID) == "number" and prevID > 0 then
+                coords = { getRoomCoordinates(prevID) }
+            end
+            if coords[1] == nil then coords = { 0, 0, 0 } end
             local shift = { 0, 0, 0 }
             if type(info.exits) == "table" then
                 for k, v in pairs(info.exits) do
@@ -161,6 +165,7 @@ local function make_room()
     end
     local thisRoom = createRoomID()
     addRoom(thisRoom)
+    _.mark_autowalk_dirty()
     setRoomIDbyHash(thisRoom, info.vnum)
     setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
@@ -227,9 +232,42 @@ local function handle_move(isLastInBatch)
         local rnum = getRoomIDbyHash(info.vnum)
         if type(rnum) ~= "number" then rnum = -1 end
         if rnum < 1 then
-            make_room()
-            rnum = getRoomIDbyHash(info.vnum)
-            if type(rnum) ~= "number" then rnum = -1 end
+            -- Before creating a brand-new room, check if there is an existing
+            -- placeholder at the expected adjacent position that we can adopt.
+            -- This happens during autowalk when a placeholder's stored hash
+            -- doesn't match the GMCP vnum we receive on arrival.
+            local prevRoomID = type(map.prev_info) == "table"
+                and type(map.prev_info.vnum) == "string"
+                and getRoomIDbyHash(map.prev_info.vnum) or nil
+            local arrivalDir = map.last_walk_dir
+            local adopted    = false
+            if type(prevRoomID) == "number" and prevRoomID > 0
+                and type(arrivalDir) == "string" and arrivalDir ~= ""
+                and type(_.find_placeholder_for_arrival) == "function" then
+                local placeholderID = _.find_placeholder_for_arrival(prevRoomID, arrivalDir, info.vnum)
+                if placeholderID then
+                    -- Remap the placeholder's hash → incoming GMCP vnum.
+                    -- Best-effort clear the old (stale) hash binding first so it
+                    -- can't point at this room ID any more.
+                    if type(getRoomHashByID) == "function" then
+                        local oldHash = getRoomHashByID(placeholderID)
+                        if type(oldHash) == "string" and oldHash ~= "" and oldHash ~= info.vnum then
+                            pcall(setRoomIDbyHash, placeholderID, "")
+                        end
+                    end
+                    setRoomIDbyHash(placeholderID, info.vnum)
+                    _.mark_autowalk_dirty()
+                    rnum    = placeholderID
+                    adopted = true
+                    _.debug_echo("Adopted placeholder " .. placeholderID
+                        .. " for vnum " .. info.vnum .. " (dir " .. arrivalDir .. ")\n")
+                end
+            end
+            if not adopted then
+                make_room()
+                rnum = getRoomIDbyHash(info.vnum)
+                if type(rnum) ~= "number" then rnum = -1 end
+            end
         end
 
         if rnum > 0 then
@@ -339,7 +377,13 @@ local function process_room_queue()
             handle_move(isLast)
         end)
         if not ok then
-            echo("Mapper queue error: " .. tostring(err) .. "\n")
+            local msg = "Mapper queue error: " .. tostring(err) .. "\n"
+            if type(cecho) == "function" then
+                cecho("<red>" .. msg .. "<reset>")
+            else
+                echo(msg)
+            end
+            if type(debugc) == "function" then debugc(msg) end
         end
     end
     queue_processing  = false

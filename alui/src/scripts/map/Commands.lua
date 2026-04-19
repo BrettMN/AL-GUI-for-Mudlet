@@ -64,12 +64,7 @@ function map.remove_poi(roomID)
 end
 
 function map.toggle_poi_for_selected_room(event, action, ...)
-    local selection = getMapSelection()
-    local roomID    = type(selection) == "table" and selection.center or nil
-    if (type(roomID) ~= "number" or roomID < 1) and type(selection) == "table"
-        and type(selection.rooms) == "table" then
-        roomID = selection.rooms[1]
-    end
+    local roomID = _.get_selected_map_room and _.get_selected_map_room() or nil
     if not roomID then
         echo("Select a room on the mapper, then right-click it to toggle its POI marker.\n")
         return
@@ -118,12 +113,7 @@ function map.remove_underworld_entrance(roomID)
 end
 
 function map.toggle_underworld_entrance_for_selected_room(event, action, ...)
-    local selection = getMapSelection()
-    local roomID    = type(selection) == "table" and selection.center or nil
-    if (type(roomID) ~= "number" or roomID < 1) and type(selection) == "table"
-        and type(selection.rooms) == "table" then
-        roomID = selection.rooms[1]
-    end
+    local roomID = _.get_selected_map_room and _.get_selected_map_room() or nil
     if not roomID then
         echo("Select a room on the mapper, then right-click it to toggle its underworld entrance marker.\n")
         return
@@ -509,6 +499,7 @@ end
 -- --------------------------------------------------------------------------
 
 local continue_walk, timerID
+local maybe_reevaluate_autowalk -- forward declare; body is defined after compute_autowalk_path
 
 -- Initialise walk state on map.* so these are never nil globals.
 map.walking  = map.walking or false
@@ -530,7 +521,10 @@ local function get_active_speedwalk_wait()
 end
 
 local function clear_active_walk_settings()
-    map.walk_settings = nil
+    map.walk_settings   = nil
+    map.last_walk_dir   = nil
+    map.autowalk_target = nil
+    map.autowalk_dirty  = nil
 end
 
 -- Expose so Core.lua's eventHandler can call them
@@ -561,6 +555,11 @@ continue_walk = function(new_room)
         clear_active_walk_settings()
         return
     end
+    -- Re-evaluate route if the map has grown since the last step.
+    if map.autowalk_dirty and maybe_reevaluate_autowalk then
+        maybe_reevaluate_autowalk()
+        if not map.walking then return end
+    end
     local wait        = get_active_speedwalk_delay()
     local waitForRoom = get_active_speedwalk_wait()
     if wait > 0 and map.configs.speedwalk_random then
@@ -570,7 +569,12 @@ continue_walk = function(new_room)
         new_room = false
     end
     if not new_room then
-        send(table.remove(map.walkDirs, 1))
+        local rawDir = table.remove(map.walkDirs, 1)
+        -- Record the direction so handle_move can adopt an existing placeholder
+        -- whose hash doesn't yet match the incoming GMCP vnum.
+        local canonDir = _.exitmap and (_.exitmap[rawDir] or rawDir) or rawDir
+        map.last_walk_dir = canonDir
+        send(rawDir)
         if #map.walkDirs == 0 then
             map.walking = false
             clear_active_walk_settings()
@@ -697,7 +701,14 @@ end
 -- Autowalk helpers
 -- --------------------------------------------------------------------------
 
-local function get_selected_map_room()
+-- Mudlet's mapper sometimes deselects a room when a right-click misses
+-- the room slightly (e.g. clicking just outside the bounds).  By the time
+-- the menu event fires, getMapSelection() is empty.  We poll the live
+-- selection on a short interval and cache the most recent non-empty value
+-- so right-click handlers can fall back to the room the user actually
+-- intended to act on.
+local function read_live_selected_room()
+    if type(getMapSelection) ~= "function" then return nil end
     local selection = getMapSelection()
     if type(selection) ~= "table" then return nil end
     if type(selection.center) == "number" and selection.center > 0 then
@@ -710,54 +721,223 @@ local function get_selected_map_room()
     return nil
 end
 
-local function should_avoid_pois_for_autowalk(currentRoomID, targetRoomID)
-    return type(_.get_room_terrain_name(currentRoomID)) == "string"
-        or type(_.get_room_terrain_name(targetRoomID)) == "string"
-        or _.current_room_uses_grid_mode()
+local function refresh_selected_room_cache()
+    local roomID = read_live_selected_room()
+    if roomID then map.last_selected_room = roomID end
+end
+
+local function get_selected_map_room()
+    local roomID = read_live_selected_room()
+    if roomID then
+        map.last_selected_room = roomID
+        return roomID
+    end
+    -- Fallback: most recently observed selection (handles right-click misses
+    -- that clear the selection before the menu event fires).
+    local cached = map.last_selected_room
+    if type(cached) == "number" and cached > 0 then return cached end
+    return nil
+end
+
+_.refresh_selected_room_cache = refresh_selected_room_cache
+_.get_selected_map_room       = get_selected_map_room
+
+if not map.selection_cache_timer_id then
+    local ok, timerId = pcall(tempTimer, 0.25, function()
+        refresh_selected_room_cache()
+    end, true)
+    if ok and type(timerId) == "number" then
+        map.selection_cache_timer_id = timerId
+    end
+end
+
+-- Placeholder rooms (env 46, no exits) are created one-directionally by
+-- create_neighbors_for_current_room.  Mudlet's getPath cannot route THROUGH
+-- them because they have no outgoing exits.  Before running getPath we
+-- temporarily add exits between each placeholder and its grid-adjacent
+-- neighbours, then remove them immediately after so the map data is not
+-- polluted.
+--
+-- We scan only a padded bounding box via getRoomsByPosition (one call per
+-- candidate cell) instead of iterating the entire area, to avoid freezing
+-- on large maps.
+local PLACEHOLDER_PAD = 5 -- extra tiles of padding around the path bounding box
+
+local function room_at(areaID, x, y, z)
+    if type(getRoomsByPosition) ~= "function" then return nil end
+    local hit = getRoomsByPosition(areaID, x, y, z)
+    if type(hit) == "number" and hit > 0 then return hit end
+    if type(hit) == "table" then
+        for _i, rid in ipairs(hit) do
+            if type(rid) == "number" and rid > 0 then return rid end
+        end
+    end
+    return nil
+end
+
+local function add_placeholder_exits(areaID, currentRoomID, targetRoomID)
+    local unvisitedID = _.terrain_types["unvisited"] and _.terrain_types["unvisited"].id or 46
+    local added       = {}
+    if type(setExit) ~= "function" or type(getRoomsByPosition) ~= "function" then
+        return added
+    end
+
+    local cx, cy, cz = getRoomCoordinates(currentRoomID)
+    local tx, ty, tz = getRoomCoordinates(targetRoomID)
+    if cx == nil or tx == nil then return added end
+
+    local pad    = PLACEHOLDER_PAD
+    local minX   = math.min(cx, tx) - pad
+    local maxX   = math.max(cx, tx) + pad
+    local minY   = math.min(cy, ty) - pad
+    local maxY   = math.max(cy, ty) + pad
+    local minZ   = math.min(cz, tz) - 1
+    local maxZ   = math.max(cz, tz) + 1
+
+    -- Safety cap: bail if the box is unreasonably large.
+    local volume = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1)
+    if volume > 4000 then return added end
+
+    for z = minZ, maxZ do
+        for y = minY, maxY do
+            for x = minX, maxX do
+                local rid = room_at(areaID, x, y, z)
+                if rid and getRoomEnv(rid) == unvisitedID then
+                    for dir, shift in pairs(_.move_vectors) do
+                        local neighbourID = room_at(areaID, x + shift[1], y + shift[2], z + shift[3])
+                        if neighbourID then
+                            local ex = getRoomExits(rid)
+                            if type(ex) ~= "table" or ex[dir] == nil then
+                                setExit(rid, neighbourID, dir)
+                                added[#added + 1] = { rid, dir }
+                            end
+                            local revDir = _.reverse_move_vectors[dir]
+                            if revDir then
+                                local nex = getRoomExits(neighbourID)
+                                if type(nex) ~= "table" or nex[revDir] == nil then
+                                    setExit(neighbourID, rid, revDir)
+                                    added[#added + 1] = { neighbourID, revDir }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return added
+end
+
+local function remove_placeholder_exits(added)
+    for _i, e in ipairs(added) do
+        setExit(e[1], -1, e[2])
+    end
+end
+
+-- Shared helpers for copying Mudlet's global speedwalk tables and checking
+-- whether the found path passes through any POI (#) room.
+local function copy_speedwalk_globals()
+    local walkPath, walkDirs = {}, {}
+    for i, v in ipairs(speedWalkPath) do walkPath[i] = v end
+    for i, v in ipairs(speedWalkDir) do walkDirs[i] = v end
+    return walkPath, walkDirs
+end
+
+local function speedwalk_path_has_poi()
+    for _i, rid in ipairs(speedWalkPath) do
+        if getRoomChar(rid) == "#" then return true end
+    end
+    return false
 end
 
 local function compute_autowalk_path(currentRoomID, targetRoomID)
-    if not should_avoid_pois_for_autowalk(currentRoomID, targetRoomID)
-        or type(getRooms) ~= "function"
-        or type(lockRoom) ~= "function"
-        or type(roomLocked) ~= "function" then
-        local ok = getPath(currentRoomID, targetRoomID)
-        if not ok or #speedWalkPath == 0 then return false, nil, nil end
-        local walkPath = {}
-        local walkDirs = {}
-        for i, v in ipairs(speedWalkPath) do walkPath[i] = v end
-        for i, v in ipairs(speedWalkDir) do walkDirs[i] = v end
+    local targetIsPoi = getRoomChar(targetRoomID) == "#"
+
+    -- ----------------------------------------------------------------
+    -- Fast path: try getPath with no manipulation at all.
+    -- This handles the vast majority of walks (fully-mapped rooms, no
+    -- POIs along the route) and skips getAreaRooms and
+    -- add_placeholder_exits entirely.
+    -- ----------------------------------------------------------------
+    getPath(currentRoomID, targetRoomID)
+    if #speedWalkPath > 0 and (targetIsPoi or not speedwalk_path_has_poi()) then
+        local walkPath, walkDirs = copy_speedwalk_globals()
         return true, walkPath, walkDirs
     end
 
-    local temporarilyLocked = {}
-    for roomID, _ in pairs(getRooms()) do
-        if type(roomID) == "number"
-            and roomID ~= currentRoomID
-            and roomID ~= targetRoomID
-            and getRoomChar(roomID) == "#"
-            and type(_.get_room_terrain_name(roomID)) == "string"
-            and not roomLocked(roomID) then
-            lockRoom(roomID, true)
-            temporarilyLocked[#temporarilyLocked + 1] = roomID
+    -- ----------------------------------------------------------------
+    -- Slow path: either no direct path was found (target may be behind
+    -- unvisited placeholder rooms) or the direct route runs through
+    -- POI rooms and we need to lock them and re-route.
+    -- ----------------------------------------------------------------
+    local areaID = getRoomArea(currentRoomID)
+
+    local addedExits = (type(areaID) == "number" and areaID > 0)
+        and add_placeholder_exits(areaID, currentRoomID, targetRoomID) or {}
+
+    if not targetIsPoi
+        and type(getAreaRooms) == "function"
+        and type(lockRoom) == "function"
+        and type(roomLocked) == "function" then
+        local temporarilyLocked = {}
+        local areaRooms = (type(areaID) == "number" and areaID > 0) and getAreaRooms(areaID) or {}
+        for _i, roomID in ipairs(areaRooms) do
+            if type(roomID) == "number"
+                and roomID ~= currentRoomID
+                and roomID ~= targetRoomID
+                and getRoomChar(roomID) == "#"
+                and not roomLocked(roomID) then
+                lockRoom(roomID, true)
+                temporarilyLocked[#temporarilyLocked + 1] = roomID
+            end
         end
+
+        local ok       = getPath(currentRoomID, targetRoomID)
+        local walkPath = nil
+        local walkDirs = nil
+        if ok and #speedWalkPath > 0 then
+            walkPath, walkDirs = copy_speedwalk_globals()
+        end
+
+        for _i, roomID in ipairs(temporarilyLocked) do
+            lockRoom(roomID, false)
+        end
+        remove_placeholder_exits(addedExits)
+
+        return ok and walkPath ~= nil, walkPath, walkDirs
     end
 
+    -- Target is a POI room — no locking needed.
     local ok       = getPath(currentRoomID, targetRoomID)
     local walkPath = nil
     local walkDirs = nil
     if ok and #speedWalkPath > 0 then
-        walkPath = {}
-        walkDirs = {}
-        for i, v in ipairs(speedWalkPath) do walkPath[i] = v end
-        for i, v in ipairs(speedWalkDir) do walkDirs[i] = v end
+        walkPath, walkDirs = copy_speedwalk_globals()
     end
-
-    for _, roomID in ipairs(temporarilyLocked) do
-        lockRoom(roomID, false)
-    end
-
+    remove_placeholder_exits(addedExits)
     return ok and walkPath ~= nil, walkPath, walkDirs
+end
+
+-- After compute_autowalk_path is in scope we can define the reevaluation logic.
+-- This is called from continue_walk when map.autowalk_dirty is true.
+maybe_reevaluate_autowalk = function()
+    map.autowalk_dirty = false -- clear immediately to avoid re-entrancy
+    if map.configs.autowalk_reevaluate == false then return end
+    if type(map.autowalk_target) ~= "number" or map.autowalk_target < 1 then return end
+    local currentRoomID = _.get_current_area_context()
+    if not currentRoomID or currentRoomID < 1 then return end
+    if currentRoomID == map.autowalk_target then return end
+
+    local pathFound, newWalkPath, newWalkDirs = compute_autowalk_path(currentRoomID, map.autowalk_target)
+    if not pathFound or type(newWalkDirs) ~= "table" or #newWalkDirs == 0 then
+        cecho("<red>Autowalk: target no longer reachable, stopping.\n")
+        map.stop_auto_walk()
+        return
+    end
+    if #newWalkDirs < #map.walkDirs then
+        cecho("<cyan>Autowalk: shorter path found (" .. #map.walkDirs .. " → " .. #newWalkDirs .. " steps).\n")
+        map.walkDirs = newWalkDirs
+    end
 end
 
 function map.travel_to_selected_room(event, action, ...)
@@ -788,6 +968,7 @@ function map.travel_to_selected_room(event, action, ...)
     if action == "alui-mapper-autowalk" then resolvedAction = "autowalk" end
 
     if resolvedAction == "autowalk" then
+        map.autowalk_target = targetRoomID
         map.speedwalk(targetRoomID, walkPath, walkDirs, { wait_for_room = true, delay = 0 })
     else
         echo("Unknown mapper travel action '" .. tostring(action) .. "'.\n")

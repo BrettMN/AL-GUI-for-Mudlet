@@ -15,6 +15,7 @@ map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
 map.configs.debug_mapper = map.configs.debug_mapper == true
+map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
 
 -- Private cross-file table; helpers and functions are stored here so they are
 -- accessible across Lua chunks without polluting the global namespace.
