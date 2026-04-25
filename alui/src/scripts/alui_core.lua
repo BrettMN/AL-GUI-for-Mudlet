@@ -114,3 +114,48 @@ end
 -- Register the event handler in ALUI namespace
 ALUI.GUI.Events.resize = registerNamedEventHandler(getProfileName(), 'ALUI.events.resize', "sysWindowResizeEvent",
     resizeHandler, false)
+
+-- --------------------------------------------------------------------------
+-- ALUI.disable() — tear down the entire UI and restore the full main window.
+-- Run from the Mudlet input line with:  `lua ALUI.disable()
+-- --------------------------------------------------------------------------
+function ALUI.disable()
+    -- 1. Stop the resize event handler so it doesn't try to rebuild the UI.
+    if ALUI.GUI.Events.resize then
+        stopNamedEventHandler(getProfileName(), 'ALUI.events.resize')
+        ALUI.GUI.Events.resize = nil
+    end
+
+    -- 2. Kill cleanup timers before RM wipes everything.
+    cleanupTimers()
+
+    -- 3. Use ResourceManager to destroy all tracked UI elements, timers,
+    --    event handlers, and CSS objects.
+    if ALUI.ResourceManager then
+        ALUI.ResourceManager.cleanupAll()
+    end
+
+    -- 4. Destroy any top-level Geyser panels that may not have been
+    --    registered with RM (belt-and-suspenders).
+    local GUI = ALUI.GUI
+    local rootPanels = { "Left", "Right", "Top" }
+    for _i, key in ipairs(rootPanels) do
+        local el = GUI[key]
+        if el and type(el.hide) == "function" then
+            pcall(function() el:hide() end)
+        end
+        if el and type(el.deleteSelf) == "function" then
+            pcall(function() el:deleteSelf() end)
+        end
+        GUI[key] = nil
+    end
+
+    -- 5. Reset Mudlet borders to 0 so the main window occupies the full area.
+    setBorderLeft(0)
+    setBorderRight(0)
+    setBorderTop(0)
+    setBorderBottom(0)
+
+    cecho("<green>ALUI disabled. Mudlet main window restored.\n")
+    cecho("<dim_grey>To re-enable, reload the package or reconnect.\n")
+end
