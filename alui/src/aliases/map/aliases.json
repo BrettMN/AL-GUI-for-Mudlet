@@ -66,5 +66,9 @@
     {
         "name": "map remove poi",
         "regex": "^map\\s+remove\\s+poi$"
+    },
+    {
+        "name": "map link-room",
+        "regex": "^map\\s+link-room$"
     }
 ]
