@@ -296,6 +296,101 @@ function map.test_normalize_determinism(numRuns)
 end
 
 -- --------------------------------------------------------------------------
+-- Placeholder cleanup
+-- --------------------------------------------------------------------------
+
+-- Deletes placeholder rooms in the current (or named) area that are either:
+--   (a) at the same map position as a real non-placeholder room, OR
+--   (b) orphaned — no non-placeholder room in the area has an exit leading to them.
+function map.clean_placeholders(areaNameArg)
+    if type(deleteRoom) ~= "function" then
+        echo("Error: deleteRoom is not available in this Mudlet version.\n")
+        return
+    end
+    if type(_.is_placeholder) ~= "function" then
+        echo("Error: _.is_placeholder is not loaded yet.\n")
+        return
+    end
+
+    local areaID
+    if type(areaNameArg) == "string" and areaNameArg ~= "" then
+        local areas = getAreaTable()
+        if type(areas) == "table" then
+            for name, id in pairs(areas) do
+                if string.lower(name) == string.lower(areaNameArg) then
+                    areaID = id; break
+                end
+            end
+        end
+        if not areaID then
+            echo("Cannot find area: " .. areaNameArg .. "\n")
+            return
+        end
+    else
+        local _, currentAreaID = _.get_current_area_context()
+        areaID = currentAreaID
+        if not areaID then
+            echo("Cannot determine current area. Move to a room first or specify an area name.\n")
+            return
+        end
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        echo("Cannot get rooms for area.\n")
+        return
+    end
+
+    -- Build reverse-exit index: for each room, record which rooms point to it.
+    -- We only care about non-placeholder sources.
+    local reverseExits = {} -- target_roomID → true if any real room exits to it
+    for _k, src in ipairs(rooms) do
+        if not _.is_placeholder(src) then
+            local srcExits = getRoomExits(src)
+            if type(srcExits) == "table" then
+                for _k2, target in pairs(srcExits) do
+                    reverseExits[target] = true
+                end
+            end
+        end
+    end
+
+    local deletedCount = 0
+    for _k, rid in ipairs(rooms) do
+        if _.is_placeholder(rid) then
+            local shouldDelete = false
+            -- (a) positional collision with a real room
+            local x, y, z = getRoomCoordinates(rid)
+            if x ~= nil then
+                local nearby = getRoomsByPosition(areaID, x, y, z)
+                if type(nearby) == "table" then
+                    for _k2, oid in pairs(nearby) do
+                        if oid ~= rid and not _.is_placeholder(oid) then
+                            shouldDelete = true
+                            break
+                        end
+                    end
+                end
+            end
+            -- (b) orphaned: no non-placeholder room in the area exits to this one
+            if not shouldDelete and not reverseExits[rid] then
+                shouldDelete = true
+            end
+            if shouldDelete then
+                deleteRoom(rid)
+                deletedCount = deletedCount + 1
+            end
+        end
+    end
+
+    if deletedCount > 0 then updateMap() end
+    local areaDisplayName = _.get_area_name_by_id(areaID) or tostring(areaID)
+    echo("Deleted " .. deletedCount .. " placeholder room"
+        .. (deletedCount == 1 and "" or "s")
+        .. " in area '" .. areaDisplayName .. "'.\n")
+end
+
+-- --------------------------------------------------------------------------
 -- Help
 -- --------------------------------------------------------------------------
 
@@ -344,6 +439,9 @@ function map.show_help()
     echo("  map set poi\n")
     echo("    Set the current room's symbol to '#' and apply the Inside background color.\n")
     echo("    Useful for marking points of interest (shops, quest givers, etc.) on the map.\n\n")
+    echo("  map clean-placeholders [area name]\n")
+    echo("    Delete placeholder rooms whose map position overlaps a real room in the current (or named) area.\n")
+    echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")
     echo("  map remove poi\n")
     echo("    Remove the POI marker from the current room and restore its original terrain color.\n\n")
 end

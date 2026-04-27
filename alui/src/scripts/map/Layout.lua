@@ -663,6 +663,55 @@ function map.recalculate_room_layout()
         end
     end
 
+    -- Post-BFS placeholder cleanup:
+    --   (a) placeholders whose position overlaps a real room.
+    --   (b) orphaned placeholders — every room whose exit points here is also
+    --       a placeholder (the stub was created by a duplicate room that will
+    --       never be properly visited).
+    local deletedPlaceholderCount = 0
+    if type(deleteRoom) == "function" and type(_.is_placeholder) == "function" then
+        -- Build a reverse-exit index over all BFS-visited rooms so we can
+        -- cheaply check whether any real room leads to a given placeholder.
+        local reverseVisited = {} -- target_roomID → true if any real visited room exits to it
+        for src in pairs(visited) do
+            if not _.is_placeholder(src) then
+                local srcExits = getRoomExits(src)
+                if type(srcExits) == "table" then
+                    for _k, target in pairs(srcExits) do
+                        reverseVisited[target] = true
+                    end
+                end
+            end
+        end
+
+        for rid in pairs(visited) do
+            if _.is_placeholder(rid) then
+                local shouldDelete = false
+                -- (a) positional collision with a real room
+                local rpos = roomPositions[rid]
+                if rpos then
+                    local nearby = getRoomsByPosition(areaID, rpos.x, rpos.y, rpos.z)
+                    if type(nearby) == "table" then
+                        for _k, oid in pairs(nearby) do
+                            if oid ~= rid and not _.is_placeholder(oid) then
+                                shouldDelete = true
+                                break
+                            end
+                        end
+                    end
+                end
+                -- (b) orphaned: no real visited room has an exit leading here
+                if not shouldDelete and not reverseVisited[rid] then
+                    shouldDelete = true
+                end
+                if shouldDelete then
+                    deleteRoom(rid)
+                    deletedPlaceholderCount = deletedPlaceholderCount + 1
+                end
+            end
+        end
+    end
+
     updateMap()
     local msg = "Topology recalculation repositioned " .. movedCount ..
         " room" .. (movedCount == 1 and "" or "s")
@@ -675,6 +724,10 @@ function map.recalculate_room_layout()
     end
     if separateCount > 0 then
         details[#details + 1] = separateCount .. " extended for visual separation"
+    end
+    if deletedPlaceholderCount > 0 then
+        details[#details + 1] = deletedPlaceholderCount
+            .. " placeholder" .. (deletedPlaceholderCount == 1 and "" or "s") .. " removed"
     end
     if #details > 0 then
         msg = msg .. " (" .. table.concat(details, ", ") .. ")"

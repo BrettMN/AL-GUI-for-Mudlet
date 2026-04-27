@@ -70,5 +70,9 @@
     {
         "name": "map link-room",
         "regex": "^map\\s+link-room$"
+    },
+    {
+        "name": "map clean-placeholders",
+        "regex": "^map\\s+clean-placeholders(?:\\s+(.+))?$"
     }
 ]

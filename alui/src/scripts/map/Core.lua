@@ -264,6 +264,23 @@ local function handle_move(isLastInBatch)
                 end
             end
             if not adopted then
+                -- Phase B: try exit-set adoption for un-hashed real rooms (rooms
+                -- that already exist in Mudlet's map but have no hash binding yet,
+                -- e.g. an existing map imported without GMCP data).
+                local adoptAreaID = resolve_area_id_for_room_info(info)
+                if adoptAreaID and type(_.find_real_room_to_adopt) == "function" then
+                    local adoptedID = _.find_real_room_to_adopt(adoptAreaID)
+                    if adoptedID then
+                        setRoomIDbyHash(adoptedID, info.vnum)
+                        _.mark_autowalk_dirty()
+                        rnum    = adoptedID
+                        adopted = true
+                        _.debug_echo("Adopted real room " .. adoptedID
+                            .. " (" .. tostring(info.name) .. ") for vnum " .. info.vnum .. "\n")
+                    end
+                end
+            end
+            if not adopted then
                 make_room()
                 rnum = getRoomIDbyHash(info.vnum)
                 if type(rnum) ~= "number" then rnum = -1 end

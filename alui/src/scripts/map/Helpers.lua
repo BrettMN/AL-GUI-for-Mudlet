@@ -128,6 +128,8 @@ local function is_placeholder(roomID)
     for _ in pairs(exits) do return false end
     return true
 end
+-- Expose so Layout.lua and Commands.lua can reuse the same definition.
+_.is_placeholder = is_placeholder
 
 function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
     if type(prevRoomID) ~= "number" or prevRoomID < 1 then return nil end
@@ -167,6 +169,135 @@ function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
 end
 
 _.find_placeholder_for_arrival = _.find_placeholder_for_arrival
+
+-- --------------------------------------------------------------------------
+-- Exit-set scoring and real-room adoption
+-- --------------------------------------------------------------------------
+
+-- Returns the exit shift vector from info's perspective back toward prev_info,
+-- trying all available fallbacks. Always returns a table of 3 numbers.
+function _.discover_exit_shift(info, prev_info)
+    local shift = { 0, 0, 0 }
+    if type(info.exits) == "table" then
+        for k, v in pairs(info.exits) do
+            if v == prev_info.vnum and _.move_vectors[k] then
+                return _.move_vectors[k]
+            end
+        end
+    end
+    if type(prev_info.exits) == "table" then
+        for k, v in pairs(prev_info.exits) do
+            if v == info.vnum and _.move_vectors[k] then
+                local rev = _.reverse_move_vectors[k]
+                if rev then return _.move_vectors[rev] end
+            end
+        end
+    end
+    if type(prev_info.exits) == "table" then
+        for k, v in pairs(prev_info.exits) do
+            if v == info.vnum and not _.move_vectors[k] then
+                local g = _.guess_vertical_shift(k)
+                if g then return { -g[1], -g[2], -g[3] } end
+            end
+        end
+    end
+    if type(info.exits) == "table" then
+        for k, v in pairs(info.exits) do
+            if v == prev_info.vnum and not _.move_vectors[k] then
+                local g = _.guess_vertical_shift(k)
+                if g then return g end
+            end
+        end
+    end
+    return shift
+end
+
+-- Counts how many GMCP exit directions in `info` resolve to the same Mudlet
+-- room IDs as `rid`'s own exit table.  A higher score = better match.
+local function score_exit_match(rid, info)
+    if type(info.exits) ~= "table" then return 0 end
+    local mapExits = getRoomExits(rid)
+    if type(mapExits) ~= "table" then return 0 end
+    local score = 0
+    for dir, targetVnum in pairs(info.exits) do
+        if type(targetVnum) == "string" then
+            local targetID = getRoomIDbyHash(targetVnum)
+            if type(targetID) == "number" and targetID > 0 then
+                local nd = _.normalize_exit_direction(dir)
+                if nd then
+                    local mapTarget = mapExits[nd]
+                    if type(mapTarget) == "string" then mapTarget = tonumber(mapTarget) end
+                    if mapTarget == targetID then score = score + 1 end
+                end
+            end
+        end
+    end
+    return score
+end
+
+-- Attempts to find an existing un-hashed real room in areaID that matches
+-- the current GMCP room_info by comparing exit sets.
+--   Phase 1: positional — compute expected coords from prev room + exit shift;
+--            check rooms at that position with score >= 1.
+--   Phase 2: area-wide — scan all un-hashed rooms with the same name and pick
+--            the unique best scorer with score >= 2 (skip on tie).
+-- Returns a room ID or nil.
+function _.find_real_room_to_adopt(areaID)
+    local info     = map.room_info
+    local prevInfo = map.prev_info
+    if type(info.name) ~= "string" or info.name == "" then return nil end
+
+    local function is_adoptable(rid)
+        local h = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or nil
+        return (h == nil or h == "") and not is_placeholder(rid)
+    end
+
+    -- Phase 1: positional lookup via prev room + exit direction.
+    if type(prevInfo) == "table" and type(prevInfo.vnum) == "string" then
+        local prevID = getRoomIDbyHash(prevInfo.vnum)
+        if type(prevID) == "number" and prevID > 0 then
+            local px, py, pz = getRoomCoordinates(prevID)
+            if px ~= nil then
+                local shift = _.discover_exit_shift(info, prevInfo)
+                local ex = px - shift[1]
+                local ey = py - shift[2]
+                local ez = pz - shift[3]
+                local candidates = getRoomsByPosition(areaID, ex, ey, ez)
+                local checkList = {}
+                if type(candidates) == "number" and candidates > 0 then
+                    checkList = { candidates }
+                elseif type(candidates) == "table" then
+                    checkList = candidates
+                end
+                for _, rid in pairs(checkList) do
+                    if is_adoptable(rid) and score_exit_match(rid, info) >= 1 then
+                        return rid
+                    end
+                end
+            end
+        end
+    end
+
+    -- Phase 2: area-wide name + exit-set scan.
+    local nameLower = string.lower(info.name)
+    local rooms     = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then return nil end
+    local bestID, bestScore, tied = nil, 1, false
+    for _, rid in ipairs(rooms) do
+        if is_adoptable(rid) then
+            local rname = getRoomName(rid)
+            if type(rname) == "string" and string.lower(rname) == nameLower then
+                local s = score_exit_match(rid, info)
+                if s > bestScore then
+                    bestID, bestScore, tied = rid, s, false
+                elseif s == bestScore and bestID ~= nil then
+                    tied = true
+                end
+            end
+        end
+    end
+    return (not tied) and bestID or nil
+end
 
 -- Signal that the map has grown during an active autowalk so continue_walk
 -- can re-evaluate the route on the next arrival.
