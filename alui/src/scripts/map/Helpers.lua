@@ -596,7 +596,7 @@ function _.stretch_area_for_new_room(areaID, coords, shift, posCache)
     if table.is_empty(overlap) then return end
     local rooms = (posCache and posCache._rooms) or getAreaRooms(areaID)
     local rcoords
-    for _, id in ipairs(rooms) do
+    for i, id in ipairs(rooms) do
         if not _.is_room_immobile(id) then
             rcoords = { getRoomCoordinates(id) }
             local ox, oy, oz = rcoords[1], rcoords[2], rcoords[3]
