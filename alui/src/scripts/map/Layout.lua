@@ -55,8 +55,11 @@ function _.create_neighbors_for_current_room(roomID, posCache)
         posCache = _.build_pos_cache(areaID)
     end
 
-    local forcedZ      = _.get_forced_z_for_room(roomID)
-    local createdCount = 0
+    local forcedZ          = _.get_forced_z_for_room(roomID)
+    local createdCount     = 0
+    -- Track only the positions touched this event so the backstop dedup
+    -- doesn't have to walk the entire area posCache on every player step.
+    local touchedPositions = {}
 
     for dir, targetVnum in pairs(info.exits) do
         if type(targetVnum) ~= "string" then
@@ -260,6 +263,8 @@ function _.create_neighbors_for_current_room(roomID, posCache)
             do
                 local fx, fy, fz = getRoomCoordinates(targetID)
                 if fx ~= nil then
+                    -- Record this position so the backstop only scans touched spots.
+                    touchedPositions[_.pos_cache_key(fx, fy, fz)] = true
                     local hits = _.pos_cache_get(posCache, fx, fy, fz)
                     local liveIDs = {}
                     local function consider(rid)
@@ -365,21 +370,19 @@ function _.create_neighbors_for_current_room(roomID, posCache)
         end
     end
 
-    -- Final positional dedup backstop.  Walks the position cache (already
-    -- built for this area) and collapses any rooms sharing the same (x,y,z)
-    -- down to the lowest-ID survivor.  Runs after all exits have been
-    -- processed so it catches duplicates regardless of how they were created
-    -- (resurrected ghosts, candidate-search misses, leftover stacks from
-    -- previous sessions, etc.).
+    -- Final positional dedup backstop.  Only checks positions that were
+    -- actually touched this event (at most one per GMCP exit direction),
+    -- instead of scanning the entire area posCache.  This keeps the cost
+    -- O(exits) ≈ O(12) rather than O(all rooms in area) per player step.
     do
         local cachedMyExits = nil
         local function get_my_exits()
             if cachedMyExits == nil then cachedMyExits = getRoomExits(roomID) or false end
             return cachedMyExits or nil
         end
-        for key, list in pairs(posCache) do
-            if type(list) == "table" and #list > 1
-                and key ~= "_areaID" and key ~= "_rooms" then
+        for key in pairs(touchedPositions) do
+            local list = posCache[key]
+            if type(list) == "table" and #list > 1 then
                 -- Survivor preference: locked > player current room > lowest ID.
                 local playerID = safe_current_player_room_id()
                 table.sort(list, function(a, b)
@@ -645,10 +648,14 @@ function _.flatten_cardinal_connected_rooms(anchorID)
     local _cx, _cy, az = getRoomCoordinates(anchorID)
     if az == nil then return end
 
-    local queue   = { anchorID }
-    local qHead   = 1
-    local visited = { [anchorID] = true }
+    local queue       = { anchorID }
+    local qHead       = 1
+    local visited     = { [anchorID] = true }
+    local MAX_FLATTEN = 20000 -- safety cap; prevents freeze on very large connected areas
     while qHead <= #queue do
+        if qHead > MAX_FLATTEN then
+            break
+        end
         local current = queue[qHead]
         qHead         = qHead + 1
         local exits   = getRoomExits(current)
@@ -838,8 +845,14 @@ function map.recalculate_room_layout()
     local roomShifts    = {}
     -- Track BFS parent so the separation pass can shift entire subtrees.
     local roomParents   = {}
+    local MAX_BFS_ROOMS = 30000 -- safety cap; prevents indefinite freeze on huge areas
 
     while qHead <= #queue do
+        if qHead > MAX_BFS_ROOMS then
+            echo("[map recalculate] BFS capped at " .. MAX_BFS_ROOMS
+                .. " rooms — area may be too large for a single pass.\n")
+            break
+        end
         local entry = queue[qHead]
         qHead = qHead + 1
         local exits = getRoomExits(entry.id)
@@ -960,9 +973,17 @@ function map.recalculate_room_layout()
         return false
     end
 
-    local shifted = {} -- rooms already moved as part of a subtree
+    local shifted = {}           -- rooms already moved as part of a subtree
+    local MAX_SEPARATIONS = 5000 -- prevent O(N²) worst case on large maps
+    local separationChecks = 0
 
     for roomID, pos in pairs(roomPositions) do
+        separationChecks = separationChecks + 1
+        if separationChecks > MAX_SEPARATIONS then
+            echo("[map recalculate] Separation pass capped at "
+                .. MAX_SEPARATIONS .. " rooms.\n")
+            break
+        end
         local shift = roomShifts[roomID]
         -- Only process rooms that arrived via a pure cardinal horizontal exit
         if shift and not shifted[roomID]
@@ -1064,17 +1085,15 @@ function map.recalculate_room_layout()
         for rid in pairs(visited) do
             if _.is_placeholder(rid) then
                 local shouldDelete = false
-                -- (a) positional collision with a real room
+                -- (a) positional collision with a real room.
+                -- Use the occupied table built by the BFS instead of calling
+                -- the expensive getRoomsByPosition Mudlet API per placeholder.
                 local rpos = roomPositions[rid]
                 if rpos then
-                    local nearby = getRoomsByPosition(areaID, rpos.x, rpos.y, rpos.z)
-                    if type(nearby) == "table" then
-                        for _k, oid in pairs(nearby) do
-                            if oid ~= rid and not _.is_placeholder(oid) then
-                                shouldDelete = true
-                                break
-                            end
-                        end
+                    local pkey     = pos_key(rpos.x, rpos.y, rpos.z)
+                    local occupant = occupied[pkey]
+                    if occupant and occupant ~= rid and not _.is_placeholder(occupant) then
+                        shouldDelete = true
                     end
                 end
                 -- (b) orphaned: no real visited room has an exit leading here

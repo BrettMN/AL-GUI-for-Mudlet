@@ -869,7 +869,13 @@ end
 _.refresh_selected_room_cache = refresh_selected_room_cache
 _.get_selected_map_room       = get_selected_map_room
 
-if not map.selection_cache_timer_id then
+-- Kill any existing timer before (re)creating it so script reloads don't
+-- stack orphaned repeating timers on top of each other.
+if map.selection_cache_timer_id then
+    pcall(killTimer, map.selection_cache_timer_id)
+    map.selection_cache_timer_id = nil
+end
+do
     local ok, timerId = pcall(tempTimer, 0.25, function()
         refresh_selected_room_cache()
     end, true)

@@ -339,13 +339,19 @@ local function handle_move(isLastInBatch)
                 currentAreaID = correctAreaID
             end
 
-            -- Build the per-event position cache once and share it with the
-            -- layout passes below.  Avoids O(area) getRoomsByPosition /
-            -- getAreaRooms walks per exit on every Room.Info event.
+            -- Reuse the area position cache across GMCP events to avoid
+            -- rebuilding it (getAreaRooms + N getRoomCoordinates) on every
+            -- Room.Info.  The cache is mutated in-place by pos_cache_add/drop
+            -- so it stays consistent.  Invalidate when the area changes or on
+            -- reconnect (sysConnectionEvent sets map._pos_cache = nil).
             local posCache = nil
             if type(currentAreaID) == "number" and currentAreaID > 0
                 and type(_.build_pos_cache) == "function" then
-                posCache = _.build_pos_cache(currentAreaID)
+                if type(map._pos_cache) ~= "table"
+                    or map._pos_cache._areaID ~= currentAreaID then
+                    map._pos_cache = _.build_pos_cache(currentAreaID)
+                end
+                posCache = map._pos_cache
             end
 
             -- Update the cache with the confirmed correct area ID.
@@ -527,6 +533,7 @@ function map.eventHandler(event, ...)
             shift_room(dir)
         end
     elseif event == "sysConnectionEvent" then
+        map._pos_cache = nil -- force posCache rebuild for the new session's area
         config()
         if _.register_mapper_context_menu then
             _.register_mapper_context_menu()
