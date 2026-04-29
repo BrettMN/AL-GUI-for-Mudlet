@@ -30,6 +30,35 @@ end
 -- POI commands
 -- --------------------------------------------------------------------------
 
+-- --------------------------------------------------------------------------
+-- Lock / unlock the current room.  Locked rooms are pinned in place: the
+-- layout passes (stretch, reconcile, recalculate, flatten, dedup) all skip
+-- them, so manually-positioned rooms survive subsequent room updates.
+-- --------------------------------------------------------------------------
+function map.lock_current_room()
+    local id = _.current_player_room_id and _.current_player_room_id() or nil
+    if not id then
+        echo("map lock: current room is unknown.\n")
+        return
+    end
+    _.set_room_locked(id, true)
+    local x, y, z = getRoomCoordinates(id)
+    echo(string.format("Locked room %d at (%s,%s,%s).\n",
+        id, tostring(x), tostring(y), tostring(z)))
+    updateMap()
+end
+
+function map.unlock_current_room()
+    local id = _.current_player_room_id and _.current_player_room_id() or nil
+    if not id then
+        echo("map unlock: current room is unknown.\n")
+        return
+    end
+    _.set_room_locked(id, false)
+    echo("Unlocked room " .. id .. ".\n")
+    updateMap()
+end
+
 function map.set_poi(roomID)
     roomID = roomID or _.get_current_area_context()
     if not roomID or roomID < 1 then

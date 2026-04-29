@@ -32,6 +32,14 @@
         "regex": "^map\\s+shift\\s+(\\w+)$"
     },
     {
+        "name": "map lock",
+        "regex": "^map\\s+lock$"
+    },
+    {
+        "name": "map unlock",
+        "regex": "^map\\s+unlock$"
+    },
+    {
         "name": "map make-room",
         "regex": "^map\\s+make-room$"
     },

@@ -170,6 +170,24 @@ local function make_room()
     setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
+    -- Loud warning when we end up creating a brand-new room near the
+    -- area origin without a directional shift — this almost always means
+    -- the prior locked/anchor room lost its hash binding somewhere and we
+    -- are about to "teleport" the player to (0,0,0).  The user explicitly
+    -- asked us to surface this case so it is no longer silent.
+    if math.abs(coords[1]) <= 2 and math.abs(coords[2]) <= 2 and math.abs(coords[3]) <= 2 then
+        local msg = string.format(
+            "make_room: created room %d for vnum %s at (%d,%d,%d). "
+            .. "If this is unexpected, an earlier code path may have cleared "
+            .. "the previous room's hash binding.\n",
+            thisRoom, tostring(info.vnum), coords[1], coords[2], coords[3])
+        if type(cecho) == "function" then
+            cecho("<yellow>" .. msg .. "<reset>")
+        else
+            echo(msg)
+        end
+        if type(_.debug_echo) == "function" then _.debug_echo(msg) end
+    end
     _.apply_current_room_environment(thisRoom, info.terrain)
     if getRoomChar(thisRoom) == "#" then
         _.apply_room_environment(thisRoom, "Inside")
@@ -204,14 +222,28 @@ local function shift_room(dir)
     end
 
     if type(map.room_info.vnum) == "string" then
-        local ID         = getRoomIDbyHash(map.room_info.vnum)
-        local x, y, z    = getRoomCoordinates(ID)
-        local x1, y1, z1 = unpack(_.move_vectors[dir])
+        local ID = getRoomIDbyHash(map.room_info.vnum)
+        if type(ID) ~= "number" or ID < 1 then return end
+        local vec = _.move_vectors[dir]
+        if type(vec) ~= "table" then
+            echo("map shift: unknown direction '" .. tostring(dir) .. "'.\n")
+            return
+        end
+        local x, y, z = getRoomCoordinates(ID)
+        if x == nil then return end
+        local x1, y1, z1 = unpack(vec)
         x                = x + x1
         y                = y + y1
         z                = z + z1
         setRoomCoordinates(ID, x, y, z)
+        -- Pin the room so subsequent layout passes (stretch, reconcile,
+        -- recalculate, dedup) cannot drag it back to its old position.
+        _.set_room_locked(ID, true)
+        _.debug_echo("Shifted room " .. ID .. " to ("
+            .. x .. "," .. y .. "," .. z .. ") and locked it.\n")
         updateMap()
+        -- Recenter so the player marker visibly follows the shifted room.
+        if type(centerview) == "function" then centerview(ID) end
     end
 end
 
@@ -232,6 +264,15 @@ local function handle_move(isLastInBatch)
         local rnum = getRoomIDbyHash(info.vnum)
         if type(rnum) ~= "number" then rnum = -1 end
         if rnum < 1 then
+            local warn = "handle_move: vnum " .. tostring(info.vnum)
+                .. " has no room (getRoomIDbyHash returned " .. tostring(rnum)
+                .. "). Will adopt or create — this can place the room near 0,0,0.\n"
+            if type(cecho) == "function" then
+                cecho("<yellow>" .. warn .. "<reset>")
+            else
+                echo(warn)
+            end
+            _.debug_echo(warn)
             -- Before creating a brand-new room, check if there is an existing
             -- placeholder at the expected adjacent position that we can adopt.
             -- This happens during autowalk when a placeholder's stored hash
@@ -298,6 +339,15 @@ local function handle_move(isLastInBatch)
                 currentAreaID = correctAreaID
             end
 
+            -- Build the per-event position cache once and share it with the
+            -- layout passes below.  Avoids O(area) getRoomsByPosition /
+            -- getAreaRooms walks per exit on every Room.Info event.
+            local posCache = nil
+            if type(currentAreaID) == "number" and currentAreaID > 0
+                and type(_.build_pos_cache) == "function" then
+                posCache = _.build_pos_cache(currentAreaID)
+            end
+
             -- Update the cache with the confirmed correct area ID.
             if type(info.area) == "string" and info.area ~= "" then
                 if type(currentAreaID) == "number" and currentAreaID > 0 then
@@ -307,14 +357,17 @@ local function handle_move(isLastInBatch)
             end
 
             if type(info.name) == "string" and info.name ~= "" then
-                setRoomName(rnum, info.name)
+                if getRoomName(rnum) ~= info.name then
+                    setRoomName(rnum, info.name)
+                end
             end
 
             -- Correct z-level for elevated/surface transitions on rooms that
             -- were pre-created as placeholders at the wrong z.
             local currEL = _.is_elevated_room_name(info.name)
             local prevEL = _.is_elevated_room_name(map.prev_info.name or "")
-            if currEL ~= prevEL and type(map.prev_info.vnum) == "string" then
+            if currEL ~= prevEL and type(map.prev_info.vnum) == "string"
+                and not _.is_room_locked(rnum) then
                 local prevID = getRoomIDbyHash(map.prev_info.vnum)
                 if prevID > 0 then
                     local px, py, pz = getRoomCoordinates(prevID)
@@ -335,14 +388,21 @@ local function handle_move(isLastInBatch)
             if _.is_elevated_room_name(info.name) then
                 _.clear_room_user_data(rnum, "terrain")
             elseif type(info.terrain) == "string" and info.terrain ~= "" then
-                setRoomUserData(rnum, "terrain", info.terrain)
+                if getRoomUserData(rnum, "terrain") ~= info.terrain then
+                    setRoomUserData(rnum, "terrain", info.terrain)
+                end
             else
                 _.clear_room_user_data(rnum, "terrain")
             end
 
             if currentAreaID and currentAreaID > 0 then
                 if type(setGridMode) == "function" then
-                    setGridMode(currentAreaID, _.current_room_uses_grid_mode())
+                    local desiredGrid = _.current_room_uses_grid_mode() and true or false
+                    map._last_grid_mode_by_area = map._last_grid_mode_by_area or {}
+                    if map._last_grid_mode_by_area[currentAreaID] ~= desiredGrid then
+                        setGridMode(currentAreaID, desiredGrid)
+                        map._last_grid_mode_by_area[currentAreaID] = desiredGrid
+                    end
                 end
             end
 
@@ -365,12 +425,12 @@ local function handle_move(isLastInBatch)
             end
 
             local newRooms = type(_.create_neighbors_for_current_room) == "function"
-                and _.create_neighbors_for_current_room(rnum) or 0
+                and _.create_neighbors_for_current_room(rnum, posCache) or 0
             if isLastInBatch then
                 if map.configs.auto_reconcile and newRooms and newRooms > 0 then
                     -- Limit BFS depth so the reconcile stays local on large maps.
                     -- The full-area reconcile is available via 'map normalize'.
-                    _.reconcile_connected_rooms(rnum, nil, nil, 5)
+                    _.reconcile_connected_rooms(rnum, nil, nil, 5, nil, posCache)
                 end
                 updateMap()
                 centerview(rnum)
@@ -385,7 +445,10 @@ end
 
 local function process_room_queue()
     queue_timer_pending = false
-    while #room_event_queue > 0 do
+    -- Drain ONE event per timer tick.  Yielding back to Mudlet's event loop
+    -- between events keeps the UI responsive (typing, scrolling, mouse) even
+    -- when a batch of rapid GMCP updates would otherwise back up.
+    if #room_event_queue > 0 then
         local snapshot = table.remove(room_event_queue, 1)
         local ok, err  = pcall(function()
             map.prev_info = map.room_info
@@ -403,8 +466,13 @@ local function process_room_queue()
             if type(debugc) == "function" then debugc(msg) end
         end
     end
-    queue_processing  = false
-    queue_drain_timer = nil
+    if #room_event_queue > 0 then
+        queue_timer_pending = true
+        queue_drain_timer   = tempTimer(0, function() process_room_queue() end)
+    else
+        queue_processing  = false
+        queue_drain_timer = nil
+    end
 end
 
 -- --------------------------------------------------------------------------

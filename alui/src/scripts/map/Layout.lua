@@ -8,11 +8,37 @@ map     = map or {}
 map._   = map._ or {}
 local _ = map._
 
+-- Safe wrappers for helpers that live in Helpers.lua.  These guard against
+-- the (rare) case where Layout.lua executes a queued GMCP event before the
+-- newer Helpers chunk has been loaded into the same namespace (e.g. after a
+-- partial package reload), so we never bomb out with "attempt to call a nil
+-- value" on _.is_room_locked / _.current_player_room_id.
+local function safe_is_room_locked(rid)
+    local fn = _.is_room_locked
+    if type(fn) == "function" then
+        return fn(rid)
+    end
+    if type(rid) ~= "number" or rid < 1 then return false end
+    return getRoomUserData(rid, "locked") == "1"
+end
+
+local function safe_current_player_room_id()
+    local fn = _.current_player_room_id
+    if type(fn) == "function" then
+        return fn()
+    end
+    if type(map.room_info) == "table" and type(map.room_info.vnum) == "string" then
+        local id = getRoomIDbyHash(map.room_info.vnum)
+        if type(id) == "number" and id > 0 then return id end
+    end
+    return nil
+end
+
 -- --------------------------------------------------------------------------
 -- Placement: neighbours
 -- --------------------------------------------------------------------------
 
-function _.create_neighbors_for_current_room(roomID)
+function _.create_neighbors_for_current_room(roomID, posCache)
     local info = map.room_info
     if type(info.exits) ~= "table" then return end
     if type(roomID) ~= "number" or roomID < 1 then return end
@@ -22,6 +48,12 @@ function _.create_neighbors_for_current_room(roomID)
 
     local cx, cy, cz = getRoomCoordinates(roomID)
     if cx == nil then return end
+
+    -- Build the position cache here if the caller didn't supply one.  Sharing
+    -- it with handle_move/reconcile avoids repeated O(area) walks per event.
+    if posCache == nil or posCache._areaID ~= areaID then
+        posCache = _.build_pos_cache(areaID)
+    end
 
     local forcedZ      = _.get_forced_z_for_room(roomID)
     local createdCount = 0
@@ -34,6 +66,146 @@ function _.create_neighbors_for_current_room(roomID)
 
             local targetID = getRoomIDbyHash(targetVnum)
             local created  = false
+
+            -- Guard against stale hash bindings that survive deleteRoom:
+            -- Mudlet retains the hash→ID entry even after the room is deleted,
+            -- so getRoomIDbyHash can return a ghost ID whose area is invalid.
+            -- Treat such IDs as missing so the candidate-search runs.
+            if type(targetID) == "number" and targetID > 0 then
+                local existingArea = getRoomArea(targetID)
+                if not existingArea or existingArea < 1 then
+                    targetID = -1
+                end
+            end
+
+            -- Detect "duplicate physical room": the hash points at a
+            -- placeholder but a real (non-placeholder) room already sits at
+            -- the expected adjacent position.  This happens when a previous
+            -- visit adopted/rebound the real room under a different vnum and
+            -- GMCP later serves the original placeholder vnum again.  Merge
+            -- the placeholder into the real room so we don't keep stacking
+            -- duplicates on every refresh.
+            if type(targetID) == "number" and targetID > 0
+                and shift
+                and type(_.is_placeholder) == "function"
+                and _.is_placeholder(targetID) then
+                local tx = cx + shift[1]
+                local ty = cy + shift[2]
+                local tz = cz + shift[3]
+                if forcedZ and shift[3] == 0 then tz = forcedZ end
+                local near = _.pos_cache_get(posCache, tx, ty, tz)
+                local realAtPos = nil
+                local function is_live_real(rid)
+                    if type(rid) ~= "number" or rid < 1 then return false end
+                    if rid == targetID then return false end
+                    local a = getRoomArea(rid)
+                    if type(a) ~= "number" or a < 1 then return false end
+                    -- Never absorb a locked room (manually pinned by the user)
+                    -- as a "merge target" — its identity must be preserved.
+                    if safe_is_room_locked(rid) then return false end
+                    -- Never absorb a room that already has its own hash
+                    -- binding; rebinding its hash to a neighbor's vnum would
+                    -- clobber its identity and detach the original vnum.
+                    if type(getRoomHashByID) == "function" then
+                        local h = getRoomHashByID(rid)
+                        if type(h) == "string" and h ~= "" then return false end
+                    end
+                    return not _.is_placeholder(rid)
+                end
+                if type(near) == "table" then
+                    for _, rid in ipairs(near) do
+                        if is_live_real(rid) then
+                            realAtPos = rid
+                            break
+                        end
+                    end
+                end
+                if realAtPos then
+                    local dx, dy, dz = getRoomCoordinates(targetID)
+                    pcall(setRoomIDbyHash, targetID, "")
+                    if type(deleteRoom) == "function" then
+                        pcall(deleteRoom, targetID)
+                        _.pos_cache_drop(posCache, dx, dy, dz, targetID)
+                    end
+                    setRoomIDbyHash(realAtPos, targetVnum)
+                    _.mark_autowalk_dirty()
+                    if type(_.debug_echo) == "function" then
+                        _.debug_echo("Merged placeholder " .. targetID
+                            .. " into real room " .. realAtPos
+                            .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
+                    end
+                    targetID = realAtPos
+                end
+            end
+
+            if targetID < 1 then
+                -- Before creating a new placeholder, look for an existing room
+                -- that already covers this exit so we never stack two rooms at
+                -- the same map position.  Two sources are tried in order:
+                --   A) the room Mudlet already has wired in this direction
+                --      (set by a previous visit or map normalize)
+                --   B) whichever room occupies the expected adjacent position
+                -- If the candidate has NO hash we adopt it fully (bind it to
+                -- the incoming GMCP vnum).  If it already has its own hash we
+                -- leave that binding alone and simply reuse the room as the
+                -- exit target — this prevents stacking without corrupting the
+                -- existing identity of a separately-mapped room.
+                local candidateID = nil
+
+                local function is_live(rid)
+                    if type(rid) ~= "number" or rid < 1 then return false end
+                    local a = getRoomArea(rid)
+                    return type(a) == "number" and a > 0
+                end
+
+                -- Source A: wired exit
+                if type(_.get_room_exit_target) == "function" then
+                    local w = _.get_room_exit_target(roomID, dir)
+                    if is_live(w) then
+                        candidateID = w
+                    end
+                end
+
+                -- Source B: positional occupant at the expected coords.
+                -- Mudlet's deleteRoom leaves stale position bindings behind,
+                -- so we must filter out ghost IDs whose area is no longer
+                -- valid — otherwise we "reuse" a deleted room and the
+                -- placement block below resurrects it on every refresh.
+                if not candidateID and shift then
+                    local tx = cx + shift[1]
+                    local ty = cy + shift[2]
+                    local tz = cz + shift[3]
+                    if forcedZ and shift[3] == 0 then tz = forcedZ end
+                    local near = _.pos_cache_get(posCache, tx, ty, tz)
+                    if type(near) == "table" then
+                        for _, rid in ipairs(near) do
+                            if is_live(rid) then
+                                candidateID = rid
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if type(candidateID) == "number" and candidateID > 0 then
+                    local cHash = type(getRoomHashByID) == "function"
+                        and getRoomHashByID(candidateID) or nil
+                    if cHash == nil or cHash == "" then
+                        -- Hashless room: adopt fully — bind the GMCP vnum to it.
+                        setRoomIDbyHash(candidateID, targetVnum)
+                        _.mark_autowalk_dirty()
+                        _.debug_echo("Adopted hashless room " .. candidateID
+                            .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
+                    else
+                        -- Room already has its own identity; just reuse it to
+                        -- avoid stacking.  Don't touch its hash.
+                        _.debug_echo("Reusing " .. candidateID
+                            .. " (existing hash) to avoid stacking for "
+                            .. targetVnum .. " (dir " .. dir .. ")\n")
+                    end
+                    targetID = candidateID
+                end
+            end
 
             if targetID < 1 then
                 targetID = createRoomID()
@@ -61,7 +233,7 @@ function _.create_neighbors_for_current_room(roomID)
 
                     local skipStretch = _.should_skip_stretch_for_area(areaID)
                     _.move_room_to_expected_position(targetID, targetVnum, areaID,
-                        { tx, ty, tz }, shift, skipStretch)
+                        { tx, ty, tz }, shift, skipStretch, posCache)
                 else
                     setRoomArea(targetID, areaID)
                 end
@@ -72,6 +244,106 @@ function _.create_neighbors_for_current_room(roomID)
                 local x2, y2, z2 = getRoomCoordinates(targetID)
                 if x2 == nil then
                     setRoomCoordinates(targetID, cx + shift[1], cy + shift[2], cz + shift[3])
+                    _.pos_cache_add(posCache,
+                        cx + shift[1], cy + shift[2], cz + shift[3], targetID)
+                end
+            end
+
+            -- Lowest-ID-wins dedup pass.  Catches every stacking case (ghost
+            -- IDs resurrected by setRoomCoordinates, candidate-search misses,
+            -- pre-existing duplicates, etc.) by collapsing all live rooms at
+            -- the target's coords down to the single lowest-ID survivor.
+            -- Higher-ID duplicates are deleted; if the survivor is a bare
+            -- placeholder we promote it by copying name/env/symbol from the
+            -- displaced real room first, and we transfer the GMCP hash binding
+            -- so the room's identity is preserved.
+            do
+                local fx, fy, fz = getRoomCoordinates(targetID)
+                if fx ~= nil then
+                    local hits = _.pos_cache_get(posCache, fx, fy, fz)
+                    local liveIDs = {}
+                    local function consider(rid)
+                        if type(rid) == "number" and rid > 0 then
+                            local a = getRoomArea(rid)
+                            if type(a) == "number" and a > 0 then
+                                liveIDs[#liveIDs + 1] = rid
+                            end
+                        end
+                    end
+                    if type(hits) == "table" then
+                        for _, rid in ipairs(hits) do consider(rid) end
+                    end
+                    if #liveIDs > 1 then
+                        -- Survivor preference: locked rooms first, then the
+                        -- player's current room, then lowest ID.  Ensures
+                        -- manually-pinned rooms and the player's anchor are
+                        -- never demoted/deleted by the dedup pass.
+                        local playerID = safe_current_player_room_id()
+                        table.sort(liveIDs, function(a, b)
+                            local la, lb = safe_is_room_locked(a), safe_is_room_locked(b)
+                            if la ~= lb then return la end
+                            local pa, pb = (a == playerID), (b == playerID)
+                            if pa ~= pb then return pa end
+                            return a < b
+                        end)
+                        local keep = liveIDs[1]
+                        local has_is_placeholder = type(_.is_placeholder) == "function"
+                        for i = 2, #liveIDs do
+                            local dup = liveIDs[i]
+                            if safe_is_room_locked(dup) then
+                                if type(_.debug_echo) == "function" then
+                                    _.debug_echo("Dedup: refused to delete locked room "
+                                        .. dup .. " (kept " .. keep .. ")\n")
+                                end
+                            else
+                                -- Promote: if survivor is a placeholder and the
+                                -- duplicate is a real room, copy its visible attrs.
+                                if has_is_placeholder
+                                    and _.is_placeholder(keep) and not _.is_placeholder(dup) then
+                                    local n = getRoomName(dup)
+                                    if type(n) == "string" and n ~= "" then setRoomName(keep, n) end
+                                    local env = getRoomEnv(dup)
+                                    if type(env) == "number" and env > 0 then
+                                        setRoomEnv(keep, env)
+                                    end
+                                    if type(getRoomChar) == "function"
+                                        and type(setRoomChar) == "function" then
+                                        local sym = getRoomChar(dup)
+                                        if type(sym) == "string" and sym ~= "" then
+                                            pcall(setRoomChar, keep, sym)
+                                        end
+                                    end
+                                end
+                                -- Transfer hash binding to survivor if it has none.
+                                if type(getRoomHashByID) == "function" then
+                                    local dupHash  = getRoomHashByID(dup)
+                                    local keepHash = getRoomHashByID(keep)
+                                    if (keepHash == nil or keepHash == "")
+                                        and type(dupHash) == "string" and dupHash ~= "" then
+                                        pcall(setRoomIDbyHash, dup, "")
+                                        setRoomIDbyHash(keep, dupHash)
+                                    end
+                                end
+                                if type(deleteRoom) == "function" then
+                                    pcall(deleteRoom, dup)
+                                    _.pos_cache_drop(posCache, fx, fy, fz, dup)
+                                end
+                                if type(_.debug_echo) == "function" then
+                                    _.debug_echo("Dedup: deleted duplicate room " .. dup
+                                        .. " (kept " .. keep .. ") at ("
+                                        .. fx .. "," .. fy .. "," .. fz .. ")\n")
+                                end
+                            end
+                        end
+                        -- Ensure the incoming GMCP vnum points at the survivor.
+                        local keepHash = type(getRoomHashByID) == "function"
+                            and getRoomHashByID(keep) or nil
+                        if keepHash == nil or keepHash == "" then
+                            setRoomIDbyHash(keep, targetVnum)
+                        end
+                        targetID = keep
+                        _.mark_autowalk_dirty()
+                    end
                 end
             end
 
@@ -92,6 +364,99 @@ function _.create_neighbors_for_current_room(roomID)
             end
         end
     end
+
+    -- Final positional dedup backstop.  Walks the position cache (already
+    -- built for this area) and collapses any rooms sharing the same (x,y,z)
+    -- down to the lowest-ID survivor.  Runs after all exits have been
+    -- processed so it catches duplicates regardless of how they were created
+    -- (resurrected ghosts, candidate-search misses, leftover stacks from
+    -- previous sessions, etc.).
+    do
+        local cachedMyExits = nil
+        local function get_my_exits()
+            if cachedMyExits == nil then cachedMyExits = getRoomExits(roomID) or false end
+            return cachedMyExits or nil
+        end
+        for key, list in pairs(posCache) do
+            if type(list) == "table" and #list > 1
+                and key ~= "_areaID" and key ~= "_rooms" then
+                -- Survivor preference: locked > player current room > lowest ID.
+                local playerID = safe_current_player_room_id()
+                table.sort(list, function(a, b)
+                    local la, lb = safe_is_room_locked(a), safe_is_room_locked(b)
+                    if la ~= lb then return la end
+                    local pa, pb = (a == playerID), (b == playerID)
+                    if pa ~= pb then return pa end
+                    return a < b
+                end)
+                local keep = list[1]
+                local has_is_placeholder = type(_.is_placeholder) == "function"
+                local i = 2
+                while i <= #list do
+                    local dup = list[i]
+                    if safe_is_room_locked(dup) then
+                        if type(_.debug_echo) == "function" then
+                            _.debug_echo("Final dedup: refused to delete locked room "
+                                .. dup .. " (kept " .. keep .. ")\n")
+                        end
+                        i = i + 1
+                    else
+                        -- Promote survivor with real-room attrs if needed.
+                        if has_is_placeholder
+                            and _.is_placeholder(keep) and not _.is_placeholder(dup) then
+                            local n = getRoomName(dup)
+                            if type(n) == "string" and n ~= "" then setRoomName(keep, n) end
+                            local env = getRoomEnv(dup)
+                            if type(env) == "number" and env > 0 then
+                                setRoomEnv(keep, env)
+                            end
+                            if type(getRoomChar) == "function"
+                                and type(setRoomChar) == "function" then
+                                local sym = getRoomChar(dup)
+                                if type(sym) == "string" and sym ~= "" then
+                                    pcall(setRoomChar, keep, sym)
+                                end
+                            end
+                        end
+                        -- Transfer hash binding to survivor if it lacks one.
+                        if type(getRoomHashByID) == "function" then
+                            local dupHash  = getRoomHashByID(dup)
+                            local keepHash = getRoomHashByID(keep)
+                            if (keepHash == nil or keepHash == "")
+                                and type(dupHash) == "string" and dupHash ~= "" then
+                                pcall(setRoomIDbyHash, dup, "")
+                                setRoomIDbyHash(keep, dupHash)
+                            end
+                        end
+                        -- Re-wire any exits from the current room that
+                        -- pointed at the duplicate to point at the survivor.
+                        local myExits = get_my_exits()
+                        if type(myExits) == "table" then
+                            local has_norm = type(_.normalize_exit_direction) == "function"
+                            for d, tgt in pairs(myExits) do
+                                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                                if tgt == dup then
+                                    local nd = has_norm and _.normalize_exit_direction(d) or d
+                                    if type(nd) == "string" then
+                                        pcall(setExit, roomID, keep, nd)
+                                    end
+                                end
+                            end
+                        end
+                        if type(deleteRoom) == "function" then
+                            pcall(deleteRoom, dup)
+                        end
+                        table.remove(list, i)
+                        if type(_.debug_echo) == "function" then
+                            _.debug_echo("Final dedup: deleted duplicate room "
+                                .. dup .. " (kept " .. keep .. ")\n")
+                        end
+                    end -- not locked
+                end
+            end
+        end
+    end
+
     if createdCount > 0 then
         _.mark_autowalk_dirty()
     end
@@ -172,7 +537,7 @@ end
 -- stays local and doesn't traverse thousands of rooms on large maps.
 -- externalVisited: optional shared table so callers can track visited rooms
 -- across multiple subgraph seeds (used by 'map normalize all').
-function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, externalVisited)
+function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, externalVisited, externalPosCache)
     maxPasses = maxPasses or map.configs.reconcile_max_passes
     maxMoves  = maxMoves or map.configs.reconcile_max_moves
 
@@ -183,13 +548,17 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
     local ax, ay, az = getRoomCoordinates(anchorID)
     if ax == nil then return end
 
+    -- If the caller supplied a cache for this area, reuse it across passes
+    -- (and feed our own mutations back into it for downstream callers).
+    -- Otherwise build a fresh one and rebuild between passes only when
+    -- forced — passes converge in-place so we can keep mutating the cache.
+    local sharedCache = (externalPosCache and externalPosCache._areaID == areaID) and externalPosCache or nil
+
     local moved = 0
     for _pass = 1, maxPasses do
         local passMove = 0
 
-        -- Pre-build position cache once per pass (much cheaper than calling
-        -- getRoomsByPosition for every exit of every room during BFS).
-        local posCache = build_pos_cache(areaID)
+        local posCache = sharedCache or _.build_pos_cache(areaID)
 
         -- BFS from anchor
         local queue    = { { id = anchorID, depth = 0 } }
@@ -222,22 +591,27 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                                     local expectedY       = cy + shift[2]
                                     local expectedZ       = cz + shift[3]
 
-                                    local posKey          = pos_key(expectedX, expectedY, expectedZ)
-                                    local occupantID      = posCache[posKey]
-                                    local alreadyOccupied = occupantID ~= nil and occupantID ~= targetID
+                                    local occupants       = _.pos_cache_get(posCache,
+                                        expectedX, expectedY, expectedZ)
+                                    local alreadyOccupied = false
+                                    if type(occupants) == "table" then
+                                        for _, oid in ipairs(occupants) do
+                                            if oid ~= targetID then
+                                                alreadyOccupied = true
+                                                break
+                                            end
+                                        end
+                                    end
 
-                                    if not alreadyOccupied then
+                                    if not alreadyOccupied and not safe_is_room_locked(targetID) then
                                         local tx, ty, tz = getRoomCoordinates(targetID)
                                         if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
                                             local forcedZ = _.get_forced_z_for_room(targetID)
                                             local finalZ  = (forcedZ ~= nil and shift[3] == 0) and forcedZ or expectedZ
                                             if tx ~= expectedX or ty ~= expectedY or tz ~= finalZ then
-                                                -- Update cache: remove old position, add new.
-                                                if tx ~= nil then
-                                                    posCache[pos_key(tx, ty, tz)] = nil
-                                                end
-                                                posCache[pos_key(expectedX, expectedY, finalZ)] = targetID
                                                 setRoomCoordinates(targetID, expectedX, expectedY, finalZ)
+                                                _.pos_cache_move(posCache, tx, ty, tz,
+                                                    expectedX, expectedY, finalZ, targetID)
                                                 passMove = passMove + 1
                                                 moved    = moved + 1
                                                 if moved >= maxMoves then return moved end
@@ -295,7 +669,7 @@ function _.flatten_cardinal_connected_rooms(anchorID)
                         local tx, ty, tz = getRoomCoordinates(targetID)
                         local forcedZ = _.get_forced_z_for_room(targetID)
                         local targetZ = forcedZ ~= nil and forcedZ or cz
-                        if tz ~= targetZ then
+                        if tz ~= targetZ and not safe_is_room_locked(targetID) then
                             setRoomCoordinates(targetID, tx, ty, targetZ)
                         end
                         table.insert(queue, targetID)
@@ -527,7 +901,8 @@ function map.recalculate_room_layout()
                         roomParents[targetID]   = entry.id
 
                         local cx, cy, cz        = getRoomCoordinates(targetID)
-                        if cx ~= tx or cy ~= ty or cz ~= tz then
+                        if (cx ~= tx or cy ~= ty or cz ~= tz)
+                            and not safe_is_room_locked(targetID) then
                             setRoomCoordinates(targetID, tx, ty, tz)
                             movedCount = movedCount + 1
                         end
@@ -653,7 +1028,9 @@ function map.recalculate_room_layout()
                         rp.y = rp.y + dy * dist
                         local nKey = pos_key(rp.x, rp.y, rp.z)
                         occupied[nKey] = rid
-                        setRoomCoordinates(rid, rp.x, rp.y, rp.z)
+                        if not safe_is_room_locked(rid) then
+                            setRoomCoordinates(rid, rp.x, rp.y, rp.z)
+                        end
                         shifted[rid] = true
                         movedCount = movedCount + 1
                     end

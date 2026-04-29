@@ -466,25 +466,170 @@ function _.should_skip_stretch_for_area(areaID)
     return _.current_room_uses_grid_mode()
 end
 
-function _.stretch_area_for_new_room(areaID, coords, shift)
-    local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-    if table.is_empty(overlap) then return end
+-- --------------------------------------------------------------------------
+-- Position cache
+-- --------------------------------------------------------------------------
+-- Per-call cache mapping "x,y,z" → array of roomIDs in a given area.  Built
+-- once at the top of handle_move() and threaded through layout passes so we
+-- don't pay an O(area) getRoomsByPosition / getAreaRooms walk per exit on
+-- every GMCP Room.Info event (the previous behaviour caused multi-second
+-- freezes on large areas).  The cache is mutated in place by setRoomCoordinates
+-- / deleteRoom call sites so it stays consistent without rebuilding.
+
+local function pc_key(x, y, z) return x .. "," .. y .. "," .. z end
+_.pos_cache_key = pc_key
+
+function _.build_pos_cache(areaID)
+    local cache = { _areaID = areaID, _rooms = {} }
+    if type(areaID) ~= "number" or areaID < 1 then return cache end
     local rooms = getAreaRooms(areaID)
-    local rcoords
+    if type(rooms) ~= "table" then return cache end
+    cache._rooms = rooms
     for _, id in ipairs(rooms) do
-        rcoords = { getRoomCoordinates(id) }
-        for n = 1, 3 do
-            if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
-                rcoords[n] = rcoords[n] - shift[n]
+        local x, y, z = getRoomCoordinates(id)
+        if x ~= nil then
+            local k = pc_key(x, y, z)
+            local list = cache[k]
+            if list == nil then
+                cache[k] = { id }
+            else
+                list[#list + 1] = id
             end
         end
-        setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
+    end
+    return cache
+end
+
+-- Returns the list of roomIDs at (x,y,z), or nil if empty.  Always returns
+-- a table when non-nil (call sites can iterate uniformly).
+function _.pos_cache_get(cache, x, y, z)
+    if cache == nil or x == nil then return nil end
+    return cache[pc_key(x, y, z)]
+end
+
+function _.pos_cache_add(cache, x, y, z, id)
+    if cache == nil or x == nil or id == nil then return end
+    local k = pc_key(x, y, z)
+    local list = cache[k]
+    if list == nil then
+        cache[k] = { id }
+        return
+    end
+    for i = 1, #list do if list[i] == id then return end end
+    list[#list + 1] = id
+end
+
+function _.pos_cache_remove(cache, x, y, z, id)
+    if cache == nil or x == nil or id == nil then return end
+    local k = pc_key(x, y, z)
+    local list = cache[k]
+    if list == nil then return end
+    for i = 1, #list do
+        if list[i] == id then
+            table.remove(list, i)
+            break
+        end
+    end
+    if #list == 0 then cache[k] = nil end
+end
+
+function _.pos_cache_move(cache, oldX, oldY, oldZ, newX, newY, newZ, id)
+    if cache == nil or id == nil then return end
+    if oldX ~= nil then _.pos_cache_remove(cache, oldX, oldY, oldZ, id) end
+    if newX ~= nil then _.pos_cache_add(cache, newX, newY, newZ, id) end
+end
+
+-- Drop a room from the cache entirely (used after deleteRoom).  Caller must
+-- pass the room's last-known coords — we cannot look them up post-delete.
+function _.pos_cache_drop(cache, x, y, z, id)
+    if cache == nil then return end
+    if x ~= nil and id ~= nil then _.pos_cache_remove(cache, x, y, z, id) end
+end
+
+-- --------------------------------------------------------------------------
+-- Room lock (pinning manually-placed rooms)
+-- --------------------------------------------------------------------------
+-- A "locked" room has a user-data flag set to "1".  All layout passes
+-- (stretch, reconcile, flatten, recalculate) refuse to move locked rooms,
+-- and the dedup passes refuse to delete them.  This lets `map shift`,
+-- `map lock`, and external manual placement persist across room updates.
+
+function _.is_room_locked(rid)
+    if type(rid) ~= "number" or rid < 1 then return false end
+    local v = getRoomUserData(rid, "locked")
+    return v == "1"
+end
+
+function _.set_room_locked(rid, locked)
+    if type(rid) ~= "number" or rid < 1 then return end
+    if locked then
+        setRoomUserData(rid, "locked", "1")
+    else
+        if type(clearRoomUserDataItem) == "function" then
+            clearRoomUserDataItem(rid, "locked")
+        else
+            setRoomUserData(rid, "locked", "")
+        end
     end
 end
 
-function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shift, skipStretch)
+-- Returns the Mudlet ID of the room the player is currently in, or nil.
+function _.current_player_room_id()
+    if type(map.room_info) == "table" and type(map.room_info.vnum) == "string" then
+        local id = getRoomIDbyHash(map.room_info.vnum)
+        if type(id) == "number" and id > 0 then return id end
+    end
+    return nil
+end
+
+-- A room is "immobile" (cannot be moved by layout passes) if it is locked
+-- OR it is the player's current room.  Pinning the player's room avoids the
+-- "the room I am in jumped to 0,0,0" symptom when stretch / dedup runs.
+function _.is_room_immobile(rid)
+    if _.is_room_locked(rid) then return true end
+    return rid == _.current_player_room_id()
+end
+
+function _.stretch_area_for_new_room(areaID, coords, shift, posCache)
+    local overlap = _.pos_cache_get(posCache, coords[1], coords[2], coords[3])
+        or getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+    if table.is_empty(overlap) then return end
+    local rooms = (posCache and posCache._rooms) or getAreaRooms(areaID)
+    local rcoords
+    for _, id in ipairs(rooms) do
+        if not _.is_room_immobile(id) then
+            rcoords = { getRoomCoordinates(id) }
+            local ox, oy, oz = rcoords[1], rcoords[2], rcoords[3]
+            local moved = false
+            for n = 1, 3 do
+                if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
+                    rcoords[n] = rcoords[n] - shift[n]
+                    moved = true
+                end
+            end
+            if moved and ox ~= nil then
+                setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
+                _.pos_cache_move(posCache, ox, oy, oz,
+                    rcoords[1], rcoords[2], rcoords[3], id)
+            end
+        end
+    end
+end
+
+function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shift, skipStretch, posCache)
+    -- Locked rooms (and the player's current room) must never be relocated
+    -- by neighbour-creation logic.  Just make sure the area assignment is
+    -- right and leave coords alone.
+    if _.is_room_immobile(roomID) then
+        local currentArea = getRoomArea(roomID)
+        if currentArea ~= areaID then
+            setRoomArea(roomID, areaID)
+        end
+        return
+    end
     if not skipStretch then
-        local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
+        local overlap = _.pos_cache_get(posCache, coords[1], coords[2], coords[3])
+            or getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
         if not table.is_empty(overlap) then
             local hasCollision = false
             for _, overlapID in pairs(overlap) do
@@ -497,12 +642,18 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
                 end
             end
             if hasCollision then
-                _.stretch_area_for_new_room(areaID, coords, shift)
+                _.stretch_area_for_new_room(areaID, coords, shift, posCache)
             end
         end
     end
-    setRoomArea(roomID, areaID)
-    setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
+    local currentArea = getRoomArea(roomID)
+    if currentArea ~= areaID then setRoomArea(roomID, areaID) end
+    local ox, oy, oz = getRoomCoordinates(roomID)
+    if ox ~= coords[1] or oy ~= coords[2] or oz ~= coords[3] then
+        setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
+        _.pos_cache_move(posCache, ox, oy, oz,
+            coords[1], coords[2], coords[3], roomID)
+    end
 end
 
 -- Returns the z-shift implied by a vertical special exit name, or nil.
