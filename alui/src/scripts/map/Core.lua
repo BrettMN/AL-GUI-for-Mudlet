@@ -433,11 +433,6 @@ local function handle_move(isLastInBatch)
             local newRooms = type(_.create_neighbors_for_current_room) == "function"
                 and _.create_neighbors_for_current_room(rnum, posCache) or 0
             if isLastInBatch then
-                if map.configs.auto_reconcile and newRooms and newRooms > 0 then
-                    -- Limit BFS depth so the reconcile stays local on large maps.
-                    -- The full-area reconcile is available via 'map normalize'.
-                    _.reconcile_connected_rooms(rnum, nil, nil, 5, nil, posCache)
-                end
                 updateMap()
                 centerview(rnum)
             end

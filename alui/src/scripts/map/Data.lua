@@ -13,7 +13,7 @@ map.configs.reconcile_deep_max_passes = map.configs.reconcile_deep_max_passes or
 map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5000
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
-map.configs.auto_reconcile = map.configs.auto_reconcile ~= false
+map.configs.auto_reconcile = false
 map.configs.debug_mapper = map.configs.debug_mapper == true
 map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
 
