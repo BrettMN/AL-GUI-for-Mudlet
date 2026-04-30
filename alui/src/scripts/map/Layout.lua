@@ -691,6 +691,55 @@ end
 -- Public layout commands
 -- --------------------------------------------------------------------------
 
+-- Shared bucketed report emitted at the end of normalize and recalculate.
+-- selfLoopsRemoved: integer from _.strip_self_loop_exits
+-- movedCount:       rooms repositioned by BFS
+-- snapResult:       table returned by _.snap_vertical_pair
+-- audit:            table returned by _.audit_layout_anomalies
+local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit)
+    local parts = {}
+    if selfLoopsRemoved > 0 then
+        parts[#parts + 1] = selfLoopsRemoved
+            .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
+    end
+    if movedCount > 0 then
+        parts[#parts + 1] = movedCount
+            .. " room" .. (movedCount == 1 and "" or "s") .. " repositioned"
+    end
+    if snapResult.snapped > 0 then
+        parts[#parts + 1] = snapResult.snapped
+            .. " vertical pair" .. (snapResult.snapped == 1 and "" or "s") .. " snapped"
+    end
+    if snapResult.blocked > 0 then
+        parts[#parts + 1] = snapResult.blocked
+            .. " vertical snap" .. (snapResult.blocked == 1 and "" or "s") .. " blocked by occupant"
+    end
+    if snapResult.shared_target_bug > 0 then
+        parts[#parts + 1] = snapResult.shared_target_bug
+            .. " shared-target bug" .. (snapResult.shared_target_bug == 1 and "" or "s")
+            .. " (in-area duplicate exit — data issue)"
+    end
+    if audit.duplicate_hash_rooms > 0 then
+        parts[#parts + 1] = audit.duplicate_hash_rooms
+            .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
+            .. " (re-enter to merge)"
+    end
+    if audit.delta_mismatches > 0 then
+        parts[#parts + 1] = audit.delta_mismatches
+            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "s")
+            .. " remaining (cyclic or unfixable)"
+    end
+    if audit.vertical_drift > 0 then
+        parts[#parts + 1] = audit.vertical_drift
+            .. " vertical drift" .. (audit.vertical_drift == 1 and "" or "s") .. " remaining"
+    end
+    if #parts == 0 then
+        echo("No changes needed.\n")
+    else
+        echo(table.concat(parts, ", ") .. ".\n")
+    end
+end
+
 function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     maxPasses = maxPasses or map.configs.reconcile_deep_max_passes
     maxMoves  = maxMoves or map.configs.reconcile_deep_max_moves
@@ -734,24 +783,26 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     end
 
     local areaName_display = getAreaTableSwap and getAreaTableSwap()[areaID] or ("area #" .. areaID)
+    local areaRooms        = getAreaRooms(areaID)
+    if type(areaRooms) ~= "table" then areaRooms = {} end
+
+    -- Strip self-loop exits before BFS so the reconcile doesn't follow them.
+    local selfLoopsRemoved = _.strip_self_loop_exits(areaRooms)
+
     local moved = 0
     if allRooms then
         echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
-        local areaRooms     = getAreaRooms(areaID)
         local globalVisited = {}
         local seedCount     = 0
-        if type(areaRooms) == "table" then
-            for _, seedID in ipairs(areaRooms) do
-                if not globalVisited[seedID] then
-                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
-                    _.flatten_cardinal_connected_rooms(seedID)
-                    moved     = moved + (subMoved or 0)
-                    seedCount = seedCount + 1
-                end
+        for _, seedID in ipairs(areaRooms) do
+            if not globalVisited[seedID] then
+                local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
+                _.flatten_cardinal_connected_rooms(seedID)
+                moved     = moved + (subMoved or 0)
+                seedCount = seedCount + 1
             end
         end
-        echo("Normalised " .. moved .. " room" .. (moved == 1 and "" or "s") ..
-            " across " .. seedCount .. " subgraph" .. (seedCount == 1 and "" or "s") .. ".\n")
+        echo("Normalised across " .. seedCount .. " subgraph" .. (seedCount == 1 and "" or "s") .. ".\n")
     else
         local seedID = find_best_seed(areaID)
         if not seedID then
@@ -761,9 +812,17 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         echo("Normalising '" .. areaName_display .. "'...\n")
         moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves)
         _.flatten_cardinal_connected_rooms(seedID)
-        echo("Normalised " .. (moved or 0) .. " room" .. ((moved or 0) == 1 and "" or "s") .. ".\n")
     end
+
+    -- Snap in-area up/down room pairs to adjacent z-levels.
+    local snapResult = _.snap_vertical_pair(areaID)
+
+    -- Audit remaining anomalies in the (now-updated) area.
+    local freshRooms = getAreaRooms(areaID)
+    local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
+
     updateMap()
+    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit)
 end
 
 function map.normalize_all_areas(maxPasses, maxMoves)
@@ -776,16 +835,19 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         return
     end
 
-    local totalMoved = 0
-    local areaCount  = 0
-    local areaNames  = {}
+    local totalSelfLoops = 0
+    local totalMoved     = 0
+    local totalSnapped   = 0
+    local areaCount      = 0
+    local areaNames      = {}
     for name, _ in pairs(areas) do areaNames[#areaNames + 1] = name end
     table.sort(areaNames)
 
     for _, name in ipairs(areaNames) do
-        local id = areas[name]
+        local id        = areas[name]
         local areaRooms = getAreaRooms(id)
         if type(areaRooms) == "table" and #areaRooms > 0 then
+            totalSelfLoops = totalSelfLoops + _.strip_self_loop_exits(areaRooms)
             local globalVisited = {}
             for _, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
@@ -794,13 +856,25 @@ function map.normalize_all_areas(maxPasses, maxMoves)
                     totalMoved = totalMoved + (subMoved or 0)
                 end
             end
-            areaCount = areaCount + 1
+            local snapResult = _.snap_vertical_pair(id)
+            totalSnapped = totalSnapped + snapResult.snapped
+            areaCount    = areaCount + 1
         end
     end
 
     updateMap()
-    echo("Normalised " .. totalMoved .. " room" .. (totalMoved == 1 and "" or "s") ..
-        " across " .. areaCount .. " area" .. (areaCount == 1 and "" or "s") .. ".\n")
+    local parts = {}
+    if totalSelfLoops > 0 then
+        parts[#parts + 1] = totalSelfLoops
+            .. " self-loop exit" .. (totalSelfLoops == 1 and "" or "s") .. " removed"
+    end
+    parts[#parts + 1] = totalMoved .. " room" .. (totalMoved == 1 and "" or "s") .. " repositioned"
+    if totalSnapped > 0 then
+        parts[#parts + 1] = totalSnapped
+            .. " vertical pair" .. (totalSnapped == 1 and "" or "s") .. " snapped"
+    end
+    echo(table.concat(parts, ", ") .. " across "
+        .. areaCount .. " area" .. (areaCount == 1 and "" or "s") .. ".\n")
 end
 
 function map.recalculate_room_layout()
@@ -821,7 +895,11 @@ function map.recalculate_room_layout()
         return
     end
 
-    -- Determine whether the seed room is underground or elevated so we know the
+    -- Strip self-loop exits so BFS does not traverse them.
+    local areaRooms        = getAreaRooms(areaID)
+    local selfLoopsRemoved = type(areaRooms) == "table" and _.strip_self_loop_exits(areaRooms) or 0
+
+    -- Determine whether the seed room is underground or elevatedso we know the
     -- base z-level for each classification (surface vs underground vs elevated).
     local seedUG        = _.classify_room_underground(seedID, false)
     local seedEL        = _.classify_room_elevated(seedID)
@@ -1108,10 +1186,22 @@ function map.recalculate_room_layout()
         end
     end
 
+    -- Snap in-area up/down pairs that BFS may not have aligned (e.g. rooms
+    -- unreachable from the seed, or sky rooms first reached via horizontal paths).
+    local snapResult = _.snap_vertical_pair(areaID)
+
+    -- Audit remaining anomalies in the final state.
+    local freshRooms = getAreaRooms(areaID)
+    local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
+
     updateMap()
     local msg = "Topology recalculation repositioned " .. movedCount ..
         " room" .. (movedCount == 1 and "" or "s")
     local details = {}
+    if selfLoopsRemoved > 0 then
+        details[#details + 1] = selfLoopsRemoved
+            .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
+    end
     if nudgeCount > 0 then
         details[#details + 1] = nudgeCount .. " nudged to avoid overlap"
     end
@@ -1124,6 +1214,30 @@ function map.recalculate_room_layout()
     if deletedPlaceholderCount > 0 then
         details[#details + 1] = deletedPlaceholderCount
             .. " placeholder" .. (deletedPlaceholderCount == 1 and "" or "s") .. " removed"
+    end
+    if snapResult.snapped > 0 then
+        details[#details + 1] = snapResult.snapped
+            .. " vertical pair" .. (snapResult.snapped == 1 and "" or "s") .. " snapped"
+    end
+    if snapResult.blocked > 0 then
+        details[#details + 1] = snapResult.blocked
+            .. " vertical snap" .. (snapResult.blocked == 1 and "" or "s") .. " blocked"
+    end
+    if snapResult.shared_target_bug > 0 then
+        details[#details + 1] = snapResult.shared_target_bug
+            .. " shared-target bug" .. (snapResult.shared_target_bug == 1 and "" or "s")
+            .. " (data issue)"
+    end
+    if audit.duplicate_hash_rooms > 0 then
+        details[#details + 1] = audit.duplicate_hash_rooms
+            .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
+            .. " (re-enter to merge)"
+    end
+    if audit.delta_mismatches > 0 then
+        details[#details + 1] = audit.delta_mismatches
+            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "s")
+            .. " remaining"
+    end
     end
     if #details > 0 then
         msg = msg .. " (" .. table.concat(details, ", ") .. ")"

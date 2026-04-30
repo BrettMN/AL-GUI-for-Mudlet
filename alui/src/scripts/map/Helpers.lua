@@ -779,6 +779,284 @@ end
 -- Area context helpers
 -- --------------------------------------------------------------------------
 
+-- --------------------------------------------------------------------------
+-- Layout repair helpers (used by map normalize and map recalculate)
+-- --------------------------------------------------------------------------
+
+-- Remove exits from a room that point back to itself (self-loop bugs).
+-- Only standard Mudlet direction names are acted on; non-standard exit keys
+-- (portals, scripts, etc.) are silently skipped.
+-- Returns the number of self-loop exits removed.
+function _.strip_self_loop_exits(roomIDs)
+    if type(roomIDs) ~= "table" then return 0 end
+    local removed = 0
+    for _, rid in ipairs(roomIDs) do
+        if type(rid) == "number" and rid > 0 then
+            local exits = getRoomExits(rid)
+            if type(exits) == "table" then
+                for dir, targetID in pairs(exits) do
+                    if type(targetID) == "string" then
+                        targetID = tonumber(targetID)
+                    end
+                    if targetID == rid then
+                        local nd = _.normalize_exit_direction(dir)
+                        if type(nd) == "string" then
+                            local ok = pcall(setExit, rid, -1, nd)
+                            if ok then
+                                removed = removed + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return removed
+end
+
+-- Snap vertical room pairs so that sky/elevated rooms sit directly above their
+-- ground room and underground rooms sit directly below.
+--
+-- For each in-area room G with an `up` exit to U where U is also in the area:
+--   - If multiple in-area rooms share the same `up` target hash, that violates
+--     the global hash-uniqueness rule → counted as shared_target_bug, not moved.
+--   - If U is locked or the target cell (gx,gy,gz+1) is already occupied by a
+--     different live room → counted as blocked.
+--   - Otherwise U is moved to (gx, gy, gz+1).
+-- Mirror logic applies for `down` exits (U placed at gz-1).
+-- Cross-area exits are ignored entirely.
+--
+-- Returns { snapped=N, blocked=N, shared_target_bug=N }.
+function _.snap_vertical_pair(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return { snapped = 0, blocked = 0, shared_target_bug = 0 }
+    end
+    local areaRooms = getAreaRooms(areaID)
+    if type(areaRooms) ~= "table" then
+        return { snapped = 0, blocked = 0, shared_target_bug = 0 }
+    end
+
+    -- Build a position cache for fast occupancy lookups.
+    local posCache = _.build_pos_cache(areaID)
+
+    -- Tally how many in-area rooms point `up` / `down` to each target ID.
+    -- More than one in the same direction = shared_target_bug (violates uniqueness).
+    local upTargetCount   = {}   -- targetID → count of in-area rooms that exit `up` to it
+    local downTargetCount = {}
+
+    for _, rid in ipairs(areaRooms) do
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            local up = exits["up"]
+            if type(up) == "string" then up = tonumber(up) end
+            if type(up) == "number" and up > 0 and getRoomArea(up) == areaID then
+                upTargetCount[up] = (upTargetCount[up] or 0) + 1
+            end
+            local dn = exits["down"]
+            if type(dn) == "string" then dn = tonumber(dn) end
+            if type(dn) == "number" and dn > 0 and getRoomArea(dn) == areaID then
+                downTargetCount[dn] = (downTargetCount[dn] or 0) + 1
+            end
+        end
+    end
+
+    local snapped   = 0
+    local blocked   = 0
+    local bug_count = 0
+
+    local function try_snap(groundID, targetID, dz)
+        -- Skip cross-area exits.
+        if getRoomArea(targetID) ~= areaID then return end
+
+        -- Check shared-target bug.
+        local tally = dz > 0 and upTargetCount[targetID] or downTargetCount[targetID]
+        if (tally or 0) > 1 then
+            bug_count = bug_count + 1
+            return
+        end
+
+        -- Skip locked / immobile targets.
+        if _.is_room_immobile(targetID) then
+            blocked = blocked + 1
+            return
+        end
+
+        local gx, gy, gz = getRoomCoordinates(groundID)
+        if gx == nil then return end
+
+        local wantX, wantY, wantZ = gx, gy, gz + dz
+        local cx, cy, cz = getRoomCoordinates(targetID)
+        if cx == wantX and cy == wantY and cz == wantZ then return end -- already correct
+
+        -- Check target cell occupancy.
+        local occupants = _.pos_cache_get(posCache, wantX, wantY, wantZ)
+        if type(occupants) == "table" then
+            for _, oid in ipairs(occupants) do
+                if oid ~= targetID and getRoomArea(oid) == areaID then
+                    blocked = blocked + 1
+                    return
+                end
+            end
+        end
+
+        setRoomCoordinates(targetID, wantX, wantY, wantZ)
+        _.pos_cache_move(posCache, cx, cy, cz, wantX, wantY, wantZ, targetID)
+        snapped = snapped + 1
+    end
+
+    for _, rid in ipairs(areaRooms) do
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            local up = exits["up"]
+            if type(up) == "string" then up = tonumber(up) end
+            if type(up) == "number" and up > 0 then
+                try_snap(rid, up, 1)
+            end
+            local dn = exits["down"]
+            if type(dn) == "string" then dn = tonumber(dn) end
+            if type(dn) == "number" and dn > 0 then
+                try_snap(rid, dn, -1)
+            end
+        end
+    end
+
+    return { snapped = snapped, blocked = blocked, shared_target_bug = bug_count }
+end
+
+-- Read-only audit of layout anomalies for a list of room IDs.
+-- Returns a table of bucket counts useful for end-of-run reports:
+--   self_loops        — exits whose target is the room itself
+--   delta_mismatches  — directional exits where actual coord delta ≠ expected shift
+--   vertical_drift    — up/down in-area exits where sky/ground room z is wrong
+--   cross_area        — exits that link to a room in a different area
+--   shared_target_bug — two+ in-area rooms share the same directional exit target (hash uniqueness violation)
+--   duplicate_hash_rooms — multiple mapper IDs resolve to the same GMCP hash
+--   unreachable       — rooms in the area with no exits and no exit-stubs pointing at them
+--
+-- NOTE: This function is intentionally read-only; it never calls setRoomCoordinates or setExit.
+function _.audit_layout_anomalies(roomIDs, areaID)
+    local counts = {
+        self_loops         = 0,
+        delta_mismatches   = 0,
+        vertical_drift     = 0,
+        cross_area         = 0,
+        shared_target_bug  = 0,
+        duplicate_hash_rooms = 0,
+        unreachable        = 0,
+    }
+    if type(roomIDs) ~= "table" or #roomIDs == 0 then return counts end
+
+    -- Build a set of all roomIDs in scope for quick lookup.
+    local inScope = {}
+    for _, rid in ipairs(roomIDs) do inScope[rid] = true end
+
+    -- Tally per-target exit counts within the area to detect shared-target bugs.
+    local targetCount = {}  -- targetID → count of (in-scope) sources that exit to it
+    for _, rid in ipairs(roomIDs) do
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            for dir, targetID in pairs(exits) do
+                if type(targetID) == "string" then targetID = tonumber(targetID) end
+                if type(targetID) == "number" and targetID > 0 and targetID ~= rid then
+                    if not areaID or getRoomArea(targetID) == areaID then
+                        local k = tostring(dir) .. "→" .. tostring(targetID)
+                        targetCount[k] = (targetCount[k] or 0) + 1
+                    end
+                end
+            end
+        end
+    end
+
+    -- Check for duplicate hash bindings.
+    if type(getRoomHashByID) == "function" then
+        local hashSeen = {}
+        for _, rid in ipairs(roomIDs) do
+            local h = getRoomHashByID(rid)
+            if type(h) == "string" and h ~= "" then
+                if hashSeen[h] then
+                    counts.duplicate_hash_rooms = counts.duplicate_hash_rooms + 1
+                else
+                    hashSeen[h] = rid
+                end
+            end
+        end
+    end
+
+    -- Rooms that have incoming exits from at least one in-scope room.
+    local hasIncoming = {}
+    for _, rid in ipairs(roomIDs) do
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            for _, tgt in pairs(exits) do
+                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                if type(tgt) == "number" and inScope[tgt] then
+                    hasIncoming[tgt] = true
+                end
+            end
+        end
+    end
+
+    for _, rid in ipairs(roomIDs) do
+        local rx, ry, rz = getRoomCoordinates(rid)
+        local exits = getRoomExits(rid)
+        local hasAnyExit = false
+
+        if type(exits) == "table" then
+            for dir, targetID in pairs(exits) do
+                if type(targetID) == "string" then targetID = tonumber(targetID) end
+                if type(targetID) == "number" and targetID > 0 then
+                    hasAnyExit = true
+
+                    -- Self-loop
+                    if targetID == rid then
+                        counts.self_loops = counts.self_loops + 1
+                    else
+                        local targetAreaID = getRoomArea(targetID)
+
+                        -- Cross-area
+                        if areaID and type(targetAreaID) == "number" and targetAreaID ~= areaID then
+                            counts.cross_area = counts.cross_area + 1
+                        else
+                            -- Shared-target bug
+                            local k = tostring(dir) .. "→" .. tostring(targetID)
+                            if (targetCount[k] or 0) > 1 then
+                                counts.shared_target_bug = counts.shared_target_bug + 1
+                            end
+
+                            -- Delta mismatch
+                            local shift = _.get_shift_for_exit_key(dir)
+                            if shift and rx ~= nil then
+                                local tx, ty, tz = getRoomCoordinates(targetID)
+                                if tx ~= nil then
+                                    local dx = tx - rx
+                                    local dy = ty - ry
+                                    local dz = tz - rz
+                                    if dx ~= shift[1] or dy ~= shift[2] or dz ~= shift[3] then
+                                        -- Distinguish vertical drift from general delta mismatch
+                                        local nd = _.normalize_exit_direction(dir)
+                                        if (nd == "up" or nd == "down") and dx == 0 and dy == 0 then
+                                            counts.vertical_drift = counts.vertical_drift + 1
+                                        else
+                                            counts.delta_mismatches = counts.delta_mismatches + 1
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Unreachable: no exits and no in-scope room exits to this room.
+        if not hasAnyExit and not hasIncoming[rid] then
+            counts.unreachable = counts.unreachable + 1
+        end
+    end
+
+    return counts
+end
+
 function _.get_area_name_by_id(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return nil end
     local areas = getAreaTable()
