@@ -1238,7 +1238,6 @@ function map.recalculate_room_layout()
             .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "s")
             .. " remaining"
     end
-    end
     if #details > 0 then
         msg = msg .. " (" .. table.concat(details, ", ") .. ")"
     end
