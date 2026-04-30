@@ -790,7 +790,7 @@ end
 function _.strip_self_loop_exits(roomIDs)
     if type(roomIDs) ~= "table" then return 0 end
     local removed = 0
-    for _, rid in ipairs(roomIDs) do
+    for _i, rid in ipairs(roomIDs) do
         if type(rid) == "number" and rid > 0 then
             local exits = getRoomExits(rid)
             if type(exits) == "table" then
@@ -844,7 +844,7 @@ function _.snap_vertical_pair(areaID)
     local upTargetCount   = {}   -- targetID → count of in-area rooms that exit `up` to it
     local downTargetCount = {}
 
-    for _, rid in ipairs(areaRooms) do
+    for _i, rid in ipairs(areaRooms) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
             local up = exits["up"]
@@ -891,7 +891,7 @@ function _.snap_vertical_pair(areaID)
         -- Check target cell occupancy.
         local occupants = _.pos_cache_get(posCache, wantX, wantY, wantZ)
         if type(occupants) == "table" then
-            for _, oid in ipairs(occupants) do
+            for _i, oid in ipairs(occupants) do
                 if oid ~= targetID and getRoomArea(oid) == areaID then
                     blocked = blocked + 1
                     return
@@ -904,7 +904,7 @@ function _.snap_vertical_pair(areaID)
         snapped = snapped + 1
     end
 
-    for _, rid in ipairs(areaRooms) do
+    for _i, rid in ipairs(areaRooms) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
             local up = exits["up"]
@@ -948,11 +948,11 @@ function _.audit_layout_anomalies(roomIDs, areaID)
 
     -- Build a set of all roomIDs in scope for quick lookup.
     local inScope = {}
-    for _, rid in ipairs(roomIDs) do inScope[rid] = true end
+    for _i, rid in ipairs(roomIDs) do inScope[rid] = true end
 
     -- Tally per-target exit counts within the area to detect shared-target bugs.
     local targetCount = {}  -- targetID → count of (in-scope) sources that exit to it
-    for _, rid in ipairs(roomIDs) do
+    for _i, rid in ipairs(roomIDs) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
             for dir, targetID in pairs(exits) do
@@ -970,7 +970,7 @@ function _.audit_layout_anomalies(roomIDs, areaID)
     -- Check for duplicate hash bindings.
     if type(getRoomHashByID) == "function" then
         local hashSeen = {}
-        for _, rid in ipairs(roomIDs) do
+        for _i, rid in ipairs(roomIDs) do
             local h = getRoomHashByID(rid)
             if type(h) == "string" and h ~= "" then
                 if hashSeen[h] then
@@ -984,10 +984,10 @@ function _.audit_layout_anomalies(roomIDs, areaID)
 
     -- Rooms that have incoming exits from at least one in-scope room.
     local hasIncoming = {}
-    for _, rid in ipairs(roomIDs) do
+    for _i, rid in ipairs(roomIDs) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
-            for _, tgt in pairs(exits) do
+            for _i, tgt in pairs(exits) do
                 if type(tgt) == "string" then tgt = tonumber(tgt) end
                 if type(tgt) == "number" and inScope[tgt] then
                     hasIncoming[tgt] = true
@@ -996,7 +996,7 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         end
     end
 
-    for _, rid in ipairs(roomIDs) do
+    for _i, rid in ipairs(roomIDs) do
         local rx, ry, rz = getRoomCoordinates(rid)
         local exits = getRoomExits(rid)
         local hasAnyExit = false
