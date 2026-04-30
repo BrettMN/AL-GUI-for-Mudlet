@@ -48,6 +48,10 @@
         "regex": "^map\\s+export$"
     },
     {
+        "name": "map fix-selected-layout",
+        "regex": "^map\\s+fix-selected-layout$"
+    },
+    {
         "name": "map clear-area-cache",
         "regex": "^map\\s+clear-area-cache$"
     },

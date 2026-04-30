@@ -651,7 +651,7 @@ function _.flatten_cardinal_connected_rooms(anchorID)
     local queue       = { anchorID }
     local qHead       = 1
     local visited     = { [anchorID] = true }
-    local MAX_FLATTEN = 20000 -- safety cap; prevents freeze on very large connected areas
+    local MAX_FLATTEN = 200000 -- safety cap; prevents freeze on very large connected areas
     while qHead <= #queue do
         if qHead > MAX_FLATTEN then
             break
@@ -845,7 +845,7 @@ function map.recalculate_room_layout()
     local roomShifts    = {}
     -- Track BFS parent so the separation pass can shift entire subtrees.
     local roomParents   = {}
-    local MAX_BFS_ROOMS = 30000 -- safety cap; prevents indefinite freeze on huge areas
+    local MAX_BFS_ROOMS = 200000 -- safety cap; prevents indefinite freeze on huge areas
 
     while qHead <= #queue do
         if qHead > MAX_BFS_ROOMS then
@@ -973,8 +973,8 @@ function map.recalculate_room_layout()
         return false
     end
 
-    local shifted = {}           -- rooms already moved as part of a subtree
-    local MAX_SEPARATIONS = 5000 -- prevent O(N²) worst case on large maps
+    local shifted = {}             -- rooms already moved as part of a subtree
+    local MAX_SEPARATIONS = 200000 -- safety cap for very large areas
     local separationChecks = 0
 
     for roomID, pos in pairs(roomPositions) do

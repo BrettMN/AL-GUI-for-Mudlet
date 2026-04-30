@@ -439,6 +439,8 @@ function map.show_help()
     echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n\n")
+    echo("  map fix-selected-layout\n")
+    echo("    Repair obvious bad exits in the selected rooms, then run a local layout reconcile pass.\n\n")
     echo("  Mapper right-click travel\n")
     echo("    Select or right-click a room in the mapper, then choose Auto walk to selected room.\n\n")
     echo("  stop\n")
@@ -580,6 +582,71 @@ function map.export_rooms()
     end
 
     local result = {}
+
+    local function build_exit_details(roomID, roomX, roomY, roomZ, exits)
+        if type(exits) ~= "table" then return nil end
+
+        local details = {}
+        for rawDir, targetID in pairs(exits) do
+            if type(targetID) == "string" then
+                targetID = tonumber(targetID)
+            end
+            if type(targetID) == "number" and targetID > 0 then
+                local dirName = type(rawDir) == "number"
+                    and (_.stubmapFlipped[rawDir] or tostring(rawDir)) or rawDir
+                local targetX, targetY, targetZ = getRoomCoordinates(targetID)
+                local targetAreaID = getRoomArea(targetID)
+
+                local delta = nil
+                if roomX ~= nil and targetX ~= nil then
+                    delta = {
+                        x = targetX - roomX,
+                        y = targetY - roomY,
+                        z = targetZ - roomZ,
+                    }
+                end
+
+                local expected = nil
+                local shift = _.get_shift_for_exit_key and _.get_shift_for_exit_key(dirName) or nil
+                if type(shift) == "table" then
+                    expected = { x = shift[1], y = shift[2], z = shift[3] }
+                end
+
+                local anomalies = {}
+                if targetID == roomID then
+                    anomalies[#anomalies + 1] = "self_loop"
+                end
+                if targetX == nil then
+                    anomalies[#anomalies + 1] = "missing_target_coords"
+                end
+                if expected and delta and (expected.x ~= delta.x or expected.y ~= delta.y or expected.z ~= delta.z) then
+                    anomalies[#anomalies + 1] = "delta_mismatch"
+                end
+                if type(targetAreaID) == "number" and targetAreaID ~= getRoomArea(roomID) then
+                    anomalies[#anomalies + 1] = "cross_area_exit"
+                end
+
+                details[#details + 1] = {
+                    direction = dirName,
+                    target_id = targetID,
+                    target_hash = getRoomHashByID and getRoomHashByID(targetID) or nil,
+                    target_name = getRoomName(targetID),
+                    target_area_id = targetAreaID,
+                    target_area_name = _.get_area_name_by_id(targetAreaID),
+                    target_coords = (targetX ~= nil) and { x = targetX, y = targetY, z = targetZ } or nil,
+                    expected_delta = expected,
+                    actual_delta = delta,
+                    anomalies = (#anomalies > 0) and anomalies or nil,
+                }
+            end
+        end
+
+        table.sort(details, function(a, b)
+            return tostring(a.direction) < tostring(b.direction)
+        end)
+        return (#details > 0) and details or nil
+    end
+
     for _i, roomID in ipairs(roomIDs) do
         local areaID       = getRoomArea(roomID)
         local x, y, z      = getRoomCoordinates(roomID)
@@ -608,6 +675,7 @@ function map.export_rooms()
             area_name     = _.get_area_name_by_id(areaID),
             environment   = getRoomEnv(roomID),
             exits         = namedExits,
+            exit_details  = build_exit_details(roomID, x, y, z, exits),
             special_exits = (type(specialExits) == "table" and next(specialExits) ~= nil) and specialExits or nil,
             doors         = (type(doors) == "table" and next(doors) ~= nil) and doors or nil,
             user_data     = (type(userData) == "table" and next(userData) ~= nil) and userData or nil,
@@ -617,6 +685,117 @@ function map.export_rooms()
     local json = yajl.to_string(result)
     setClipboardText(json)
     echo("Exported " .. #result .. " room" .. (#result == 1 and "" or "s") .. " to clipboard.\n")
+end
+
+function map.fix_selected_layout()
+    local selection = getMapSelection()
+    local roomIDs = selection and selection.rooms
+    if type(roomIDs) ~= "table" or #roomIDs == 0 then
+        echo("No rooms selected. Select rooms on the mapper first, then run 'map fix-selected-layout'.\n")
+        return
+    end
+
+    local selectedSet = {}
+    local selected = {}
+    local seedArea
+    local skippedArea = 0
+    for _, rid in ipairs(roomIDs) do
+        if type(rid) == "number" and rid > 0 then
+            local ridArea = getRoomArea(rid)
+            if not seedArea then
+                seedArea = ridArea
+            end
+            if ridArea == seedArea then
+                selectedSet[rid] = true
+                selected[#selected + 1] = rid
+            else
+                skippedArea = skippedArea + 1
+            end
+        end
+    end
+
+    if #selected == 0 then
+        echo("Cannot repair selection: no valid rooms were found in one area.\n")
+        return
+    end
+
+    local removedSelf = 0
+    local removedCrossMismatch = 0
+    local addedReverse = 0
+
+    for _, rid in ipairs(selected) do
+        local roomArea = getRoomArea(rid)
+        local roomX, roomY, roomZ = getRoomCoordinates(rid)
+        local exits = getRoomExits(rid)
+
+        if type(exits) == "table" then
+            for rawDir, targetID in pairs(exits) do
+                if type(targetID) == "string" then
+                    targetID = tonumber(targetID)
+                end
+                if type(targetID) == "number" and targetID > 0 then
+                    local dir = _.normalize_exit_direction and _.normalize_exit_direction(rawDir) or rawDir
+                    local dirKey = dir or rawDir
+
+                    if targetID == rid then
+                        setExit(rid, -1, dirKey)
+                        removedSelf = removedSelf + 1
+                    else
+                        local targetArea = getRoomArea(targetID)
+                        local targetX, targetY, targetZ = getRoomCoordinates(targetID)
+                        local shift = _.get_shift_for_exit_key and _.get_shift_for_exit_key(dir) or nil
+
+                        local mismatch = false
+                        if type(shift) == "table"
+                            and roomX ~= nil and targetX ~= nil then
+                            mismatch = (targetX - roomX) ~= shift[1]
+                                or (targetY - roomY) ~= shift[2]
+                                or (targetZ - roomZ) ~= shift[3]
+                        end
+
+                        if type(targetArea) == "number"
+                            and type(roomArea) == "number"
+                            and targetArea ~= roomArea
+                            and mismatch then
+                            setExit(rid, -1, dirKey)
+                            removedCrossMismatch = removedCrossMismatch + 1
+                        elseif selectedSet[targetID] then
+                            local reverse = _.reverse_move_vectors and _.reverse_move_vectors[dir]
+                            if reverse then
+                                local back = _.get_room_exit_target and _.get_room_exit_target(targetID, reverse) or nil
+                                if back ~= rid then
+                                    setExit(targetID, rid, reverse)
+                                    addedReverse = addedReverse + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local moved = 0
+    local seedID = selected[1]
+    if _.reconcile_connected_rooms and seedID then
+        moved = _.reconcile_connected_rooms(seedID,
+            map.configs.reconcile_deep_max_passes,
+            map.configs.reconcile_deep_max_moves) or 0
+    end
+    if _.flatten_cardinal_connected_rooms and seedID then
+        _.flatten_cardinal_connected_rooms(seedID)
+    end
+
+    updateMap()
+    echo("Repair complete for " .. #selected .. " selected room" .. (#selected == 1 and "" or "s") .. ".\n")
+    echo("  Removed self-loop exits: " .. removedSelf .. "\n")
+    echo("  Removed cross-area mismatched exits: " .. removedCrossMismatch .. "\n")
+    echo("  Added missing reverse exits: " .. addedReverse .. "\n")
+    echo("  Rooms moved by reconcile: " .. (moved or 0) .. "\n")
+    if skippedArea > 0 then
+        echo("  Skipped " .. skippedArea .. " room" .. (skippedArea == 1 and "" or "s")
+            .. " outside the first selected area.\n")
+    end
 end
 
 -- --------------------------------------------------------------------------
