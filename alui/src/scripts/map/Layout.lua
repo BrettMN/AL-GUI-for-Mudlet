@@ -696,11 +696,22 @@ end
 -- movedCount:       rooms repositioned by BFS
 -- snapResult:       table returned by _.snap_vertical_pair
 -- audit:            table returned by _.audit_layout_anomalies
-local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit)
+-- dedupeResult: table returned by map.dedupe_area_by_hash (may be nil)
+-- anchorResult:  table returned by _.apply_anchor_translation (may be nil)
+local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit, dedupeResult, anchorResult)
     local parts = {}
     if selfLoopsRemoved > 0 then
         parts[#parts + 1] = selfLoopsRemoved
             .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
+    end
+    if dedupeResult and dedupeResult.removed > 0 then
+        parts[#parts + 1] = dedupeResult.removed
+            .. " duplicate room" .. (dedupeResult.removed == 1 and "" or "s") .. " merged"
+    end
+    if dedupeResult and dedupeResult.skipped > 0 then
+        parts[#parts + 1] = dedupeResult.skipped
+            .. " duplicate group" .. (dedupeResult.skipped == 1 and "" or "s")
+            .. " skipped (all locked)"
     end
     if movedCount > 0 then
         parts[#parts + 1] = movedCount
@@ -719,10 +730,30 @@ local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audi
             .. " shared-target bug" .. (snapResult.shared_target_bug == 1 and "" or "s")
             .. " (in-area duplicate exit — data issue)"
     end
+    if anchorResult and anchorResult.translated > 0 then
+        parts[#parts + 1] = anchorResult.translated
+            .. " sub-graph" .. (anchorResult.translated == 1 and "" or "s")
+            .. " aligned to game coords"
+    end
+    if anchorResult and anchorResult.unanchored_subgraphs > 0 then
+        parts[#parts + 1] = anchorResult.unanchored_subgraphs
+            .. " sub-graph" .. (anchorResult.unanchored_subgraphs == 1 and "" or "s")
+            .. " unanchored (no coord data)"
+    end
+    if anchorResult and anchorResult.anchor_disagreements > 0 then
+        parts[#parts + 1] = anchorResult.anchor_disagreements
+            .. " anchor disagreement" .. (anchorResult.anchor_disagreements == 1 and "" or "s")
+            .. " (picked lowest-id anchor)"
+    end
+    if anchorResult and anchorResult.skipped > 0 then
+        parts[#parts + 1] = anchorResult.skipped
+            .. " sub-graph" .. (anchorResult.skipped == 1 and "" or "s")
+            .. " not translated (locked room or collision)"
+    end
     if audit.duplicate_hash_rooms > 0 then
         parts[#parts + 1] = audit.duplicate_hash_rooms
             .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
-            .. " (re-enter to merge)"
+            .. " remaining (re-enter to merge)"
     end
     if audit.delta_mismatches > 0 then
         parts[#parts + 1] = audit.delta_mismatches
@@ -786,9 +817,19 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     local areaRooms        = getAreaRooms(areaID)
     if type(areaRooms) ~= "table" then areaRooms = {} end
 
-    -- Strip self-loop exits before BFS so the reconcile doesn't follow them.
+    -- 1. Strip self-loop exits before BFS so the reconcile doesn't follow them.
     local selfLoopsRemoved = _.strip_self_loop_exits(areaRooms)
 
+    -- 2. De-duplicate rooms that share the same hash.
+    --    This must run before reconcile because duplicate stubs cause phantom
+    --    occupancy that blocks _.reconcile_connected_rooms from moving rooms.
+    local posCache    = _.build_pos_cache(areaID)
+    local dedupeResult = map.dedupe_area_by_hash(areaID, posCache)
+    -- Refresh room list after potential deletes
+    areaRooms = getAreaRooms(areaID)
+    if type(areaRooms) ~= "table" then areaRooms = {} end
+
+    -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
     local moved = 0
     if allRooms then
         echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
@@ -814,15 +855,20 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         _.flatten_cardinal_connected_rooms(seedID)
     end
 
-    -- Snap in-area up/down room pairs to adjacent z-levels.
+    -- 4. Snap in-area up/down room pairs to adjacent z-levels.
     local snapResult = _.snap_vertical_pair(areaID)
 
-    -- Audit remaining anomalies in the (now-updated) area.
+    -- 5. Anchor translate: align sub-graphs to game coordinate frame using
+    --    user_data.coord values present on captured rooms.
+    local freshPosCache = _.build_pos_cache(areaID)
+    local anchorResult  = _.apply_anchor_translation(areaID, freshPosCache)
+
+    -- 6. Audit remaining anomalies in the (now-updated) area.
     local freshRooms = getAreaRooms(areaID)
     local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
 
     updateMap()
-    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit)
+    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit, dedupeResult, anchorResult)
 end
 
 function map.normalize_all_areas(maxPasses, maxMoves)
@@ -835,10 +881,12 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         return
     end
 
-    local totalSelfLoops = 0
-    local totalMoved     = 0
-    local totalSnapped   = 0
-    local areaCount      = 0
+    local totalSelfLoops  = 0
+    local totalDedupe     = 0
+    local totalMoved      = 0
+    local totalSnapped    = 0
+    local totalTranslated = 0
+    local areaCount       = 0
     local areaNames      = {}
     for name, _ in pairs(areas) do areaNames[#areaNames + 1] = name end
     table.sort(areaNames)
@@ -848,6 +896,11 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         local areaRooms = getAreaRooms(id)
         if type(areaRooms) == "table" and #areaRooms > 0 then
             totalSelfLoops = totalSelfLoops + _.strip_self_loop_exits(areaRooms)
+            local posCache     = _.build_pos_cache(id)
+            local dedupeResult = map.dedupe_area_by_hash(id, posCache)
+            totalDedupe = totalDedupe + (dedupeResult.removed or 0)
+            areaRooms = getAreaRooms(id)
+            if type(areaRooms) ~= "table" then areaRooms = {} end
             local globalVisited = {}
             for _, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
@@ -858,6 +911,9 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             end
             local snapResult = _.snap_vertical_pair(id)
             totalSnapped = totalSnapped + snapResult.snapped
+            local freshPosCache = _.build_pos_cache(id)
+            local anchorResult  = _.apply_anchor_translation(id, freshPosCache)
+            totalTranslated = totalTranslated + (anchorResult.translated or 0)
             areaCount    = areaCount + 1
         end
     end
@@ -868,10 +924,19 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         parts[#parts + 1] = totalSelfLoops
             .. " self-loop exit" .. (totalSelfLoops == 1 and "" or "s") .. " removed"
     end
+    if totalDedupe > 0 then
+        parts[#parts + 1] = totalDedupe
+            .. " duplicate room" .. (totalDedupe == 1 and "" or "s") .. " merged"
+    end
     parts[#parts + 1] = totalMoved .. " room" .. (totalMoved == 1 and "" or "s") .. " repositioned"
     if totalSnapped > 0 then
         parts[#parts + 1] = totalSnapped
             .. " vertical pair" .. (totalSnapped == 1 and "" or "s") .. " snapped"
+    end
+    if totalTranslated > 0 then
+        parts[#parts + 1] = totalTranslated
+            .. " sub-graph" .. (totalTranslated == 1 and "" or "s")
+            .. " aligned to game coords"
     end
     echo(table.concat(parts, ", ") .. " across "
         .. areaCount .. " area" .. (areaCount == 1 and "" or "s") .. ".\n")

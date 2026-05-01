@@ -1057,6 +1057,496 @@ function _.audit_layout_anomalies(roomIDs, areaID)
     return counts
 end
 
+-- --------------------------------------------------------------------------
+-- De-duplication helpers
+-- --------------------------------------------------------------------------
+
+-- Returns a table of groups: each group is a list of roomIDs that share the
+-- same non-empty hash.  Only groups with ≥ 2 members are included.
+function _.find_duplicate_hash_groups(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return {} end
+    if type(getRoomHashByID) ~= "function" then return {} end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then return {} end
+    local seen   = {}  -- hash → first roomID
+    local groups = {}  -- hash → {roomID, ...} (only when dup found)
+    for _, rid in ipairs(rooms) do
+        local h = getRoomHashByID(rid)
+        if type(h) == "string" and h ~= "" then
+            if seen[h] then
+                if not groups[h] then
+                    groups[h] = { seen[h] }
+                end
+                groups[h][#groups[h] + 1] = rid
+            else
+                seen[h] = rid
+            end
+        end
+    end
+    local result = {}
+    for _, g in pairs(groups) do
+        result[#result + 1] = g
+    end
+    return result
+end
+
+-- Choose which room in a duplicate group should survive.
+-- Priority (descending):
+--   1. Player's current room or locked room (must not be deleted)
+--   2. Most exits (richest connectivity)
+--   3. Name is not equal to the room's own hash (real name)
+--   4. Has user_data.coord (game-authoritative position)
+--   5. Lowest room id (deterministic tiebreaker)
+function _.choose_survivor(group)
+    if type(group) ~= "table" or #group == 0 then return nil end
+    local playerRoom = _.current_player_room_id()
+    local best       = nil
+    local bestScore  = nil
+
+    for _, rid in ipairs(group) do
+        local score    = {}
+        -- criterion 1: immobile (player or locked)
+        score[1]       = (rid == playerRoom or _.is_room_locked(rid)) and 1 or 0
+        -- criterion 2: exit count
+        local exits    = getRoomExits(rid)
+        score[2]       = type(exits) == "table" and (function()
+            local n = 0; for _ in pairs(exits) do n = n + 1 end; return n
+        end)() or 0
+        -- criterion 3: name is not the hash string
+        local name     = type(getRoomName) == "function" and getRoomName(rid) or ""
+        local hash     = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or ""
+        score[3]       = (name ~= hash and name ~= "") and 1 or 0
+        -- criterion 4: has user_data.coord
+        local coord    = getRoomUserData(rid, "coord")
+        score[4]       = (type(coord) == "string" and coord ~= "") and 1 or 0
+        -- criterion 5: lower id is better (negate for "higher = better" sort)
+        score[5]       = -rid
+
+        if bestScore == nil then
+            best      = rid
+            bestScore = score
+        else
+            for i = 1, 5 do
+                if score[i] > bestScore[i] then
+                    best      = rid
+                    bestScore = score
+                    break
+                elseif score[i] < bestScore[i] then
+                    break
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Build a reverse exit index for ALL rooms across all areas:
+--   index[targetID] = { {sourceID, kind="normal", dir=...}, {sourceID, kind="special", cmd=...}, ... }
+-- Building this once is efficient for batch merges.
+local function build_reverse_exit_index(targetIDs)
+    local targetSet = {}
+    for _, id in ipairs(targetIDs) do targetSet[id] = true end
+
+    local index = {}
+    local allRooms = type(getRooms) == "function" and getRooms() or {}
+    for rid in pairs(allRooms) do
+        -- Normal exits
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            for dir, tgt in pairs(exits) do
+                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                if type(tgt) == "number" and targetSet[tgt] then
+                    if not index[tgt] then index[tgt] = {} end
+                    index[tgt][#index[tgt] + 1] = { sourceID = rid, kind = "normal", dir = dir }
+                end
+            end
+        end
+        -- Special exits (getSpecialExitsSwap returns cmd→targetID)
+        if type(getSpecialExitsSwap) == "function" then
+            local sp = getSpecialExitsSwap(rid)
+            if type(sp) == "table" then
+                for cmd, tgt in pairs(sp) do
+                    if type(tgt) == "string" then tgt = tonumber(tgt) end
+                    if type(tgt) == "number" and targetSet[tgt] then
+                        if not index[tgt] then index[tgt] = {} end
+                        index[tgt][#index[tgt] + 1] = { sourceID = rid, kind = "special", cmd = cmd }
+                    end
+                end
+            end
+        end
+    end
+    return index
+end
+
+-- Merge loserID into survivorID:
+--  - Rewrites all inbound exits pointing at loser → survivor (normal + special).
+--  - Merges loser's outbound normal exits onto survivor (skip dirs survivor already has).
+--  - Merges loser's outbound special exits onto survivor (skip cmds survivor already has).
+--  - Copies user_data keys from loser to survivor only when key is missing on survivor.
+--  - Clears loser's hash binding so getRoomIDbyHash no longer returns the deleted id.
+--  - Drops loser from posCache and deletes it.
+-- `revIndex` is the reverse exit index produced by build_reverse_exit_index (optional
+-- optimisation — pass nil to build a one-off scan, but that is slow in batch).
+function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
+    if survivorID == loserID then return end
+    if type(survivorID) ~= "number" or survivorID < 1 then return end
+    if type(loserID) ~= "number" or loserID < 1 then return end
+
+    -- 1. Rewrite inbound exits: normal
+    local inboundList = revIndex and (revIndex[loserID] or {}) or (function()
+        local tmp = {}
+        local idx = build_reverse_exit_index({ loserID })
+        for _, entry in ipairs(idx[loserID] or {}) do tmp[#tmp + 1] = entry end
+        return tmp
+    end)()
+
+    for _, entry in ipairs(inboundList) do
+        local src = entry.sourceID
+        if entry.kind == "normal" then
+            local dir = entry.dir
+            -- Normalise numeric dir keys to string names (Mudlet sometimes returns ints)
+            if type(dir) == "number" then dir = _.stubmapFlipped[dir] end
+            if type(dir) == "string" then
+                pcall(setExit, src, survivorID, dir)
+                -- Preserve door state on the source room's exit direction
+                if getDoors and setDoor then
+                    local srcDoors = getDoors(src)
+                    if type(srcDoors) == "table" and srcDoors[dir] and srcDoors[dir] ~= 0 then
+                        pcall(setDoor, src, dir, srcDoors[dir])
+                    end
+                end
+            end
+        elseif entry.kind == "special" then
+            -- Rewrite the SOURCE room's special exit cmd to point at survivorID
+            local src = entry.sourceID
+            local cmd = entry.cmd
+            if type(addSpecialExit) == "function" and type(clearSpecialExit) == "function" then
+                pcall(clearSpecialExit, src, cmd)
+                pcall(addSpecialExit, src, survivorID, cmd)
+            end
+        end
+    end
+
+    -- 2. Merge loser's outbound normal exits → survivor
+    local loserExits    = getRoomExits(loserID)
+    local survivorExits = getRoomExits(survivorID)
+    if type(loserExits) == "table" then
+        for dir, tgt in pairs(loserExits) do
+            if type(tgt) == "string" then tgt = tonumber(tgt) end
+            if type(dir) == "number" then dir = _.stubmapFlipped[dir] end
+            if type(dir) == "string" and type(tgt) == "number" and tgt > 0 and tgt ~= loserID then
+                local survivorHasDir = type(survivorExits) == "table" and survivorExits[dir] ~= nil
+                if not survivorHasDir then
+                    pcall(setExit, survivorID, tgt, dir)
+                    -- Carry door state
+                    if getDoors and setDoor then
+                        local loserDoors = getDoors(loserID)
+                        if type(loserDoors) == "table" and loserDoors[dir] and loserDoors[dir] ~= 0 then
+                            pcall(setDoor, survivorID, dir, loserDoors[dir])
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Merge loser's outbound special exits → survivor
+    if type(getSpecialExitsSwap) == "function" and type(addSpecialExit) == "function" then
+        local loserSp    = getSpecialExitsSwap(loserID)
+        local survivorSp = getSpecialExitsSwap(survivorID)
+        if type(loserSp) == "table" then
+            for cmd, tgt in pairs(loserSp) do
+                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                if type(tgt) == "number" and tgt > 0 and tgt ~= loserID then
+                    local survivorHasCmd = type(survivorSp) == "table" and survivorSp[cmd] ~= nil
+                    if not survivorHasCmd then
+                        pcall(addSpecialExit, survivorID, tgt, cmd)
+                    end
+                end
+            end
+        end
+    end
+
+    -- 4. Copy user_data keys from loser to survivor (missing keys only)
+    if type(getAllRoomUserData) == "function" then
+        local loserData    = getAllRoomUserData(loserID)
+        local survivorData = getAllRoomUserData(survivorID)
+        if type(loserData) == "table" then
+            for k, v in pairs(loserData) do
+                if k ~= "locked" then  -- never carry lock state from loser
+                    local survivorHas = type(survivorData) == "table" and survivorData[k] ~= nil
+                    if not survivorHas then
+                        setRoomUserData(survivorID, k, v)
+                    end
+                end
+            end
+        end
+    end
+
+    -- 5. Clear hash on loser so the binding is released before deletion
+    if type(setRoomIDbyHash) == "function" then
+        pcall(setRoomIDbyHash, loserID, "")
+    end
+
+    -- 6. Drop loser from posCache
+    if posCache then
+        local lx, ly, lz = getRoomCoordinates(loserID)
+        _.pos_cache_drop(posCache, lx, ly, lz, loserID)
+        -- Also remove from the _rooms list in the cache
+        if type(posCache._rooms) == "table" then
+            for i = #posCache._rooms, 1, -1 do
+                if posCache._rooms[i] == loserID then
+                    table.remove(posCache._rooms, i)
+                    break
+                end
+            end
+        end
+    end
+
+    -- 7. Delete the loser room
+    pcall(deleteRoom, loserID)
+end
+
+-- De-duplicate all rooms in areaID that share the same hash.
+-- Returns { groups=N, removed=M, skipped=K }.
+-- posCache is optional; if provided it is kept up-to-date so the caller
+-- (normalize pipeline) can reuse it for the subsequent reconcile pass.
+function map.dedupe_area_by_hash(areaID, posCache)
+    if type(areaID) ~= "number" or areaID < 1 then
+        return { groups = 0, removed = 0, skipped = 0 }
+    end
+    local groups  = _.find_duplicate_hash_groups(areaID)
+    local removed = 0
+    local skipped = 0
+
+    if #groups == 0 then
+        return { groups = 0, removed = 0, skipped = 0 }
+    end
+
+    -- Collect all loser IDs so we can build the reverse exit index once.
+    -- First pass: choose survivors.
+    local survivorFor = {}  -- loserID → survivorID
+    local losers      = {}  -- list of loserIDs
+    for _, group in ipairs(groups) do
+        -- If ALL members are immobile we cannot touch this group.
+        local allImmobile = true
+        for _, rid in ipairs(group) do
+            if not _.is_room_immobile(rid) then allImmobile = false; break end
+        end
+        if allImmobile then
+            skipped = skipped + 1
+        else
+            local survivor = _.choose_survivor(group)
+            for _, rid in ipairs(group) do
+                if rid ~= survivor then
+                    survivorFor[rid] = survivor
+                    losers[#losers + 1] = rid
+                end
+            end
+        end
+    end
+
+    if #losers == 0 then
+        return { groups = #groups, removed = 0, skipped = skipped }
+    end
+
+    -- Build reverse exit index once for all losers.
+    local revIndex = build_reverse_exit_index(losers)
+
+    for _, loserID in ipairs(losers) do
+        local survivor = survivorFor[loserID]
+        _.merge_duplicate_room(survivor, loserID, posCache, revIndex)
+        removed = removed + 1
+    end
+
+    return { groups = #groups, removed = removed, skipped = skipped }
+end
+
+-- --------------------------------------------------------------------------
+-- Anchor-based coordinate translation helpers
+-- --------------------------------------------------------------------------
+
+-- Parse a "X,Y" or "X,Y,Z" coord string (with optional spaces) into numbers.
+-- Returns x, y, z (z defaults to nil if not present).
+local function parse_coord_string(s)
+    if type(s) ~= "string" then return nil end
+    s = s:match("^%s*(.-)%s*$")  -- trim
+    local parts = {}
+    for part in s:gmatch("[^,]+") do
+        parts[#parts + 1] = tonumber(part:match("^%s*(.-)%s*$"))
+    end
+    if #parts >= 2 and parts[1] and parts[2] then
+        return parts[1], parts[2], parts[3]
+    end
+    return nil
+end
+
+-- Returns a table { [roomID] = {x, y, z} } for every room in areaID that
+-- has a valid user_data.coord string.
+function _.collect_coord_anchors(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return {} end
+    local rooms   = getAreaRooms(areaID)
+    local anchors = {}
+    if type(rooms) ~= "table" then return anchors end
+    for _, rid in ipairs(rooms) do
+        local coordStr = getRoomUserData(rid, "coord")
+        if type(coordStr) == "string" and coordStr ~= "" then
+            local ax, ay, az = parse_coord_string(coordStr)
+            if ax and ay then
+                anchors[rid] = { x = ax, y = ay, z = az }
+            end
+        end
+    end
+    return anchors
+end
+
+-- BFS-walk the area from seedID and collect all reachable room IDs.
+-- visited (optional) lets callers share a visited set across components.
+local function bfs_component(seedID, areaID, visited)
+    visited = visited or {}
+    if visited[seedID] then return {} end
+    local component = {}
+    local queue     = { seedID }
+    local qHead     = 1
+    visited[seedID] = true
+    while qHead <= #queue do
+        local cur = queue[qHead]; qHead = qHead + 1
+        component[#component + 1] = cur
+        local exits = getRoomExits(cur)
+        if type(exits) == "table" then
+            for _, tgt in pairs(exits) do
+                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                if type(tgt) == "number" and tgt > 0
+                    and getRoomArea(tgt) == areaID
+                    and not visited[tgt] then
+                    visited[tgt] = true
+                    queue[#queue + 1] = tgt
+                end
+            end
+        end
+    end
+    return component
+end
+
+-- Translate every room in `component` by (dx, dy), skipping immobile rooms.
+-- Returns true if the full translation was applied, false if any immobile
+-- room would need to move (in that case NO rooms are moved).
+-- posCache is updated for each move.
+function _.translate_subgraph(component, dx, dy, posCache)
+    if dx == 0 and dy == 0 then return true end
+
+    -- Check that no immobile room needs to move AND preflight collision check.
+    -- We allow collisions WITHIN this component (they'll move away together).
+    local componentSet = {}
+    for _, rid in ipairs(component) do componentSet[rid] = true end
+
+    for _, rid in ipairs(component) do
+        local rx, ry, rz = getRoomCoordinates(rid)
+        if rx == nil then return false end  -- room has no coords, abort
+        local nx, ny = rx + dx, ry + dy
+        if _.is_room_immobile(rid) and (nx ~= rx or ny ~= ry) then
+            return false  -- all-or-nothing: an immobile room blocks the whole translate
+        end
+        -- Preflight collision: is the destination occupied by a room NOT in this component?
+        if posCache then
+            local occupants = _.pos_cache_get(posCache, nx, ny, rz)
+            if type(occupants) == "table" then
+                for _, oid in ipairs(occupants) do
+                    if not componentSet[oid] then
+                        return false  -- collision with outside room — abort
+                    end
+                end
+            end
+        end
+    end
+
+    -- Apply the translation
+    for _, rid in ipairs(component) do
+        local rx, ry, rz = getRoomCoordinates(rid)
+        if rx ~= nil then
+            setRoomCoordinates(rid, rx + dx, ry + dy, rz)
+            if posCache then
+                _.pos_cache_move(posCache, rx, ry, rz, rx + dx, ry + dy, rz, rid)
+            end
+        end
+    end
+    return true
+end
+
+-- For each connected sub-graph in areaID:
+--   - Collect anchor rooms (those with user_data.coord).
+--   - Compute Δ = (coord.x − room.x, coord.y − room.y) per anchor.
+--   - If all anchors agree → translate the sub-graph.
+--   - If anchors disagree → pick the Δ from the lowest anchor id, count disagreement.
+--   - If no anchors → count unanchored sub-graph.
+-- Returns { anchor_disagreements=N, unanchored_subgraphs=N, translated=N, skipped=N }.
+function _.apply_anchor_translation(areaID, posCache)
+    local result = { anchor_disagreements = 0, unanchored_subgraphs = 0, translated = 0, skipped = 0 }
+    if type(areaID) ~= "number" or areaID < 1 then return result end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then return result end
+
+    local anchors  = _.collect_coord_anchors(areaID)
+    local visited  = {}
+
+    for _, seedID in ipairs(rooms) do
+        if not visited[seedID] then
+            local component = bfs_component(seedID, areaID, visited)
+            if #component > 0 then
+                -- Find anchors in this component
+                local compAnchors = {}
+                for _, rid in ipairs(component) do
+                    if anchors[rid] then
+                        compAnchors[#compAnchors + 1] = rid
+                    end
+                end
+
+                if #compAnchors == 0 then
+                    result.unanchored_subgraphs = result.unanchored_subgraphs + 1
+                else
+                    -- Compute Δ per anchor
+                    local deltas    = {}
+                    local disagreed = false
+                    local refDX, refDY, refID
+
+                    for _, aid in ipairs(compAnchors) do
+                        local ax, ay, _az = getRoomCoordinates(aid)
+                        if ax then
+                            local tdx = anchors[aid].x - ax
+                            local tdy = anchors[aid].y - ay
+                            if refDX == nil then
+                                refDX, refDY, refID = tdx, tdy, aid
+                            elseif tdx ~= refDX or tdy ~= refDY then
+                                disagreed = true
+                                -- prefer lower id
+                                if aid < refID then
+                                    refDX, refDY, refID = tdx, tdy, aid
+                                end
+                            end
+                            deltas[#deltas + 1] = { dx = tdx, dy = tdy, id = aid }
+                        end
+                    end
+
+                    if disagreed then
+                        result.anchor_disagreements = result.anchor_disagreements + 1
+                    end
+
+                    if refDX ~= nil then
+                        local ok = _.translate_subgraph(component, refDX, refDY, posCache)
+                        if ok then
+                            result.translated = result.translated + 1
+                        else
+                            result.skipped = result.skipped + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
 function _.get_area_name_by_id(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return nil end
     local areas = getAreaTable()
