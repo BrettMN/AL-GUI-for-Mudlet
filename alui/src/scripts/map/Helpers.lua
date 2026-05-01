@@ -1070,7 +1070,7 @@ function _.find_duplicate_hash_groups(areaID)
     if type(rooms) ~= "table" then return {} end
     local seen   = {}  -- hash → first roomID
     local groups = {}  -- hash → {roomID, ...} (only when dup found)
-    for _, rid in ipairs(rooms) do
+    for _i, rid in ipairs(rooms) do
         local h = getRoomHashByID(rid)
         if type(h) == "string" and h ~= "" then
             if seen[h] then
@@ -1084,7 +1084,7 @@ function _.find_duplicate_hash_groups(areaID)
         end
     end
     local result = {}
-    for _, g in pairs(groups) do
+    for _i, g in pairs(groups) do
         result[#result + 1] = g
     end
     return result
@@ -1103,7 +1103,7 @@ function _.choose_survivor(group)
     local best       = nil
     local bestScore  = nil
 
-    for _, rid in ipairs(group) do
+    for _i, rid in ipairs(group) do
         local score    = {}
         -- criterion 1: immobile (player or locked)
         score[1]       = (rid == playerRoom or _.is_room_locked(rid)) and 1 or 0
@@ -1145,7 +1145,7 @@ end
 -- Building this once is efficient for batch merges.
 local function build_reverse_exit_index(targetIDs)
     local targetSet = {}
-    for _, id in ipairs(targetIDs) do targetSet[id] = true end
+    for _i, id in ipairs(targetIDs) do targetSet[id] = true end
 
     local index = {}
     local allRooms = type(getRooms) == "function" and getRooms() or {}
@@ -1196,11 +1196,11 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
     local inboundList = revIndex and (revIndex[loserID] or {}) or (function()
         local tmp = {}
         local idx = build_reverse_exit_index({ loserID })
-        for _, entry in ipairs(idx[loserID] or {}) do tmp[#tmp + 1] = entry end
+        for _i, entry in ipairs(idx[loserID] or {}) do tmp[#tmp + 1] = entry end
         return tmp
     end)()
 
-    for _, entry in ipairs(inboundList) do
+    for _i, entry in ipairs(inboundList) do
         local src = entry.sourceID
         if entry.kind == "normal" then
             local dir = entry.dir
@@ -1327,17 +1327,17 @@ function map.dedupe_area_by_hash(areaID, posCache)
     -- First pass: choose survivors.
     local survivorFor = {}  -- loserID → survivorID
     local losers      = {}  -- list of loserIDs
-    for _, group in ipairs(groups) do
+    for _i, group in ipairs(groups) do
         -- If ALL members are immobile we cannot touch this group.
         local allImmobile = true
-        for _, rid in ipairs(group) do
+        for _j, rid in ipairs(group) do
             if not _.is_room_immobile(rid) then allImmobile = false; break end
         end
         if allImmobile then
             skipped = skipped + 1
         else
             local survivor = _.choose_survivor(group)
-            for _, rid in ipairs(group) do
+            for _j, rid in ipairs(group) do
                 if rid ~= survivor then
                     survivorFor[rid] = survivor
                     losers[#losers + 1] = rid
@@ -1353,7 +1353,7 @@ function map.dedupe_area_by_hash(areaID, posCache)
     -- Build reverse exit index once for all losers.
     local revIndex = build_reverse_exit_index(losers)
 
-    for _, loserID in ipairs(losers) do
+    for _i, loserID in ipairs(losers) do
         local survivor = survivorFor[loserID]
         _.merge_duplicate_room(survivor, loserID, posCache, revIndex)
         removed = removed + 1
@@ -1388,7 +1388,7 @@ function _.collect_coord_anchors(areaID)
     local rooms   = getAreaRooms(areaID)
     local anchors = {}
     if type(rooms) ~= "table" then return anchors end
-    for _, rid in ipairs(rooms) do
+    for _i, rid in ipairs(rooms) do
         local coordStr = getRoomUserData(rid, "coord")
         if type(coordStr) == "string" and coordStr ~= "" then
             local ax, ay, az = parse_coord_string(coordStr)
@@ -1414,7 +1414,7 @@ local function bfs_component(seedID, areaID, visited)
         component[#component + 1] = cur
         local exits = getRoomExits(cur)
         if type(exits) == "table" then
-            for _, tgt in pairs(exits) do
+            for _i, tgt in pairs(exits) do
                 if type(tgt) == "string" then tgt = tonumber(tgt) end
                 if type(tgt) == "number" and tgt > 0
                     and getRoomArea(tgt) == areaID
@@ -1438,9 +1438,9 @@ function _.translate_subgraph(component, dx, dy, posCache)
     -- Check that no immobile room needs to move AND preflight collision check.
     -- We allow collisions WITHIN this component (they'll move away together).
     local componentSet = {}
-    for _, rid in ipairs(component) do componentSet[rid] = true end
+    for _i, rid in ipairs(component) do componentSet[rid] = true end
 
-    for _, rid in ipairs(component) do
+    for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
         if rx == nil then return false end  -- room has no coords, abort
         local nx, ny = rx + dx, ry + dy
@@ -1451,7 +1451,7 @@ function _.translate_subgraph(component, dx, dy, posCache)
         if posCache then
             local occupants = _.pos_cache_get(posCache, nx, ny, rz)
             if type(occupants) == "table" then
-                for _, oid in ipairs(occupants) do
+                for _j, oid in ipairs(occupants) do
                     if not componentSet[oid] then
                         return false  -- collision with outside room — abort
                     end
@@ -1461,7 +1461,7 @@ function _.translate_subgraph(component, dx, dy, posCache)
     end
 
     -- Apply the translation
-    for _, rid in ipairs(component) do
+    for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
         if rx ~= nil then
             setRoomCoordinates(rid, rx + dx, ry + dy, rz)
@@ -1489,13 +1489,13 @@ function _.apply_anchor_translation(areaID, posCache)
     local anchors  = _.collect_coord_anchors(areaID)
     local visited  = {}
 
-    for _, seedID in ipairs(rooms) do
+    for _i, seedID in ipairs(rooms) do
         if not visited[seedID] then
             local component = bfs_component(seedID, areaID, visited)
             if #component > 0 then
                 -- Find anchors in this component
                 local compAnchors = {}
-                for _, rid in ipairs(component) do
+                for _j, rid in ipairs(component) do
                     if anchors[rid] then
                         compAnchors[#compAnchors + 1] = rid
                     end
@@ -1509,7 +1509,7 @@ function _.apply_anchor_translation(areaID, posCache)
                     local disagreed = false
                     local refDX, refDY, refID
 
-                    for _, aid in ipairs(compAnchors) do
+                    for _j, aid in ipairs(compAnchors) do
                         local ax, ay, _az = getRoomCoordinates(aid)
                         if ax then
                             local tdx = anchors[aid].x - ax
