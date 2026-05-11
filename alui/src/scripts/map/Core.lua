@@ -387,6 +387,55 @@ local function handle_move(isLastInBatch)
                 end
             end
 
+            -- Self-heal: if this room is offset from every horizontal
+            -- neighbour by the same non-zero dz, snap this room onto their
+            -- shared z-plane.  This corrects rooms that were mis-placed by
+            -- the (now-fixed) forcedZ override, e.g. a "dense forest" room
+            -- at z=0 while its entire cluster lives at z=33.
+            -- Only runs when the room is not locked/pinned by the user.
+            if not _.is_room_locked(rnum) then
+                local rx, ry, rz = getRoomCoordinates(rnum)
+                if rx ~= nil and type(info.exits) == "table" then
+                    local sharedDz   = nil
+                    local consistent = true
+                    for dir, targetVnum in pairs(info.exits) do
+                        local shift = type(_.get_shift_for_exit_key) == "function"
+                            and _.get_shift_for_exit_key(dir) or nil
+                        if shift and _.is_horizontal_shift and _.is_horizontal_shift(shift) then
+                            local tid = type(targetVnum) == "string"
+                                and getRoomIDbyHash(targetVnum) or nil
+                            if type(tid) == "number" and tid > 0 then
+                                local ta = getRoomArea(tid)
+                                if type(ta) == "number" and ta == currentAreaID then
+                                    local _tx, _ty, tz2 = getRoomCoordinates(tid)
+                                    if tz2 ~= nil then
+                                        local dz = tz2 - rz
+                                        if dz ~= 0 then
+                                            if sharedDz == nil then
+                                                sharedDz = dz
+                                            elseif sharedDz ~= dz then
+                                                consistent = false
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if consistent and sharedDz ~= nil and sharedDz ~= 0 then
+                        local newZ = rz + sharedDz
+                        _.debug_echo(string.format(
+                            "handle_move: self-heal room %d z %d→%d (all horizontal neighbours at z+%d)\n",
+                            rnum, rz, newZ, sharedDz))
+                        setRoomCoordinates(rnum, rx, ry, newZ)
+                        if posCache then
+                            _.pos_cache_move(posCache, rx, ry, rz, rx, ry, newZ, rnum)
+                        end
+                    end
+                end
+            end
+
             _.apply_current_room_environment(rnum, info.terrain)
             if getRoomChar(rnum) == "#" then
                 _.apply_room_environment(rnum, "Inside")

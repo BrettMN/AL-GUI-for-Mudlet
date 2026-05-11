@@ -95,7 +95,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 local tx = cx + shift[1]
                 local ty = cy + shift[2]
                 local tz = cz + shift[3]
-                if forcedZ and shift[3] == 0 then tz = forcedZ end
+                -- Do NOT override tz with forcedZ here: a horizontal neighbour
+                -- must share the current room's z-plane (cz). forcedZ is a
+                -- normalisation hint for whole-component passes, not for
+                -- individual room placement (see Data.lua forced_z_by_terrain_name).
                 local near = _.pos_cache_get(posCache, tx, ty, tz)
                 local realAtPos = nil
                 local function is_live_real(rid)
@@ -178,7 +181,8 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     local tx = cx + shift[1]
                     local ty = cy + shift[2]
                     local tz = cz + shift[3]
-                    if forcedZ and shift[3] == 0 then tz = forcedZ end
+                    -- Do NOT override tz with forcedZ: candidate search must look
+                    -- at the actual adjacent position on the current z-plane.
                     local near = _.pos_cache_get(posCache, tx, ty, tz)
                     if type(near) == "table" then
                         for _, rid in ipairs(near) do
@@ -230,9 +234,11 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     local ty = cy + shift[2]
                     local tz = cz + shift[3]
 
-                    if forcedZ and shift[3] == 0 then
-                        tz = forcedZ
-                    end
+                    -- Do NOT override tz with forcedZ here. A newly created
+                    -- neighbour must sit on the current room's z-plane (cz).
+                    -- Snapping to forcedZ (e.g. z=0 for "dense forest") is what
+                    -- caused room 310221 to be placed 33 levels below its siblings.
+                    -- forcedZ is a normalisation-pass hint only (see Data.lua).
 
                     local skipStretch = _.should_skip_stretch_for_area(areaID)
                     _.move_room_to_expected_position(targetID, targetVnum, areaID,
@@ -609,12 +615,14 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                                     if not alreadyOccupied and not safe_is_room_locked(targetID) then
                                         local tx, ty, tz = getRoomCoordinates(targetID)
                                         if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
-                                            local forcedZ = _.get_forced_z_for_room(targetID)
-                                            local finalZ  = (forcedZ ~= nil and shift[3] == 0) and forcedZ or expectedZ
-                                            if tx ~= expectedX or ty ~= expectedY or tz ~= finalZ then
-                                                setRoomCoordinates(targetID, expectedX, expectedY, finalZ)
+                                            -- Use expectedZ directly: it already reflects the anchor's
+                                            -- actual z-plane. Overriding with forcedZ was what snapped
+                                            -- terrain-labelled rooms to z=0 even when the whole cluster
+                                            -- lives at a different z (e.g. forest grid at z=33).
+                                            if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
+                                                setRoomCoordinates(targetID, expectedX, expectedY, expectedZ)
                                                 _.pos_cache_move(posCache, tx, ty, tz,
-                                                    expectedX, expectedY, finalZ, targetID)
+                                                    expectedX, expectedY, expectedZ, targetID)
                                                 passMove = passMove + 1
                                                 moved    = moved + 1
                                                 if moved >= maxMoves then return moved end
@@ -674,10 +682,12 @@ function _.flatten_cardinal_connected_rooms(anchorID)
                         and not visited[targetID] then
                         visited[targetID] = true
                         local tx, ty, tz = getRoomCoordinates(targetID)
-                        local forcedZ = _.get_forced_z_for_room(targetID)
-                        local targetZ = forcedZ ~= nil and forcedZ or cz
-                        if tz ~= targetZ and not safe_is_room_locked(targetID) then
-                            setRoomCoordinates(targetID, tx, ty, targetZ)
+                        -- Flatten to the anchor's actual z (cz), not forcedZ.
+                        -- forcedZ is a normalisation hint for whole-component passes;
+                        -- using it here snaps terrain-labelled rooms to z=0 even when
+                        -- the connected cluster lives at a different z level.
+                        if tz ~= cz and not safe_is_room_locked(targetID) then
+                            setRoomCoordinates(targetID, tx, ty, cz)
                         end
                         table.insert(queue, targetID)
                     end

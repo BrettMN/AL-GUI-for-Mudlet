@@ -121,7 +121,15 @@ for dir, vec in pairs(_.move_vectors) do
     end
 end
 
--- Terrain names that force rooms onto z = 0 (outdoor surface terrain)
+-- Terrain names whose "canonical" z-level is 0 (outdoor surface terrain).
+-- IMPORTANT – normalisation-pass hint only.
+-- This table is consulted by map.normalize_room_layout and
+-- map.recalculate_room_layout to migrate a *whole connected component* onto
+-- the surface z-plane.  It must NOT be used to override the z of a single
+-- freshly-created neighbour room during ordinary movement: doing so snaps
+-- rooms to z=0 even when the surrounding cluster lives at a different z,
+-- which produces the delta_mismatch anomaly described in the mapper audit.
+-- See _.get_forced_z_for_room for the query helper.
 _.forced_z_by_terrain_name = {
     ["plains"] = 0,
     ["light forest"] = 0,

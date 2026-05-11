@@ -324,6 +324,13 @@ function _.current_room_uses_grid_mode()
     return map.room_info.terrain ~= nil
 end
 
+-- Returns the "canonical" z-level for roomID based on its terrain, or nil if
+-- the terrain is not in _.forced_z_by_terrain_name.
+--
+-- USAGE CONSTRAINT: call this only from whole-component normalisation passes
+-- (normalize_room_layout, recalculate_room_layout).  Do NOT use it to place
+-- individual neighbours during movement — a horizontal exit neighbour must
+-- share the current room's z-plane (cz), regardless of terrain.
 function _.get_forced_z_for_room(roomID)
     if type(roomID) ~= "number" or roomID < 1 then return nil end
 
