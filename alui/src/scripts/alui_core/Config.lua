@@ -22,6 +22,7 @@ Config.defaults = {
         -- Border and spacing configurations
         sideBorderPercent = 25, -- 25% from Create_Background.lua
         topBorderPercent = 5,   -- 5% from Create_Background.lua
+        mainWindowPadding = 6,  -- extra inset around the main console (px)
         guiPadding = 10,        -- Gui_Padding from various files
         buttonWidth = 100,      -- Style_Button_Width from various files
 
@@ -155,6 +156,7 @@ Config.validators = {
     ui = {
         sideBorderPercent = function(v) return type(v) == "number" and v >= 0 and v <= 50 end,
         topBorderPercent = function(v) return type(v) == "number" and v >= 0 and v <= 50 end,
+        mainWindowPadding = function(v) return type(v) == "number" and v >= 0 and v <= 40 end,
         guiPadding = function(v) return type(v) == "number" and v >= 0 and v <= 100 end,
         buttonWidth = function(v) return type(v) == "number" and v >= 50 and v <= 500 end,
         resizeTimerDelay = function(v) return type(v) == "number" and v >= 0.01 and v <= 1.0 end

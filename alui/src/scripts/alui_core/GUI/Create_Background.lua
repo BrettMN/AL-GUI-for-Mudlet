@@ -78,9 +78,12 @@ end
 
 -- Core background setup function
 local function setBackground()
+    local mainWindowPadding = 6
+
     if Config.get then
         sideBorderPercent = Config.get("ui.sideBorderPercent", sideBorderPercent)
         topBorderPercent = Config.get("ui.topBorderPercent", topBorderPercent)
+        mainWindowPadding = Config.get("ui.mainWindowPadding", mainWindowPadding)
     end
 
     -- Use configuration values for dynamic sizing
@@ -110,7 +113,7 @@ local function setBackground()
     end
 
     if type(fontWidth) == "number" and fontWidth > 0 then
-        local mainContentWidth = width * (1 - ((sideBorderPercent * 2) / 100))
+        local mainContentWidth = (width * (1 - ((sideBorderPercent * 2) / 100))) - (mainWindowPadding * 2)
         local lineWidthAdjusted = math.max(20, math.floor(mainContentWidth / fontWidth) - 2)
         setWindowWrap("main", lineWidthAdjusted)
     end

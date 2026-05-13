@@ -12,18 +12,20 @@ local function setBorders()
     -- Use configuration values if available, otherwise defaults
     local sideBorderPercent = 0.25
     local topBorderPercent = 1 / 20 -- h/20 = h * (1/20)
+    local mainWindowPadding = 6
 
     if Config.get then
         sideBorderPercent = Config.get("ui.sideBorderPercent", 25) / 100 -- Convert percentage to decimal
         topBorderPercent = Config.get("ui.topBorderPercent", 5) / 100
+        mainWindowPadding = Config.get("ui.mainWindowPadding", 6)
     end
 
-    local sideBorder = w * sideBorderPercent
-    local topBorder = h * topBorderPercent
+    local sideBorder = (w * sideBorderPercent) + mainWindowPadding
+    local topBorder = (h * topBorderPercent) + mainWindowPadding
 
     setBorderLeft(sideBorder)
     setBorderTop(topBorder)
-    setBorderBottom(0)
+    setBorderBottom(mainWindowPadding)
     setBorderRight(sideBorder)
 end
 
