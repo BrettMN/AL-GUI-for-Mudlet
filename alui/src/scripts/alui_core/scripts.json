@@ -20,6 +20,10 @@
     "isActive": "yes"
   },
   {
+    "name": "Resize",
+    "isActive": "yes"
+  },
+  {
     "name": "GUI",
     "isActive": "yes",
     "isFolder": "yes"

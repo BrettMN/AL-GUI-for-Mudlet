@@ -78,6 +78,11 @@ end
 
 -- Core background setup function
 local function setBackground()
+    if Config.get then
+        sideBorderPercent = Config.get("ui.sideBorderPercent", sideBorderPercent)
+        topBorderPercent = Config.get("ui.topBorderPercent", topBorderPercent)
+    end
+
     -- Use configuration values for dynamic sizing
     local sideBorder = sideBorderPercent .. "%"
     local topBorder = topBorderPercent .. "%"
@@ -97,12 +102,18 @@ local function setBackground()
     -- GUI.Bottom:show()
 
     local width, _ = getMainWindowSize()
-    local fontSize = getFontSize()
-    local fontWidth, _ = calcFontSize(fontSize)
-    local lineWidth = width / fontWidth
-    local lineWidthAdjusted = (lineWidth / 2) - (fontWidth / 4)
+    local fontWidth = calcFontSize("main")
 
-    setWindowWrap("main", lineWidthAdjusted)
+    if type(fontWidth) ~= "number" or fontWidth <= 0 then
+        local fontSize = getFontSize()
+        fontWidth = calcFontSize(fontSize)
+    end
+
+    if type(fontWidth) == "number" and fontWidth > 0 then
+        local mainContentWidth = width * (1 - ((sideBorderPercent * 2) / 100))
+        local lineWidthAdjusted = math.max(20, math.floor(mainContentWidth / fontWidth) - 2)
+        setWindowWrap("main", lineWidthAdjusted)
+    end
 end
 
 -- Register function in both old and new namespaces for compatibility

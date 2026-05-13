@@ -8,6 +8,93 @@ local Config = (ALUI and ALUI.Config) or {}
 local Colors = (ALUI and ALUI.GUI and GUI.Colors) or {}
 local RM = ALUI and ALUI.ResourceManager
 
+local function getGuiPadding()
+    if Config.get then
+        return Config.get("ui.guiPadding", 10)
+    end
+    return 10
+end
+
+local function resizeElement(element, width, height, x, y)
+    if not element then
+        return
+    end
+
+    if x ~= nil and y ~= nil and type(element.move) == "function" then
+        element:move(x, y)
+    end
+
+    if (width ~= nil or height ~= nil) and type(element.resize) == "function" then
+        element:resize(width, height)
+    end
+end
+
+local function resizeContentAreas()
+    local guiPadding = getGuiPadding()
+    local surveyPadding = guiPadding * 1.6
+    local chatPadding = guiPadding * 1.4
+
+    if GUI.Map_Container and GUI.Mapper then
+        resizeElement(
+            GUI.Mapper,
+            GUI.Map_Container:get_width() - (guiPadding * 4),
+            GUI.Map_Container:get_height() - (guiPadding * 4),
+            guiPadding * 2,
+            guiPadding * 2
+        )
+    end
+
+    if GUI.Room_Container and GUI.Components and GUI.Components.roommini then
+        resizeElement(
+            GUI.Components.roommini,
+            GUI.Room_Container:get_width() - (guiPadding * 4),
+            GUI.Room_Container:get_height() - (guiPadding * 4),
+            guiPadding * 2,
+            guiPadding * 2
+        )
+    end
+
+    if GUI.Status_Container and GUI.Components and GUI.Components.combatmini then
+        resizeElement(
+            GUI.Components.combatmini,
+            GUI.Status_Container:get_width() - (guiPadding * 4),
+            GUI.Status_Container:get_height() - (guiPadding * 4),
+            guiPadding * 2,
+            guiPadding * 2
+        )
+    end
+
+    if GUI.Style_Container and GUI.Style_VBox then
+        resizeElement(
+            GUI.Style_VBox,
+            GUI.Style_Container:get_width() - (guiPadding * 2),
+            GUI.Style_Container:get_height() - (guiPadding * 2),
+            guiPadding,
+            guiPadding
+        )
+    end
+
+    if GUI.Survey_Container and GUI.Components and GUI.Components.surveymini then
+        resizeElement(
+            GUI.Components.surveymini,
+            GUI.Survey_Container:get_width() - (surveyPadding * 2),
+            GUI.Survey_Container:get_height() - (surveyPadding * 2),
+            surveyPadding,
+            surveyPadding
+        )
+    end
+
+    if GUI.Chat_Container and GUI.Components and GUI.Components.chat_cap then
+        resizeElement(
+            GUI.Components.chat_cap,
+            GUI.Chat_Container:get_width() - (chatPadding * 2),
+            GUI.Chat_Container:get_height() - (chatPadding * 2),
+            chatPadding,
+            chatPadding
+        )
+    end
+end
+
 -- Core box setup function with ResourceManager integration
 local function setBoxes()
     -- Clean up existing box resources first
@@ -346,6 +433,7 @@ local function setBoxes()
 end
 
 GUI.resizeBoxes = function()
+    resizeContentAreas()
     GUI.Box1:show()
     GUI.Box2:show()
     GUI.Box3:show()
@@ -392,6 +480,7 @@ end
 
 -- Register function in both old and new namespaces for compatibility
 GUI.setBoxes = setBoxes
+GUI.resizeContentAreas = resizeContentAreas
 
 -- Register in new ALUI namespace if available
 if GUI then
