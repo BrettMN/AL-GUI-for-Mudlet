@@ -194,7 +194,10 @@ local function make_room()
     end
     if type(info.terrain) == "string" and info.terrain ~= ""
         and not _.is_elevated_room_name(info.name) then
-        setRoomUserData(thisRoom, "terrain", info.terrain)
+        local storedTerrain = _.normalize_terrain_name(info.terrain)
+        if storedTerrain then
+            setRoomUserData(thisRoom, "terrain", storedTerrain)
+        end
     end
     for dir, id in pairs(info.exits) do
         if type(id) == "string" then
@@ -443,8 +446,9 @@ local function handle_move(isLastInBatch)
             if _.is_elevated_room_name(info.name) then
                 _.clear_room_user_data(rnum, "terrain")
             elseif type(info.terrain) == "string" and info.terrain ~= "" then
-                if getRoomUserData(rnum, "terrain") ~= info.terrain then
-                    setRoomUserData(rnum, "terrain", info.terrain)
+                local storedTerrain = _.normalize_terrain_name(info.terrain)
+                if storedTerrain and getRoomUserData(rnum, "terrain") ~= storedTerrain then
+                    setRoomUserData(rnum, "terrain", storedTerrain)
                 end
             else
                 _.clear_room_user_data(rnum, "terrain")

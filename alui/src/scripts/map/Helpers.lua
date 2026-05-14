@@ -57,7 +57,14 @@ function _.debug_echo(message)
 end
 
 function _.apply_room_environment(roomID, terrain)
+    if type(terrain) ~= "string" then return end
     local target = _.terrain_types[terrain]
+    if not target then
+        local canonical = _.normalize_terrain_name(terrain)
+        if canonical then
+            target = _.terrain_types[canonical]
+        end
+    end
     if not target then return end
     if getRoomEnv(roomID) ~= target.id then
         setRoomEnv(roomID, target.id)
@@ -94,7 +101,7 @@ function _.get_room_terrain_name(roomID)
 
     local storedTerrain = getRoomUserData(roomID, "terrain")
     if type(storedTerrain) == "string" and storedTerrain ~= "" then
-        return storedTerrain
+        return _.normalize_terrain_name(storedTerrain) or storedTerrain
     end
 
     local envID = getRoomEnv(roomID)
@@ -107,9 +114,9 @@ end
 -- given arrival, or nil if no adoptable placeholder is found.
 --
 -- A "placeholder" is a room created by create_neighbors_for_current_room
--- before the player has visited it:  env == unvisited (46) and its name is
--- a bare hash string (no spaces, exactly 32 hex chars) OR it has no linked
--- exits of its own.
+-- before the player has visited it. If the room still has its placeholder
+-- hash as its visible name, treat it as adoptable even when the user has
+-- manually set a terrain on it.
 --
 -- Lookup order:
 --  1. The room Mudlet already thinks is the target of prevRoomID's exit in
@@ -117,10 +124,14 @@ end
 --  2. getRoomsByPosition at the expected adjacent coordinate — fallback for
 --     cases where the exit hadn't been wired yet.
 local function is_placeholder(roomID)
+    local name = getRoomName(roomID) or ""
+    local roomHash = type(getRoomHashByID) == "function" and getRoomHashByID(roomID) or nil
+    if type(roomHash) == "string" and roomHash ~= "" and name == roomHash then
+        return true
+    end
     local unvisitedID = _.terrain_types["unvisited"] and _.terrain_types["unvisited"].id or 46
     if getRoomEnv(roomID) ~= unvisitedID then return false end
     -- Name is the raw hash (32 hex chars, no spaces) — as set in Layout.lua
-    local name = getRoomName(roomID) or ""
     if name:match("^[0-9a-f]+$") and #name >= 20 then return true end
     -- No linked exits either way = definitely placeholder
     local exits = getRoomExits(roomID)
@@ -315,7 +326,9 @@ function _.normalize_terrain_name(terrain)
     if type(terrain) ~= "string" then return nil end
     local value = terrain:gsub("^%s+", ""):gsub("%s+$", "")
     if value == "" then return nil end
-    return string.lower(value)
+    value = string.lower(value)
+    local canonical = _.terrain_canonical_names and _.terrain_canonical_names[value] or nil
+    return canonical or value
 end
 
 function _.current_room_uses_grid_mode()

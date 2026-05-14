@@ -62,14 +62,69 @@ _.terrain_types = {
     ["unvisited"] = { id = 46, r = 50, g = 50, b = 50 }, -- light grey placeholder
 }
 
--- Reverse lookup: envID → terrain name (first non-special match wins).
+-- Canonical user-facing terrain names. Variants that should behave like the
+-- same terrain (for menus, stored room data, and reverse lookups) map to a
+-- single preferred name here.
+_.terrain_canonical_names = {
+    ["inside"] = "Inside",
+    ["lake"] = "lake",
+    ["under the lake"] = "lake",
+    ["under lake"] = "lake",
+    ["river"] = "lake",
+    ["min river"] = "lake",
+    ["sw river"] = "lake",
+    ["w river"] = "lake",
+    ["nw river"] = "lake",
+    ["n river"] = "lake",
+    ["ne river"] = "lake",
+    ["e river"] = "lake",
+    ["se river"] = "lake",
+    ["s river"] = "lake",
+    ["max river"] = "lake",
+    ["under river"] = "lake",
+    ["pond"] = "lake",
+    ["ocean"] = "ocean",
+    ["under ocean"] = "ocean",
+    ["under the ocean"] = "ocean",
+}
+
+do
+    for name, spec in pairs(_.terrain_types) do
+        if type(spec) == "table" then
+            local lower = string.lower(name)
+            if _.terrain_canonical_names[lower] == nil then
+                _.terrain_canonical_names[lower] = name
+            end
+        end
+    end
+end
+
+_.terrain_menu_names = {}
+do
+    local seen = {}
+    for name, spec in pairs(_.terrain_types) do
+        if type(spec) == "table" then
+            local canonical = _.terrain_canonical_names[string.lower(name)] or name
+            if _.terrain_types[canonical] and not seen[canonical] then
+                seen[canonical] = true
+                _.terrain_menu_names[#_.terrain_menu_names + 1] = canonical
+            end
+        end
+    end
+    table.sort(_.terrain_menu_names)
+end
+
+-- Reverse lookup: envID → canonical terrain name.
 -- Built once here so Helpers.lua never has to scan terrain_types in a loop.
 _.envID_to_terrain = {}
 do
     local skip = { Inside = true, unvisited = true }
     for name, spec in pairs(_.terrain_types) do
-        if type(spec) == "table" and not _.envID_to_terrain[spec.id] and not skip[name] then
-            _.envID_to_terrain[spec.id] = name
+        if type(spec) == "table" then
+            local canonical = _.terrain_canonical_names[string.lower(name)] or name
+            if not skip[canonical] then
+                _.envID_to_terrain[spec.id] = canonical
+            end
         end
     end
 end

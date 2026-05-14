@@ -26,6 +26,17 @@ local function trim_whitespace(value)
     return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local function copy_selected_rooms(roomIDs)
+    if type(roomIDs) ~= "table" then return {} end
+    local copied = {}
+    for _, roomID in ipairs(roomIDs) do
+        if type(roomID) == "number" and roomID > 0 then
+            copied[#copied + 1] = roomID
+        end
+    end
+    return copied
+end
+
 -- --------------------------------------------------------------------------
 -- POI commands
 -- --------------------------------------------------------------------------
@@ -533,8 +544,8 @@ function map.apply_area_terrain()
         local storedTerrain = getRoomUserData(rid, "terrain")
 
         if envID == -1 or envID == 0 then
-            _.apply_room_environment(rid, map.room_info.terrain)
-            setRoomUserData(rid, "terrain", map.room_info.terrain)
+            _.apply_room_environment(rid, currentTerrain)
+            setRoomUserData(rid, "terrain", currentTerrain)
             envApplied = envApplied + 1
         elseif type(storedTerrain) ~= "string" or storedTerrain == "" then
             local reverseName = envToTerrain[envID]
@@ -826,6 +837,7 @@ end
 -- --------------------------------------------------------------------------
 
 local continue_walk, timerID
+local start_autowalk_to_room
 local maybe_reevaluate_autowalk -- forward declare; body is defined after compute_autowalk_path
 
 -- Initialise walk state on map.* so these are never nil globals.
@@ -1017,11 +1029,19 @@ function map.speedwalk(roomID, walkPath, walkDirs, options)
 end
 
 function doSpeedWalk()
-    if #speedWalkPath ~= 0 then
-        map.speedwalk(nil, speedWalkPath, speedWalkDir)
-    else
+    if #speedWalkPath == 0 or #speedWalkDir == 0 then
         echo("No path to chosen room found.\n")
+        return
     end
+
+    local targetRoomID = tonumber(speedWalkPath[#speedWalkPath])
+    if not targetRoomID or targetRoomID < 1 then
+        echo("No path to chosen room found.\n")
+        return
+    end
+
+    map.autowalk_target = targetRoomID
+    map.speedwalk(targetRoomID, speedWalkPath, speedWalkDir, { wait_for_room = true, delay = 0 })
 end
 
 -- --------------------------------------------------------------------------
@@ -1034,30 +1054,44 @@ end
 -- selection on a short interval and cache the most recent non-empty value
 -- so right-click handlers can fall back to the room the user actually
 -- intended to act on.
+local read_live_selected_rooms
+
 local function read_live_selected_room()
+    local roomIDs = read_live_selected_rooms()
+    if type(roomIDs) == "table" and #roomIDs > 0 then
+        return roomIDs[1]
+    end
+    return nil
+end
+
+read_live_selected_rooms = function()
     if type(getMapSelection) ~= "function" then return nil end
     local selection = getMapSelection()
     if type(selection) ~= "table" then return nil end
-    if type(selection.center) == "number" and selection.center > 0 then
-        return selection.center
+    local roomIDs = copy_selected_rooms(selection.rooms)
+    if #roomIDs > 0 then
+        return roomIDs
     end
-    if type(selection.rooms) == "table" and type(selection.rooms[1]) == "number"
-        and selection.rooms[1] > 0 then
-        return selection.rooms[1]
+    if type(selection.center) == "number" and selection.center > 0 then
+        return { selection.center }
     end
     return nil
 end
 
 local function refresh_selected_room_cache()
-    local roomID = read_live_selected_room()
-    if roomID then map.last_selected_room = roomID end
+    local roomIDs = read_live_selected_rooms()
+    if type(roomIDs) == "table" and #roomIDs > 0 then
+        map.last_selected_rooms = roomIDs
+        map.last_selected_room = roomIDs[1]
+    end
 end
 
 local function get_selected_map_room()
-    local roomID = read_live_selected_room()
-    if roomID then
-        map.last_selected_room = roomID
-        return roomID
+    local roomIDs = read_live_selected_rooms()
+    if type(roomIDs) == "table" and #roomIDs > 0 then
+        map.last_selected_rooms = roomIDs
+        map.last_selected_room = roomIDs[1]
+        return roomIDs[1]
     end
     -- Fallback: most recently observed selection (handles right-click misses
     -- that clear the selection before the menu event fires).
@@ -1066,8 +1100,29 @@ local function get_selected_map_room()
     return nil
 end
 
+local function get_selected_map_rooms()
+    local roomIDs = read_live_selected_rooms()
+    if type(roomIDs) == "table" and #roomIDs > 0 then
+        map.last_selected_rooms = roomIDs
+        map.last_selected_room = roomIDs[1]
+        return roomIDs
+    end
+
+    local cached = copy_selected_rooms(map.last_selected_rooms)
+    if #cached > 0 then
+        return cached
+    end
+
+    local roomID = get_selected_map_room()
+    if roomID then
+        return { roomID }
+    end
+    return {}
+end
+
 _.refresh_selected_room_cache = refresh_selected_room_cache
 _.get_selected_map_room       = get_selected_map_room
+_.get_selected_map_rooms      = get_selected_map_rooms
 
 -- Kill any existing timer before (re)creating it so script reloads don't
 -- stack orphaned repeating timers on top of each other.
@@ -1273,36 +1328,44 @@ maybe_reevaluate_autowalk = function()
     end
 end
 
+start_autowalk_to_room = function(targetRoomID)
+    if type(targetRoomID) ~= "number" or targetRoomID < 1 then
+        echo("No path to selected room found.\n")
+        return false
+    end
+
+    local currentRoomID = _.get_current_area_context()
+    if not currentRoomID or currentRoomID < 1 then
+        echo("Cannot travel: current room is unknown.\n")
+        return false
+    end
+
+    if currentRoomID == targetRoomID then
+        echo("Already at the selected room.\n")
+        return false
+    end
+
+    local pathFound, walkPath, walkDirs = compute_autowalk_path(currentRoomID, targetRoomID)
+    if not pathFound or type(walkPath) ~= "table" or #walkPath == 0 then
+        echo("No path to selected room found.\n")
+        return false
+    end
+
+    map.autowalk_target = targetRoomID
+    map.speedwalk(targetRoomID, walkPath, walkDirs, { wait_for_room = true, delay = 0 })
+    return true
+end
+
 function map.travel_to_selected_room(event, action, ...)
     local targetRoomID = get_selected_map_room()
     if not targetRoomID then
         echo("Select a room on the mapper, then right-click it to travel there.\n")
         return
     end
-
-    local currentRoomID = _.get_current_area_context()
-    if not currentRoomID or currentRoomID < 1 then
-        echo("Cannot travel: current room is unknown.\n")
-        return
-    end
-
-    if currentRoomID == targetRoomID then
-        echo("Already at the selected room.\n")
-        return
-    end
-
-    local pathFound, walkPath, walkDirs = compute_autowalk_path(currentRoomID, targetRoomID)
-    if not pathFound or type(walkPath) ~= "table" or #walkPath == 0 then
-        echo("No path to selected room found.\n")
-        return
-    end
-
     local resolvedAction = action
     if action == "alui-mapper-autowalk" then resolvedAction = "autowalk" end
-
     if resolvedAction == "autowalk" then
-        map.autowalk_target = targetRoomID
-        map.speedwalk(targetRoomID, walkPath, walkDirs, { wait_for_room = true, delay = 0 })
+        start_autowalk_to_room(targetRoomID)
     else
         echo("Unknown mapper travel action '" .. tostring(action) .. "'.\n")
     end
