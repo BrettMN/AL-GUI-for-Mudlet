@@ -35,8 +35,9 @@ RM.createTimer = function(name, delay, callback, recurring, category)
     -- Clean up existing timer if it exists
     RM.killTimer(name)
 
-    -- Create new timer
-    local timerId = recurring and tempTimer(delay, callback) or setTimer(callback, delay)
+    -- Create new timer using Mudlet's supported timer API.
+    -- tempTimer supports both one-shot and repeating timers via the third argument.
+    local timerId = tempTimer(delay, callback, recurring or false)
 
     -- Cache epoch to avoid multiple system calls
     local currentEpoch = getEpoch()
