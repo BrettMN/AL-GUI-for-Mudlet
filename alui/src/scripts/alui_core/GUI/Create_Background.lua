@@ -86,25 +86,31 @@ local function setBackground()
         mainWindowPadding = Config.get("ui.mainWindowPadding", mainWindowPadding)
     end
 
-    -- Use configuration values for dynamic sizing
-    local sideBorder = sideBorderPercent .. "%"
-    local topBorder = topBorderPercent .. "%"
+    local width, height = getMainWindowSize()
+    local sideBorderPx = (width * (sideBorderPercent / 100)) + mainWindowPadding
+    local topBorderPx = (height * (topBorderPercent / 100)) + mainWindowPadding
+    local centerWidthPx = math.max(1, width - (sideBorderPx * 2))
 
+    GUI.Left.x = 0
+    GUI.Left.y = 0
     GUI.Left.height = containerConfig.fullHeight
-    GUI.Left.width = sideBorder
+    GUI.Left.width = sideBorderPx
 
+    GUI.Right.x = width - sideBorderPx
+    GUI.Right.y = 0
     GUI.Right.height = containerConfig.fullHeight
-    GUI.Right.width = sideBorder
+    GUI.Right.width = sideBorderPx
 
-    GUI.Top.height = topBorder
-    GUI.Top.width = containerConfig.centerWidth
+    GUI.Top.x = sideBorderPx
+    GUI.Top.y = 0
+    GUI.Top.height = topBorderPx
+    GUI.Top.width = centerWidthPx
 
     GUI.Left:show()
     GUI.Right:show()
     GUI.Top:show()
     -- GUI.Bottom:show()
 
-    local width, _ = getMainWindowSize()
     local fontWidth = calcFontSize("main")
 
     if type(fontWidth) ~= "number" or fontWidth <= 0 then
@@ -113,7 +119,7 @@ local function setBackground()
     end
 
     if type(fontWidth) == "number" and fontWidth > 0 then
-        local mainContentWidth = (width * (1 - ((sideBorderPercent * 2) / 100))) - (mainWindowPadding * 2)
+        local mainContentWidth = centerWidthPx
         local lineWidthAdjusted = math.max(20, math.floor(mainContentWidth / fontWidth) - 2)
         setWindowWrap("main", lineWidthAdjusted)
     end
