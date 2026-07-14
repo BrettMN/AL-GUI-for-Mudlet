@@ -381,45 +381,54 @@ function map.clean_placeholders(areaNameArg)
         return
     end
 
-    -- Build reverse-exit index: for each room, record which rooms point to it.
-    -- We only care about non-placeholder sources.
-    local reverseExits = {} -- target_roomID → true if any real room exits to it
-    for _k, src in ipairs(rooms) do
-        if not _.is_placeholder(src) then
-            local srcExits = getRoomExits(src)
+    -- Build reverse-exit index and occupancy in one pass:
+    --   reverseExits[targetID] = true if any real room exits to targetID
+    --   posHasReal[key] = true if any real room occupies (x,y,z)
+    local reverseExits = {}
+    local posHasReal = {}
+    local placeholderPosByID = {}
+    local placeholders = {}
+    for _k, rid in ipairs(rooms) do
+        local isPlaceholder = _.is_placeholder(rid)
+
+        local x, y, z = getRoomCoordinates(rid)
+        if x ~= nil then
+            local pkey = tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
+            if isPlaceholder then
+                placeholderPosByID[rid] = pkey
+            else
+                posHasReal[pkey] = true
+            end
+        end
+
+        if isPlaceholder then
+            placeholders[#placeholders + 1] = rid
+        else
+            local srcExits = getRoomExits(rid)
             if type(srcExits) == "table" then
                 for _k2, target in pairs(srcExits) do
-                    reverseExits[target] = true
+                    local targetID = tonumber(target) or target
+                    reverseExits[targetID] = true
                 end
             end
         end
     end
 
     local deletedCount = 0
-    for _k, rid in ipairs(rooms) do
-        if _.is_placeholder(rid) then
-            local shouldDelete = false
-            -- (a) positional collision with a real room
-            local x, y, z = getRoomCoordinates(rid)
-            if x ~= nil then
-                local nearby = getRoomsByPosition(areaID, x, y, z)
-                if type(nearby) == "table" then
-                    for _k2, oid in pairs(nearby) do
-                        if oid ~= rid and not _.is_placeholder(oid) then
-                            shouldDelete = true
-                            break
-                        end
-                    end
-                end
-            end
-            -- (b) orphaned: no non-placeholder room in the area exits to this one
-            if not shouldDelete and not reverseExits[rid] then
-                shouldDelete = true
-            end
-            if shouldDelete then
-                deleteRoom(rid)
-                deletedCount = deletedCount + 1
-            end
+    for _k, rid in ipairs(placeholders) do
+        local shouldDelete = false
+        -- (a) positional collision with a real room
+        local pkey = placeholderPosByID[rid]
+        if pkey and posHasReal[pkey] then
+            shouldDelete = true
+        end
+        -- (b) orphaned: no non-placeholder room in the area exits to this one
+        if not shouldDelete and not reverseExits[rid] then
+            shouldDelete = true
+        end
+        if shouldDelete then
+            deleteRoom(rid)
+            deletedCount = deletedCount + 1
         end
     end
 

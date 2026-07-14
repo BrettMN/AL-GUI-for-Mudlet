@@ -845,7 +845,7 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
         local globalVisited = {}
         local seedCount     = 0
-        for _, seedID in ipairs(areaRooms) do
+        for _i, seedID in ipairs(areaRooms) do
             if not globalVisited[seedID] then
                 local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
                 _.flatten_cardinal_connected_rooms(seedID)
@@ -901,7 +901,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     for name, _ in pairs(areas) do areaNames[#areaNames + 1] = name end
     table.sort(areaNames)
 
-    for _, name in ipairs(areaNames) do
+    for _i, name in ipairs(areaNames) do
         local id        = areas[name]
         local areaRooms = getAreaRooms(id)
         if type(areaRooms) == "table" and #areaRooms > 0 then
@@ -912,7 +912,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             areaRooms = getAreaRooms(id)
             if type(areaRooms) ~= "table" then areaRooms = {} end
             local globalVisited = {}
-            for _, seedID in ipairs(areaRooms) do
+            for _j, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
                     local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
                     _.flatten_cardinal_connected_rooms(seedID)

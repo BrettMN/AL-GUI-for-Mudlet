@@ -24,6 +24,14 @@
         "regex": "^map\\s+normalize(?:\\s+([\\d,]+)(?:\\s+([\\d,]+))?)?$"
     },
     {
+        "name": "map dedupe",
+        "regex": "^map\\s+dedupe$"
+    },
+    {
+        "name": "map dedupe-all",
+        "regex": "^map\\s+dedupe-all$"
+    },
+    {
         "name": "map area-name",
         "regex": "^map\\s+area-name(?:\\s+(.+))?$"
     },
