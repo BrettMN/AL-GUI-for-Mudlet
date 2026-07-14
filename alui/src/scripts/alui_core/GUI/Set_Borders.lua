@@ -10,23 +10,45 @@ local function setBorders()
     local w, h = getMainWindowSize()
 
     -- Use configuration values if available, otherwise defaults
-    local sideBorderPercent = 0.25
+    local leftBorderPercent = 0.25
+    local rightBorderPercent = 0.25
     local topBorderPercent = 1 / 20 -- h/20 = h * (1/20)
     local mainWindowPadding = 6
 
     if Config.get then
-        sideBorderPercent = Config.get("ui.sideBorderPercent", 25) / 100 -- Convert percentage to decimal
+        local defaultSide = Config.get("ui.sideBorderPercent", 25) / 100
+        leftBorderPercent = defaultSide
+        rightBorderPercent = defaultSide
         topBorderPercent = Config.get("ui.topBorderPercent", 5) / 100
         mainWindowPadding = Config.get("ui.mainWindowPadding", 6)
     end
 
-    local sideBorder = (w * sideBorderPercent) + mainWindowPadding
+    local layout = GUI_NS.Layout
+    if layout then
+        if tonumber(layout.leftBorderPx) then
+            leftBorderPercent = nil
+        end
+        if tonumber(layout.rightBorderPx) then
+            rightBorderPercent = nil
+        end
+        if leftBorderPercent ~= nil and tonumber(layout.leftBorderPercent) then
+            leftBorderPercent = tonumber(layout.leftBorderPercent) / 100
+        end
+        if rightBorderPercent ~= nil and tonumber(layout.rightBorderPercent) then
+            rightBorderPercent = tonumber(layout.rightBorderPercent) / 100
+        end
+    end
+
+    local leftBorder = (leftBorderPercent and ((w * leftBorderPercent) + mainWindowPadding))
+        or (tonumber(layout and layout.leftBorderPx) or ((w * 0.25) + mainWindowPadding))
+    local rightBorder = (rightBorderPercent and ((w * rightBorderPercent) + mainWindowPadding))
+        or (tonumber(layout and layout.rightBorderPx) or ((w * 0.25) + mainWindowPadding))
     local topBorder = (h * topBorderPercent) + mainWindowPadding
 
-    setBorderLeft(sideBorder)
+    setBorderLeft(leftBorder)
     setBorderTop(topBorder)
     setBorderBottom(mainWindowPadding)
-    setBorderRight(sideBorder)
+    setBorderRight(rightBorder)
 end
 
 -- Register function in both namespaces for compatibility

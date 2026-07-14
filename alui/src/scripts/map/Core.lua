@@ -265,6 +265,7 @@ local function handle_move(isLastInBatch)
 
     if type(info.vnum) == "string" then
         local rnum = getRoomIDbyHash(info.vnum)
+        local roomWasCreatedOrAdopted = false
         if type(rnum) ~= "number" then rnum = -1 end
         if rnum < 1 then
             local warn = "handle_move: vnum " .. tostring(info.vnum)
@@ -303,6 +304,7 @@ local function handle_move(isLastInBatch)
                     _.mark_autowalk_dirty()
                     rnum    = placeholderID
                     adopted = true
+                    roomWasCreatedOrAdopted = true
                     _.debug_echo("Adopted placeholder " .. placeholderID
                         .. " for vnum " .. info.vnum .. " (dir " .. arrivalDir .. ")\n")
                 end
@@ -319,6 +321,7 @@ local function handle_move(isLastInBatch)
                         _.mark_autowalk_dirty()
                         rnum    = adoptedID
                         adopted = true
+                        roomWasCreatedOrAdopted = true
                         _.debug_echo("Adopted real room " .. adoptedID
                             .. " (" .. tostring(info.name) .. ") for vnum " .. info.vnum .. "\n")
                     end
@@ -328,6 +331,9 @@ local function handle_move(isLastInBatch)
                 make_room()
                 rnum = getRoomIDbyHash(info.vnum)
                 if type(rnum) ~= "number" then rnum = -1 end
+                if rnum > 0 then
+                    roomWasCreatedOrAdopted = true
+                end
             end
         end
 
@@ -335,11 +341,23 @@ local function handle_move(isLastInBatch)
             -- Check if room needs to be moved to its correct area.
             local correctAreaID = resolve_area_id_for_room_info(info)
             local currentAreaID = getRoomArea(rnum)
+            local areaMatchesGMCP = not (correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID)
             if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
-                _.debug_echo("Moving room " ..
-                    rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
-                setRoomArea(rnum, correctAreaID)
-                currentAreaID = correctAreaID
+                local canAutoMoveArea = roomWasCreatedOrAdopted
+                    or type(currentAreaID) ~= "number"
+                    or currentAreaID < 1
+                if canAutoMoveArea then
+                    _.debug_echo("Moving room " ..
+                        rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                    setRoomArea(rnum, correctAreaID)
+                    currentAreaID = correctAreaID
+                    areaMatchesGMCP = true
+                else
+                    _.debug_echo("Skipping area move for existing room " .. rnum
+                        .. " (current area " .. tostring(currentAreaID)
+                        .. ", GMCP area " .. tostring(correctAreaID) .. ")\n")
+                    areaMatchesGMCP = false
+                end
             end
 
             -- Reuse the area position cache across GMCP events to avoid
@@ -358,7 +376,7 @@ local function handle_move(isLastInBatch)
             end
 
             -- Update the cache with the confirmed correct area ID.
-            if type(info.area) == "string" and info.area ~= "" then
+            if areaMatchesGMCP and type(info.area) == "string" and info.area ~= "" then
                 if type(currentAreaID) == "number" and currentAreaID > 0 then
                     map.configs.area_ids_by_gmcp[info.area] = currentAreaID
                     setAreaUserData(currentAreaID, "gmcp_area_key", info.area)

@@ -1598,14 +1598,27 @@ end
 -- Infer an area's "area vnum key" by majority vote across its room hashes.
 function _.infer_area_vnum_key_for_area(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return nil, 0 end
-    if type(getRoomHashByID) ~= "function" then return nil, 0 end
+    if type(getAreaUserData) == "function" then
+        local gmcpKey = getAreaUserData(areaID, "gmcp_area_key")
+        if type(gmcpKey) == "string" and gmcpKey ~= "" then
+            return gmcpKey, math.huge
+        end
+    end
 
     local rooms = getAreaRooms(areaID)
-    if type(rooms) ~= "table" or #rooms == 0 then return nil, 0 end
+    if type(rooms) ~= "table" or #rooms == 0 then
+        local areaName = _.get_area_name_by_id(areaID)
+        local numericNameKey = type(areaName) == "string" and areaName:match("^%s*(%d+)%s*$") or nil
+        if numericNameKey then
+            return numericNameKey, 1
+        end
+        return nil, 0
+    end
+    if type(getRoomHashByID) ~= "function" then return nil, 0 end
 
     local counts = {}
     local bestKey, bestCount = nil, 0
-    for _, rid in ipairs(rooms) do
+    for _i, rid in ipairs(rooms) do
         local roomHash = getRoomHashByID(rid)
         local key = _.extract_area_vnum_key(roomHash)
         if key then
@@ -1618,14 +1631,49 @@ function _.infer_area_vnum_key_for_area(areaID)
         end
     end
 
-    return bestKey, bestCount
+    if bestKey then
+        return bestKey, bestCount
+    end
+
+    local areaName = _.get_area_name_by_id(areaID)
+    local numericNameKey = type(areaName) == "string" and areaName:match("^%s*(%d+)%s*$") or nil
+    if numericNameKey then
+        return numericNameKey, 1
+    end
+
+    return nil, 0
+end
+
+local function is_meaningful_area_name(areaName)
+    if type(areaName) ~= "string" then return false end
+    local trimmed = areaName:match("^%s*(.-)%s*$")
+    if trimmed == "" then return false end
+
+    local lower = trimmed:lower()
+    if lower == "unnamed" then return false end
+    if lower:match("^unnamed%s*area") then return false end
+    if lower:match("^area%s*%d+$") then return false end
+    if trimmed:match("^%d+$") then return false end
+    return true
+end
+
+local function get_area_room_count(areaID)
+    local rooms = getAreaRooms(areaID)
+    return (type(rooms) == "table" and #rooms) or 0
 end
 
 -- Merge any areas that resolve to the same inferred area-vnum key as anchorAreaID.
 -- Returns:
 --   { area_vnum_key=string|nil, merged_areas=N, moved_rooms=M }
 function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
-    local result = { area_vnum_key = nil, merged_areas = 0, moved_rooms = 0 }
+    local result = {
+        area_vnum_key = nil,
+        merged_areas = 0,
+        moved_rooms = 0,
+        removed_areas = 0,
+        target_area_id = anchorAreaID,
+        target_area_name = _.get_area_name_by_id(anchorAreaID),
+    }
     if type(anchorAreaID) ~= "number" or anchorAreaID < 1 then return result end
 
     local anchorKey = _.infer_area_vnum_key_for_area(anchorAreaID)
@@ -1635,34 +1683,112 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
     local areas = getAreaTable()
     if type(areas) ~= "table" then return result end
 
+    local duplicateAreaIDs = { anchorAreaID }
     for _name, id in pairs(areas) do
         if id ~= anchorAreaID then
             local otherKey = _.infer_area_vnum_key_for_area(id)
             if otherKey == anchorKey then
-                local otherRooms = getAreaRooms(id)
-                if type(otherRooms) == "table" and #otherRooms > 0 then
-                    local movedThisArea = 0
-                    for _, rid in ipairs(otherRooms) do
-                        if getRoomArea(rid) ~= anchorAreaID then
-                            setRoomArea(rid, anchorAreaID)
-                            movedThisArea = movedThisArea + 1
-                        end
-                    end
-                    if movedThisArea > 0 then
-                        result.merged_areas = result.merged_areas + 1
-                        result.moved_rooms = result.moved_rooms + movedThisArea
-                        if type(deleteAreaUserData) == "function" then
-                            pcall(deleteAreaUserData, id, "gmcp_area_key")
-                        end
-                    end
+                duplicateAreaIDs[#duplicateAreaIDs + 1] = id
+            end
+        end
+    end
+
+    local targetAreaID = anchorAreaID
+    local anchorName = _.get_area_name_by_id(anchorAreaID)
+    local targetNamed = is_meaningful_area_name(anchorName)
+
+    if not targetNamed then
+        local bestNamedID = nil
+        local bestNamedRooms = -1
+        for _, id in ipairs(duplicateAreaIDs) do
+            local areaName = _.get_area_name_by_id(id)
+            if is_meaningful_area_name(areaName) then
+                local roomCount = get_area_room_count(id)
+                if roomCount > bestNamedRooms then
+                    bestNamedID = id
+                    bestNamedRooms = roomCount
+                end
+            end
+        end
+        if type(bestNamedID) == "number" and bestNamedID > 0 then
+            targetAreaID = bestNamedID
+        end
+    end
+
+    result.target_area_id = targetAreaID
+    result.target_area_name = _.get_area_name_by_id(targetAreaID)
+
+    local function retarget_or_clear_cached_area_ids(fromAreaID, toAreaID)
+        if type(map.configs) ~= "table" or type(map.configs.area_ids_by_gmcp) ~= "table" then
+            return
+        end
+        for gmcpKey, mappedID in pairs(map.configs.area_ids_by_gmcp) do
+            if mappedID == fromAreaID then
+                if type(toAreaID) == "number" and toAreaID > 0 then
+                    map.configs.area_ids_by_gmcp[gmcpKey] = toAreaID
+                else
+                    map.configs.area_ids_by_gmcp[gmcpKey] = nil
                 end
             end
         end
     end
 
+    local function maybe_delete_empty_area(areaID)
+        local roomsAfterMerge = getAreaRooms(areaID)
+        if type(roomsAfterMerge) == "table" and #roomsAfterMerge > 0 then
+            return false
+        end
+
+        retarget_or_clear_cached_area_ids(areaID, targetAreaID)
+
+        local deleted = false
+        if type(deleteArea) == "function" then
+            deleted = pcall(deleteArea, areaID) and true or false
+        end
+        if not deleted and type(deleteAreaName) == "function" then
+            local areaName = _.get_area_name_by_id(areaID)
+            if type(areaName) == "string" and areaName ~= "" then
+                deleted = pcall(deleteAreaName, areaName) and true or false
+            end
+        end
+        return deleted
+    end
+
+    for _, id in ipairs(duplicateAreaIDs) do
+        if id ~= targetAreaID then
+            local otherRooms = getAreaRooms(id)
+            local movedThisArea = 0
+            if type(otherRooms) == "table" and #otherRooms > 0 then
+                for _, rid in ipairs(otherRooms) do
+                    if getRoomArea(rid) ~= targetAreaID then
+                        setRoomArea(rid, targetAreaID)
+                        movedThisArea = movedThisArea + 1
+                    end
+                end
+            end
+            if movedThisArea > 0 then
+                result.merged_areas = result.merged_areas + 1
+                result.moved_rooms = result.moved_rooms + movedThisArea
+                local mergedKey = type(getAreaUserData) == "function"
+                    and getAreaUserData(id, "gmcp_area_key") or nil
+                if type(mergedKey) == "string" and mergedKey ~= "" then
+                    map.configs.area_ids_by_gmcp[mergedKey] = targetAreaID
+                    setAreaUserData(targetAreaID, "gmcp_area_key", mergedKey)
+                end
+                if type(deleteAreaUserData) == "function" then
+                    pcall(deleteAreaUserData, id, "gmcp_area_key")
+                end
+            end
+
+            if maybe_delete_empty_area(id) then
+                result.removed_areas = result.removed_areas + 1
+            end
+        end
+    end
+
     if type(map.room_info.area) == "string" and map.room_info.area ~= "" then
-        map.configs.area_ids_by_gmcp[map.room_info.area] = anchorAreaID
-        setAreaUserData(anchorAreaID, "gmcp_area_key", map.room_info.area)
+        map.configs.area_ids_by_gmcp[map.room_info.area] = targetAreaID
+        setAreaUserData(targetAreaID, "gmcp_area_key", map.room_info.area)
     end
 
     return result

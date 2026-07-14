@@ -15,6 +15,42 @@ local function getGuiPadding()
     return 10
 end
 
+local function normalizeRatios(ratios, defaults)
+    local cleaned = {}
+    local total = 0
+
+    for i = 1, #defaults do
+        local value = tonumber(ratios and ratios[i]) or defaults[i]
+        value = math.max(0.01, value)
+        cleaned[i] = value
+        total = total + value
+    end
+
+    if total <= 0 then
+        local unpackFn = table.unpack or unpack
+        return { unpackFn(defaults) }
+    end
+
+    for i = 1, #cleaned do
+        cleaned[i] = cleaned[i] / total
+    end
+
+    return cleaned
+end
+
+local function ensureLayoutState()
+    GUI.Layout = GUI.Layout or {}
+    GUI.Layout.right = normalizeRatios(GUI.Layout.right, { 0.20, 0.40, 0.40 })
+    GUI.Layout.left = normalizeRatios(GUI.Layout.left, { 0.50, 0.30, 0.20 })
+    GUI.Layout.minBoxHeight = tonumber(GUI.Layout.minBoxHeight) or 90
+    GUI.Layout.splitterHitboxHeight = tonumber(GUI.Layout.splitterHitboxHeight) or 18
+    GUI.Layout.splitterWidthPercent = tonumber(GUI.Layout.splitterWidthPercent) or 25
+    if GUI.Layout.activeDrag ~= nil and type(GUI.Layout.activeDrag) ~= "table" then
+        GUI.Layout.activeDrag = nil
+    end
+    return GUI.Layout
+end
+
 local function resizeElement(element, width, height, x, y)
     if not element then
         return
@@ -93,6 +129,210 @@ local function resizeContentAreas()
             chatPadding
         )
     end
+end
+
+local function applyColumnLayout(parent, boxes, ratios)
+    if not parent or not boxes or not ratios then
+        return
+    end
+
+    local parentHeight = parent:get_height()
+    if not parentHeight or parentHeight <= 0 then
+        return
+    end
+
+    local y = 0
+    for i, box in ipairs(boxes) do
+        local boxHeight
+        if i == #boxes then
+            boxHeight = math.max(1, parentHeight - y)
+        else
+            boxHeight = math.max(1, math.floor(parentHeight * ratios[i]))
+        end
+
+        if box then
+            box:move(0, y)
+            box:resize("100%", boxHeight)
+        end
+        y = y + boxHeight
+    end
+end
+
+local function updateSplitterPositions()
+    if not GUI.Splitters then
+        return
+    end
+
+    local hitboxHeight = (GUI.Layout and GUI.Layout.splitterHitboxHeight) or 18
+    local splitterX = (GUI.Layout and GUI.Layout.splitterX) or 0
+    local half = math.floor(hitboxHeight / 2)
+
+    if GUI.Splitters.Right_1 and GUI.Box1 then
+        GUI.Splitters.Right_1:move(splitterX, math.max(0, GUI.Box1:get_height() - half))
+    end
+
+    if GUI.Splitters.Right_2 and GUI.Box1 and GUI.Box2 then
+        GUI.Splitters.Right_2:move(splitterX, math.max(0, GUI.Box1:get_height() + GUI.Box2:get_height() - half))
+    end
+
+    if GUI.Splitters.Left_1 and GUI.Box4 then
+        GUI.Splitters.Left_1:move(splitterX, math.max(0, GUI.Box4:get_height() - half))
+    end
+
+    if GUI.Splitters.Left_2 and GUI.Box4 and GUI.Box5 then
+        GUI.Splitters.Left_2:move(splitterX, math.max(0, GUI.Box4:get_height() + GUI.Box5:get_height() - half))
+    end
+end
+
+local function applyBoxLayout()
+    local layout = ensureLayoutState()
+
+    applyColumnLayout(GUI.Right, { GUI.Box1, GUI.Box2, GUI.Box3 }, layout.right)
+    applyColumnLayout(GUI.Left, { GUI.Box4, GUI.Box5, GUI.Box7 }, layout.left)
+    updateSplitterPositions()
+end
+
+local function updateAdjacentRatiosForDrag(columnKey, borderIndex, deltaPixels)
+    local layout = ensureLayoutState()
+    local ratios = layout[columnKey]
+    local parent = (columnKey == "right") and GUI.Right or GUI.Left
+    if not ratios or not parent then
+        return
+    end
+
+    local parentHeight = parent:get_height()
+    if not parentHeight or parentHeight <= 0 then
+        return
+    end
+
+    local originalPair = ratios[borderIndex] + ratios[borderIndex + 1]
+    local minRatio = math.min(0.45, layout.minBoxHeight / parentHeight, (originalPair / 2) - 0.001)
+    minRatio = math.max(0.01, minRatio)
+    local newFirst = ratios[borderIndex] + (deltaPixels / parentHeight)
+    newFirst = math.max(minRatio, math.min(originalPair - minRatio, newFirst))
+
+    ratios[borderIndex] = newFirst
+    ratios[borderIndex + 1] = originalPair - newFirst
+end
+
+local setSplitterStyle
+local setAllSplittersIdle
+
+local function beginResizeDrag(columnKey, borderIndex, splitterName, event)
+    local button = event and tostring(event.button or ""):lower() or ""
+    if button ~= "" and not button:find("left") then
+        return
+    end
+
+    local layout = ensureLayoutState()
+    layout.activeDrag = {
+        columnKey = columnKey,
+        borderIndex = borderIndex,
+        splitterName = splitterName,
+        lastGlobalY = event and event.globalY or 0,
+    }
+
+    if GUI.SplittersByName then
+        setSplitterStyle(GUI.SplittersByName[splitterName], "active")
+    end
+end
+
+local function dragResize(columnKey, borderIndex, event)
+    local layout = ensureLayoutState()
+    local drag = layout.activeDrag
+    if not drag or drag.columnKey ~= columnKey or drag.borderIndex ~= borderIndex or not event then
+        return
+    end
+
+    local currentY = event.globalY
+    if type(currentY) ~= "number" then
+        return
+    end
+
+    local delta = currentY - (drag.lastGlobalY or currentY)
+    if delta == 0 then
+        return
+    end
+
+    drag.lastGlobalY = currentY
+    updateAdjacentRatiosForDrag(columnKey, borderIndex, delta)
+    applyBoxLayout()
+    resizeContentAreas()
+end
+
+local function endResizeDrag()
+    if GUI.Layout then
+        GUI.Layout.activeDrag = nil
+    end
+    setAllSplittersIdle()
+end
+
+local splitterStyles = {
+    idle = [[
+        background-color: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(0,0,0,0),
+            stop:0.42 rgba(255,255,255,0.05),
+            stop:0.50 rgba(255,255,255,0.35),
+            stop:0.58 rgba(255,255,255,0.05),
+            stop:1 rgba(0,0,0,0)
+        );
+    ]],
+    hover = [[
+        background-color: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(0,0,0,0),
+            stop:0.38 rgba(255,255,255,0.10),
+            stop:0.50 rgba(255,255,255,0.70),
+            stop:0.62 rgba(255,255,255,0.10),
+            stop:1 rgba(0,0,0,0)
+        );
+    ]],
+    active = [[
+        background-color: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(0,0,0,0),
+            stop:0.35 rgba(117,209,255,0.15),
+            stop:0.50 rgba(117,209,255,0.90),
+            stop:0.65 rgba(117,209,255,0.15),
+            stop:1 rgba(0,0,0,0)
+        );
+    ]],
+}
+
+setSplitterStyle = function(splitter, styleName)
+    if splitter and splitterStyles[styleName] then
+        splitter:setStyleSheet(splitterStyles[styleName])
+    end
+end
+
+setAllSplittersIdle = function()
+    if not GUI.Splitters then
+        return
+    end
+
+    for _, splitter in pairs(GUI.Splitters) do
+        setSplitterStyle(splitter, "idle")
+    end
+end
+
+local function setSplitterHoverState(splitterName, isHover)
+    if not GUI.SplittersByName then
+        return
+    end
+
+    local layout = ensureLayoutState()
+    local activeName = layout.activeDrag and layout.activeDrag.splitterName
+    if activeName then
+        return
+    end
+
+    local splitter = GUI.SplittersByName[splitterName]
+    if not splitter then
+        return
+    end
+
+    setSplitterStyle(splitter, isHover and "hover" or "idle")
 end
 
 -- Core box setup function with ResourceManager integration
@@ -260,6 +500,13 @@ local function setBoxes()
 
 
 
+    local layout = ensureLayoutState()
+    layout.activeDrag = nil
+    local splitterWidthPercent = math.max(5, math.min(100, layout.splitterWidthPercent))
+    local splitterXPercent = (100 - splitterWidthPercent) / 2
+    layout.splitterX = string.format("%.2f%%", splitterXPercent)
+    layout.splitterWidth = string.format("%.2f%%", splitterWidthPercent)
+
     -- Create boxes using the reusable function
     GUI.Box1 = createBox("GUI.Box1", 0, 0, "100%", "20%", GUI.Right)
     GUI.Box2 = createBox("GUI.Box2", 0, "20%", "100%", "40%", GUI.Right)
@@ -267,6 +514,47 @@ local function setBoxes()
     GUI.Box4 = createBox("GUI.Box4", 0, 0, "100%", "50%", GUI.Left)
     GUI.Box5 = createBox("GUI.Box5", 0, "50%", "100%", "30%", GUI.Left)
     GUI.Box7 = createBox("GUI.Box7", 0, "80%", "100%", "20%", GUI.Left)
+
+    local function createSplitter(name, parent, columnKey, borderIndex)
+        local splitter = Geyser.Label:new({
+            name = name,
+            x = layout.splitterX,
+            y = 0,
+            width = layout.splitterWidth,
+            height = layout.splitterHitboxHeight,
+        }, parent)
+
+        setSplitterStyle(splitter, "idle")
+        pcall(function() splitter:setCursor("SplitVCursor") end)
+        pcall(function() splitter:setToolTip("Click and drag to resize") end)
+
+        splitter:setClickCallback(beginResizeDrag, columnKey, borderIndex, name)
+        splitter:setMoveCallback(dragResize, columnKey, borderIndex)
+        splitter:setReleaseCallback(endResizeDrag)
+        splitter:setOnEnter(setSplitterHoverState, name, true)
+        splitter:setOnLeave(setSplitterHoverState, name, false)
+
+        if RM then
+            RM.registerUIElement(name, splitter, "boxes")
+        end
+
+        return splitter
+    end
+
+    GUI.Splitters = {
+        Right_1 = createSplitter("GUI.Splitter_Right_1", GUI.Right, "right", 1),
+        Right_2 = createSplitter("GUI.Splitter_Right_2", GUI.Right, "right", 2),
+        Left_1 = createSplitter("GUI.Splitter_Left_1", GUI.Left, "left", 1),
+        Left_2 = createSplitter("GUI.Splitter_Left_2", GUI.Left, "left", 2),
+    }
+    GUI.SplittersByName = {
+        ["GUI.Splitter_Right_1"] = GUI.Splitters.Right_1,
+        ["GUI.Splitter_Right_2"] = GUI.Splitters.Right_2,
+        ["GUI.Splitter_Left_1"] = GUI.Splitters.Left_1,
+        ["GUI.Splitter_Left_2"] = GUI.Splitters.Left_2,
+    }
+
+    applyBoxLayout()
 
     GUI.Map_Container = createContainer("GUI.Map_Container", GUI.Box4)
 
@@ -433,6 +721,7 @@ local function setBoxes()
 end
 
 GUI.resizeBoxes = function()
+    applyBoxLayout()
     resizeContentAreas()
     GUI.Box1:show()
     GUI.Box2:show()
@@ -440,6 +729,12 @@ GUI.resizeBoxes = function()
     GUI.Box4:show()
     GUI.Box5:show()
     GUI.Box7:show()
+    if GUI.Splitters then
+        if GUI.Splitters.Right_1 then GUI.Splitters.Right_1:show() end
+        if GUI.Splitters.Right_2 then GUI.Splitters.Right_2:show() end
+        if GUI.Splitters.Left_1 then GUI.Splitters.Left_1:show() end
+        if GUI.Splitters.Left_2 then GUI.Splitters.Left_2:show() end
+    end
     GUI.Map_Container:show()
     GUI.Mapper:show()
     if map and type(map.register_mapper_context_menu) == "function" then

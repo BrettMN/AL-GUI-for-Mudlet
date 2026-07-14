@@ -967,6 +967,9 @@ function map.recalculate_room_layout()
     local areaMergeResult = nil
     if type(_.merge_duplicate_areas_by_area_vnum) == "function" then
         areaMergeResult = _.merge_duplicate_areas_by_area_vnum(areaID)
+        if areaMergeResult and type(areaMergeResult.target_area_id) == "number" and areaMergeResult.target_area_id > 0 then
+            areaID = areaMergeResult.target_area_id
+        end
     end
 
     local sx, sy, sz = getRoomCoordinates(seedID)
@@ -1286,9 +1289,20 @@ function map.recalculate_room_layout()
         details[#details + 1] = areaMergeResult.merged_areas
             .. " duplicate area" .. (areaMergeResult.merged_areas == 1 and "" or "s")
             .. " merged by area-vnum"
+        local targetLabel = nil
+        if type(areaMergeResult.target_area_name) == "string" and areaMergeResult.target_area_name ~= "" then
+            targetLabel = "'" .. areaMergeResult.target_area_name .. "'"
+        elseif type(areaMergeResult.target_area_id) == "number" then
+            targetLabel = "area #" .. tostring(areaMergeResult.target_area_id)
+        end
         details[#details + 1] = areaMergeResult.moved_rooms
             .. " room" .. (areaMergeResult.moved_rooms == 1 and "" or "s")
-            .. " moved into the current area"
+            .. " moved into " .. (targetLabel or "the target area")
+        if areaMergeResult.removed_areas and areaMergeResult.removed_areas > 0 then
+            details[#details + 1] = areaMergeResult.removed_areas
+                .. " empty area" .. (areaMergeResult.removed_areas == 1 and "" or "s")
+                .. " removed"
+        end
     end
     if nudgeCount > 0 then
         details[#details + 1] = nudgeCount .. " nudged to avoid overlap"
