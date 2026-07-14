@@ -964,6 +964,11 @@ function map.recalculate_room_layout()
         return
     end
 
+    local areaMergeResult = nil
+    if type(_.merge_duplicate_areas_by_area_vnum) == "function" then
+        areaMergeResult = _.merge_duplicate_areas_by_area_vnum(areaID)
+    end
+
     local sx, sy, sz = getRoomCoordinates(seedID)
     if sx == nil then
         echo("Cannot recalculate: current room has no coordinates.\n")
@@ -1276,6 +1281,14 @@ function map.recalculate_room_layout()
     if selfLoopsRemoved > 0 then
         details[#details + 1] = selfLoopsRemoved
             .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
+    end
+    if areaMergeResult and areaMergeResult.merged_areas > 0 then
+        details[#details + 1] = areaMergeResult.merged_areas
+            .. " duplicate area" .. (areaMergeResult.merged_areas == 1 and "" or "s")
+            .. " merged by area-vnum"
+        details[#details + 1] = areaMergeResult.moved_rooms
+            .. " room" .. (areaMergeResult.moved_rooms == 1 and "" or "s")
+            .. " moved into the current area"
     end
     if nudgeCount > 0 then
         details[#details + 1] = nudgeCount .. " nudged to avoid overlap"

@@ -1577,6 +1577,97 @@ function _.get_area_name_by_id(areaID)
     return nil
 end
 
+-- Best-effort extraction of an "area vnum" from a room hash/vnum.
+-- Supported shapes:
+--   "<area>:<room>", "<area>/<room>", "<area>.<room>", "<area>-<room>"
+-- where area/room segments are numeric.
+function _.extract_area_vnum_key(roomHash)
+    if type(roomHash) ~= "string" or roomHash == "" then return nil end
+
+    local areaPart = roomHash:match("^(%d+):%d+$")
+        or roomHash:match("^(%d+)/%d+$")
+        or roomHash:match("^(%d+)%.%d+$")
+        or roomHash:match("^(%d+)%-%d+$")
+
+    if type(areaPart) == "string" and areaPart ~= "" then
+        return areaPart
+    end
+    return nil
+end
+
+-- Infer an area's "area vnum key" by majority vote across its room hashes.
+function _.infer_area_vnum_key_for_area(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return nil, 0 end
+    if type(getRoomHashByID) ~= "function" then return nil, 0 end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then return nil, 0 end
+
+    local counts = {}
+    local bestKey, bestCount = nil, 0
+    for _, rid in ipairs(rooms) do
+        local roomHash = getRoomHashByID(rid)
+        local key = _.extract_area_vnum_key(roomHash)
+        if key then
+            local nextCount = (counts[key] or 0) + 1
+            counts[key] = nextCount
+            if nextCount > bestCount then
+                bestKey = key
+                bestCount = nextCount
+            end
+        end
+    end
+
+    return bestKey, bestCount
+end
+
+-- Merge any areas that resolve to the same inferred area-vnum key as anchorAreaID.
+-- Returns:
+--   { area_vnum_key=string|nil, merged_areas=N, moved_rooms=M }
+function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
+    local result = { area_vnum_key = nil, merged_areas = 0, moved_rooms = 0 }
+    if type(anchorAreaID) ~= "number" or anchorAreaID < 1 then return result end
+
+    local anchorKey = _.infer_area_vnum_key_for_area(anchorAreaID)
+    result.area_vnum_key = anchorKey
+    if not anchorKey then return result end
+
+    local areas = getAreaTable()
+    if type(areas) ~= "table" then return result end
+
+    for _name, id in pairs(areas) do
+        if id ~= anchorAreaID then
+            local otherKey = _.infer_area_vnum_key_for_area(id)
+            if otherKey == anchorKey then
+                local otherRooms = getAreaRooms(id)
+                if type(otherRooms) == "table" and #otherRooms > 0 then
+                    local movedThisArea = 0
+                    for _, rid in ipairs(otherRooms) do
+                        if getRoomArea(rid) ~= anchorAreaID then
+                            setRoomArea(rid, anchorAreaID)
+                            movedThisArea = movedThisArea + 1
+                        end
+                    end
+                    if movedThisArea > 0 then
+                        result.merged_areas = result.merged_areas + 1
+                        result.moved_rooms = result.moved_rooms + movedThisArea
+                        if type(deleteAreaUserData) == "function" then
+                            pcall(deleteAreaUserData, id, "gmcp_area_key")
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if type(map.room_info.area) == "string" and map.room_info.area ~= "" then
+        map.configs.area_ids_by_gmcp[map.room_info.area] = anchorAreaID
+        setAreaUserData(anchorAreaID, "gmcp_area_key", map.room_info.area)
+    end
+
+    return result
+end
+
 function _.get_current_area_context()
     local roomID = nil
     if type(map.room_info.vnum) == "string" then
