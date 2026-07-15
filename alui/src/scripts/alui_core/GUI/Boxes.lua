@@ -8,11 +8,42 @@ local Config = (ALUI and ALUI.Config) or {}
 local Colors = (ALUI and ALUI.GUI and GUI.Colors) or {}
 local RM = ALUI and ALUI.ResourceManager
 
+local function getRuntimeConfig()
+    return (ALUI and ALUI.Config) or Config
+end
+
 local function getGuiPadding()
-    if Config.get then
-        return Config.get("ui.guiPadding", 10)
+    local runtimeConfig = getRuntimeConfig()
+    if runtimeConfig and runtimeConfig.get then
+        return tonumber((runtimeConfig.get("ui.guiPadding", 10))) or 10
     end
     return 10
+end
+
+local function asCssString(value, fallback)
+    if type(value) == "string" and value ~= "" then
+        return value
+    end
+    return fallback
+end
+
+local function coerceRatioTriplet(value, fallback)
+    local result = { fallback[1], fallback[2], fallback[3] }
+    if type(value) ~= "table" then
+        return result
+    end
+
+    for i = 1, 3 do
+        local v = tonumber(value[i])
+        if v == nil then
+            v = tonumber(value[tostring(i)])
+        end
+        if v ~= nil then
+            result[i] = v
+        end
+    end
+
+    return result
 end
 
 local function normalizeRatios(ratios, defaults)
@@ -40,15 +71,135 @@ end
 
 local function ensureLayoutState()
     GUI.Layout = GUI.Layout or {}
-    GUI.Layout.right = normalizeRatios(GUI.Layout.right, { 0.20, 0.40, 0.40 })
-    GUI.Layout.left = normalizeRatios(GUI.Layout.left, { 0.50, 0.30, 0.20 })
-    GUI.Layout.minBoxHeight = tonumber(GUI.Layout.minBoxHeight) or 90
+    local runtimeConfig = getRuntimeConfig()
+    local defaultRight = { 0.20, 0.40, 0.40 }
+    local defaultLeft = { 0.50, 0.30, 0.20 }
+    local configEpoch = nil
+    if runtimeConfig and runtimeConfig.get then
+        configEpoch = tonumber((runtimeConfig.get("ui.layout.lastSavedEpoch", 0))) or 0
+    end
+
+    if runtimeConfig and runtimeConfig.get and GUI.Layout.verticalConfigEpoch ~= configEpoch then
+        local rightFromScalars = {
+            tonumber((runtimeConfig.get("ui.layout.rightTopRatio", nil))),
+            tonumber((runtimeConfig.get("ui.layout.rightMiddleRatio", nil))),
+            tonumber((runtimeConfig.get("ui.layout.rightBottomRatio", nil))),
+        }
+        local leftFromScalars = {
+            tonumber((runtimeConfig.get("ui.layout.leftTopRatio", nil))),
+            tonumber((runtimeConfig.get("ui.layout.leftMiddleRatio", nil))),
+            tonumber((runtimeConfig.get("ui.layout.leftBottomRatio", nil))),
+        }
+
+        if rightFromScalars[1] and rightFromScalars[2] and rightFromScalars[3] then
+            defaultRight = rightFromScalars
+        else
+            defaultRight = coerceRatioTriplet(runtimeConfig.get("ui.layout.rightBoxRatios", defaultRight), defaultRight)
+        end
+
+        if leftFromScalars[1] and leftFromScalars[2] and leftFromScalars[3] then
+            defaultLeft = leftFromScalars
+        else
+            defaultLeft = coerceRatioTriplet(runtimeConfig.get("ui.layout.leftBoxRatios", defaultLeft), defaultLeft)
+        end
+
+        GUI.Layout.right = normalizeRatios(defaultRight, { 0.20, 0.40, 0.40 })
+        GUI.Layout.left = normalizeRatios(defaultLeft, { 0.50, 0.30, 0.20 })
+        GUI.Layout.minBoxHeight = tonumber(runtimeConfig.get("ui.layout.minBoxHeight", 90)) or 90
+        GUI.Layout.splitterWidthPercent = tonumber(runtimeConfig.get("ui.layout.splitterWidthPercent", 25)) or 25
+        GUI.Layout.verticalConfigEpoch = configEpoch
+    end
+
+    GUI.Layout.right = normalizeRatios(GUI.Layout.right, defaultRight)
+    GUI.Layout.left = normalizeRatios(GUI.Layout.left, defaultLeft)
+    GUI.Layout.minBoxHeight = tonumber(GUI.Layout.minBoxHeight)
+        or (runtimeConfig and runtimeConfig.get and runtimeConfig.get("ui.layout.minBoxHeight", 90))
+        or 90
     GUI.Layout.splitterHitboxHeight = tonumber(GUI.Layout.splitterHitboxHeight) or 18
-    GUI.Layout.splitterWidthPercent = tonumber(GUI.Layout.splitterWidthPercent) or 25
+    GUI.Layout.splitterWidthPercent = tonumber(GUI.Layout.splitterWidthPercent)
+        or (runtimeConfig and runtimeConfig.get and runtimeConfig.get("ui.layout.splitterWidthPercent", 25))
+        or 25
     if GUI.Layout.activeDrag ~= nil and type(GUI.Layout.activeDrag) ~= "table" then
         GUI.Layout.activeDrag = nil
     end
     return GUI.Layout
+end
+
+local function persistVerticalLayout()
+    local runtimeConfig = (ALUI and ALUI.Config) or Config
+    if not runtimeConfig or type(runtimeConfig.set) ~= "function" or not GUI.Layout then
+        return
+    end
+
+    local right = GUI.Layout.right or { 0.20, 0.40, 0.40 }
+    local left = GUI.Layout.left or { 0.50, 0.30, 0.20 }
+
+    if GUI.Box1 and GUI.Box2 and GUI.Box3 then
+        local r1 = tonumber(GUI.Box1:get_height()) or 0
+        local r2 = tonumber(GUI.Box2:get_height()) or 0
+        local r3 = tonumber(GUI.Box3:get_height()) or 0
+        local rt = r1 + r2 + r3
+        if rt > 0 then
+            right = normalizeRatios({ r1 / rt, r2 / rt, r3 / rt }, { 0.20, 0.40, 0.40 })
+            GUI.Layout.right = right
+        end
+    end
+
+    if GUI.Box4 and GUI.Box5 and GUI.Box7 then
+        local l1 = tonumber(GUI.Box4:get_height()) or 0
+        local l2 = tonumber(GUI.Box5:get_height()) or 0
+        local l3 = tonumber(GUI.Box7:get_height()) or 0
+        local lt = l1 + l2 + l3
+        if lt > 0 then
+            left = normalizeRatios({ l1 / lt, l2 / lt, l3 / lt }, { 0.50, 0.30, 0.20 })
+            GUI.Layout.left = left
+        end
+    end
+
+    local currentLayout = runtimeConfig.current and runtimeConfig.current.ui and runtimeConfig.current.ui.layout
+    if type(currentLayout) == "table" then
+        currentLayout.rightTopRatio = tonumber(right[1]) or 0.20
+        currentLayout.rightMiddleRatio = tonumber(right[2]) or 0.40
+        currentLayout.rightBottomRatio = tonumber(right[3]) or 0.40
+        currentLayout.leftTopRatio = tonumber(left[1]) or 0.50
+        currentLayout.leftMiddleRatio = tonumber(left[2]) or 0.30
+        currentLayout.leftBottomRatio = tonumber(left[3]) or 0.20
+        currentLayout.minBoxHeight = tonumber(GUI.Layout.minBoxHeight) or 90
+        currentLayout.splitterWidthPercent = tonumber(GUI.Layout.splitterWidthPercent) or 25
+        currentLayout.lastSavedEpoch = os.time()
+    else
+        runtimeConfig.set("ui.layout.rightTopRatio", tonumber(right[1]) or 0.20)
+        runtimeConfig.set("ui.layout.rightMiddleRatio", tonumber(right[2]) or 0.40)
+        runtimeConfig.set("ui.layout.rightBottomRatio", tonumber(right[3]) or 0.40)
+        runtimeConfig.set("ui.layout.leftTopRatio", tonumber(left[1]) or 0.50)
+        runtimeConfig.set("ui.layout.leftMiddleRatio", tonumber(left[2]) or 0.30)
+        runtimeConfig.set("ui.layout.leftBottomRatio", tonumber(left[3]) or 0.20)
+        runtimeConfig.set("ui.layout.minBoxHeight", tonumber(GUI.Layout.minBoxHeight) or 90)
+        runtimeConfig.set("ui.layout.splitterWidthPercent", tonumber(GUI.Layout.splitterWidthPercent) or 25)
+        if runtimeConfig.current and runtimeConfig.current.ui and runtimeConfig.current.ui.layout then
+            runtimeConfig.current.ui.layout.lastSavedEpoch = os.time()
+        end
+    end
+    if runtimeConfig.save then
+        local ok, err = runtimeConfig.save()
+        if not ok and type(cecho) == "function" then
+            cecho(("<red>ALUI layout save failed: %s\n"):format(tostring(err)))
+        end
+    end
+end
+
+local verticalPersistTimer = nil
+
+local function scheduleVerticalPersist()
+    if verticalPersistTimer then
+        pcall(function() killTimer(verticalPersistTimer) end)
+        verticalPersistTimer = nil
+    end
+
+    verticalPersistTimer = tempTimer(0.35, function()
+        verticalPersistTimer = nil
+        persistVerticalLayout()
+    end)
 end
 
 local function resizeElement(element, width, height, x, y)
@@ -66,7 +217,7 @@ local function resizeElement(element, width, height, x, y)
 end
 
 local function resizeContentAreas()
-    local guiPadding = getGuiPadding()
+    local guiPadding = tonumber(getGuiPadding()) or 10
     local surveyPadding = guiPadding * 1.6
     local chatPadding = guiPadding * 1.4
 
@@ -136,7 +287,7 @@ local function applyColumnLayout(parent, boxes, ratios)
         return
     end
 
-    local parentHeight = parent:get_height()
+    local parentHeight = tonumber(parent:get_height())
     if not parentHeight or parentHeight <= 0 then
         return
     end
@@ -147,7 +298,8 @@ local function applyColumnLayout(parent, boxes, ratios)
         if i == #boxes then
             boxHeight = math.max(1, parentHeight - y)
         else
-            boxHeight = math.max(1, math.floor(parentHeight * ratios[i]))
+            local ratio = tonumber(ratios[i]) or 0
+            boxHeight = math.max(1, math.floor(parentHeight * ratio))
         end
 
         if box then
@@ -205,10 +357,20 @@ local function updateAdjacentRatiosForDrag(columnKey, borderIndex, deltaPixels)
         return
     end
 
-    local originalPair = ratios[borderIndex] + ratios[borderIndex + 1]
+    local firstRatio = tonumber(ratios[borderIndex])
+    local secondRatio = tonumber(ratios[borderIndex + 1])
+    if not firstRatio or not secondRatio then
+        return
+    end
+
+    local originalPair = firstRatio + secondRatio
+    if originalPair <= 0 then
+        return
+    end
+
     local minRatio = math.min(0.45, layout.minBoxHeight / parentHeight, (originalPair / 2) - 0.001)
     minRatio = math.max(0.01, minRatio)
-    local newFirst = ratios[borderIndex] + (deltaPixels / parentHeight)
+    local newFirst = firstRatio + (deltaPixels / parentHeight)
     newFirst = math.max(minRatio, math.min(originalPair - minRatio, newFirst))
 
     ratios[borderIndex] = newFirst
@@ -258,12 +420,18 @@ local function dragResize(columnKey, borderIndex, event)
     updateAdjacentRatiosForDrag(columnKey, borderIndex, delta)
     applyBoxLayout()
     resizeContentAreas()
+    scheduleVerticalPersist()
 end
 
 local function endResizeDrag()
     if GUI.Layout then
         GUI.Layout.activeDrag = nil
     end
+    if verticalPersistTimer then
+        pcall(function() killTimer(verticalPersistTimer) end)
+        verticalPersistTimer = nil
+    end
+    persistVerticalLayout()
     setAllSplittersIdle()
 end
 
@@ -350,11 +518,13 @@ local function setBoxes()
     local guiPadding = 10
     local borderRadius = 10
     local transparentBg = "rgba(0,0,0,0)"
+    local runtimeConfig = getRuntimeConfig()
 
-    if Config.get then
-        guiPadding = Config.get("ui.guiPadding", 10)
-        borderRadius = Config.get("ui.borderRadius", 10)
-        transparentBg = Config.get("colors.status.transparent", "rgba(0,0,0,0)")
+    if runtimeConfig and runtimeConfig.get then
+        guiPadding = tonumber((runtimeConfig.get("ui.guiPadding", 10))) or 10
+        borderRadius = tonumber((runtimeConfig.get("ui.borderRadius", 10))) or 10
+        transparentBg = asCssString((runtimeConfig.get("colors.status.transparent", "rgba(0,0,0,0)")),
+            "rgba(0,0,0,0)")
     end
 
     GUI.BoxCSS = CSSMan.new(string.format([[
@@ -399,9 +569,9 @@ local function setBoxes()
     local aggressiveColor = Colors.red or '#830000'
     local defensiveColor = Colors.blue or '#2A768C'
 
-    if Config.get then
-        aggressiveColor = Config.get("colors.status.aggressive", aggressiveColor)
-        defensiveColor = Config.get("colors.status.defensive", defensiveColor)
+    if runtimeConfig and runtimeConfig.get then
+        aggressiveColor = asCssString((runtimeConfig.get("colors.status.aggressive", aggressiveColor)), "#830000")
+        defensiveColor = asCssString((runtimeConfig.get("colors.status.defensive", defensiveColor)), "#2A768C")
     end
 
     -- Function to create a new box with ResourceManager tracking

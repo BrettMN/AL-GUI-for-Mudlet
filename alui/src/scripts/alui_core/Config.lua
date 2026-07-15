@@ -15,6 +15,20 @@ local MUDLET_HOME_DIR = getMudletHomeDir()
 local CONFIG_FILE = MUDLET_HOME_DIR .. "/alui_config.json"
 local BACKUP_FILE = MUDLET_HOME_DIR .. "/alui_config_backup.json"
 
+Config.paths = {
+    home = MUDLET_HOME_DIR,
+    config = CONFIG_FILE,
+    backup = BACKUP_FILE
+}
+
+function Config.getPaths()
+    return {
+        home = MUDLET_HOME_DIR,
+        config = CONFIG_FILE,
+        backup = BACKUP_FILE
+    }
+end
+
 -- Default configuration values consolidated from across the codebase
 Config.defaults = {
     -- UI Layout and Dimensions
@@ -37,6 +51,25 @@ Config.defaults = {
             topHeight = "5%",
             fullHeight = "100%",
             fullWidth = "100%"
+        },
+
+        -- Persisted user-resized layout values
+        layout = {
+            leftBorderPercent = 25,
+            rightBorderPercent = 25,
+            minSidePercent = 10,
+            minCenterPercent = 20,
+            leftTopRatio = 0.50,
+            leftMiddleRatio = 0.30,
+            leftBottomRatio = 0.20,
+            rightTopRatio = 0.20,
+            rightMiddleRatio = 0.40,
+            rightBottomRatio = 0.40,
+            leftBoxRatios = { 0.50, 0.30, 0.20 },
+            rightBoxRatios = { 0.20, 0.40, 0.40 },
+            minBoxHeight = 90,
+            splitterWidthPercent = 25,
+            lastSavedEpoch = 0
         }
     },
 
@@ -228,40 +261,59 @@ local function deepCopy(original)
     return copy
 end
 
+local function pruneInvalidConfigKeys(node)
+    if type(node) ~= "table" then
+        return
+    end
+
+    for key, value in pairs(node) do
+        if key == "" then
+            node[key] = nil
+        elseif type(value) == "table" then
+            pruneInvalidConfigKeys(value)
+        end
+    end
+end
+
 -- Merge configurations with validation
 local function mergeConfig(target, source, path)
     path = path or "config"
 
     for key, value in pairs(source) do
-        local currentPath = path .. "." .. key
+        local keyType = type(key)
+        if keyType == "string" or keyType == "number" then
+            local keyStr = tostring(key)
+            if keyStr ~= "" then
+                local currentPath = path .. "." .. keyStr
 
-        if type(value) == "table" and type(target[key]) == "table" then
-            -- Recursively merge nested tables
-            mergeConfig(target[key], value, currentPath)
-        elseif target[key] ~= nil then
-            -- Validate the value if a validator exists
-            local valid = true
-            local categoryValidators = Config.validators[string.match(currentPath, "^config%.([^%.]+)")]
+                if type(value) == "table" and type(target[key]) == "table" then
+                    -- Recursively merge nested tables
+                    mergeConfig(target[key], value, currentPath)
+                elseif target[key] ~= nil then
+                    -- Validate the value if a validator exists
+                    local valid = true
+                    local categoryValidators = Config.validators[string.match(currentPath, "^config%.([^%.]+)")]
 
-            if categoryValidators then
-                local keyStr = tostring(key) -- Convert key to string to handle numeric keys
-                if categoryValidators[key] and type(categoryValidators[key]) == "function" then
-                    valid = categoryValidators[key](value)
-                elseif keyStr:find("color") or keyStr:find("Color") then
-                    -- Use color validator for any color-related keys
-                    valid = categoryValidators.validateColor and categoryValidators.validateColor(value) or true
+                    if categoryValidators then
+                        if categoryValidators[key] and type(categoryValidators[key]) == "function" then
+                            valid = categoryValidators[key](value)
+                        elseif keyStr:find("color") or keyStr:find("Color") then
+                            -- Use color validator for any color-related keys
+                            valid = categoryValidators.validateColor and categoryValidators.validateColor(value) or true
+                        end
+                    end
+
+                    if valid then
+                        target[key] = value
+                    else
+                        logError("Invalid configuration value",
+                            string.format("Path: %s, Value: %s", currentPath, tostring(value)))
+                    end
+                else
+                    -- New configuration option - log and add with caution
+                    logError("Unknown configuration option", string.format("Path: %s, Value: %s", currentPath, tostring(value)))
                 end
             end
-
-            if valid then
-                target[key] = value
-            else
-                logError("Invalid configuration value",
-                    string.format("Path: %s, Value: %s", currentPath, tostring(value)))
-            end
-        else
-            -- New configuration option - log and add with caution
-            logError("Unknown configuration option", string.format("Path: %s, Value: %s", currentPath, tostring(value)))
         end
     end
 end
@@ -271,31 +323,51 @@ function Config.load()
     -- Start with defaults
     Config.current = deepCopy(Config.defaults)
 
+    local filePathUsed = CONFIG_FILE
+    local fileFound = false
+
     -- Try to load user configuration
     local success, userConfig = pcall(function()
         local file = io.open(CONFIG_FILE, "r")
+        if not file then
+            -- Windows fallback for environments that don't accept '/' separators.
+            filePathUsed = string.gsub(CONFIG_FILE, "/", "\\")
+            file = io.open(filePathUsed, "r")
+        end
         if not file then return nil end
-
+        fileFound = true
         local content = file:read("*all")
         file:close()
 
-        if content and content:trim() ~= "" then
-            return yajl.to_value(content)
+        if content then
+            local trimmed = tostring(content):match("^%s*(.-)%s*$")
+            if trimmed ~= "" then
+                return yajl.to_value(content)
+            end
         end
         return nil
     end)
 
-    if success and userConfig then
+    if not success then
+        logError("Failed to parse configuration file", string.format("Path: %s, Error: %s", tostring(filePathUsed), tostring(userConfig)))
+    end
+
+    if success and type(userConfig) == "table" then
+        -- Accept older/wrapped config shapes (e.g. { config = {...} } or { [""] = {...} })
+        -- so persisted settings still load after schema/serialization glitches.
+        if type(userConfig.config) == "table" and next(userConfig.config) ~= nil then
+            userConfig = userConfig.config
+        elseif type(userConfig[""]) == "table" and next(userConfig[""]) ~= nil then
+            userConfig = userConfig[""]
+        end
+        pruneInvalidConfigKeys(userConfig)
+
         -- Merge user configuration with defaults
         mergeConfig(Config.current, userConfig)
-        if Config.current.performance.enableDebugMode then
-            print("ALUI Config: Successfully loaded user configuration")
-        end
     else
-        -- Create default config file if it doesn't exist
-        Config.save()
-        if Config.current.performance.enableDebugMode then
-            print("ALUI Config: Created default configuration file")
+        if not fileFound then
+            -- Create default config file if it doesn't exist
+            Config.save()
         end
     end
 
@@ -305,9 +377,11 @@ end
 
 -- Save current configuration to file
 function Config.save()
-    local success, error = pcall(function()
+    local success, errMsg = pcall(function()
+        pruneInvalidConfigKeys(Config.current)
+
         -- Create backup of existing config
-        if lfs.attributes(CONFIG_FILE) then
+        if type(lfs) == "table" and type(lfs.attributes) == "function" and lfs.attributes(CONFIG_FILE) then
             local backupSuccess = pcall(function()
                 local source = io.open(CONFIG_FILE, "r")
                 local backup = io.open(BACKUP_FILE, "w")
@@ -325,12 +399,22 @@ function Config.save()
         -- Save current configuration
         local file = io.open(CONFIG_FILE, "w")
         if not file then
-            error("Could not open config file for writing: " .. CONFIG_FILE)
+            -- Windows fallback for environments that don't accept '/' separators.
+            local windowsPath = string.gsub(CONFIG_FILE, "/", "\\")
+            file = io.open(windowsPath, "w")
+        end
+        if not file then
+            _G.error("Could not open config file for writing: " .. CONFIG_FILE)
         end
 
         local jsonConfig = yajl.to_string(Config.current)
         file:write(jsonConfig)
+        if file.flush then
+            file:flush()
+        end
         file:close()
+
+        Config.lastSaveEpoch = os.time()
 
         if Config.current.performance.enableDebugMode then
             print("ALUI Config: Configuration saved successfully")
@@ -338,13 +422,22 @@ function Config.save()
     end)
 
     if not success then
-        logError("Failed to save configuration", error)
+        logError("Failed to save configuration", errMsg)
     end
+
+    return success, errMsg
 end
 
 -- Get a configuration value with dot notation (e.g., "ui.sideBorderPercent")
 function Config.get(path, default)
-    local keys = string.split(path, ".")
+    if type(path) ~= "string" or path == "" then
+        return default
+    end
+
+    local keys = {}
+    for key in path:gmatch("[^%.]+") do
+        table.insert(keys, key)
+    end
     local value = Config.current
 
     for _, key in ipairs(keys) do
@@ -360,7 +453,23 @@ end
 
 -- Set a configuration value with validation
 function Config.set(path, value)
-    local keys = string.split(path, ".")
+    if type(path) ~= "string" or path == "" then
+        logError("Invalid configuration path", tostring(path))
+        return false
+    end
+
+    local keys = {}
+    for key in path:gmatch("[^%.]+") do
+        if key == "" then
+            logError("Invalid configuration path", tostring(path))
+            return false
+        end
+        table.insert(keys, key)
+    end
+    if #keys == 0 then
+        logError("Invalid configuration path", tostring(path))
+        return false
+    end
     local target = Config.current
 
     -- Navigate to parent of target key
@@ -389,6 +498,15 @@ function Config.set(path, value)
 
     if valid then
         target[finalKey] = value
+
+        -- Layout resize state should persist immediately so shutdown/reload
+        -- cannot lose drag adjustments due timer/callback timing.
+        if type(path) == "string" and path:match("^ui%.layout%.") and Config.save then
+            local saveOK, saveErr = Config.save()
+            if not saveOK then
+                logError("Immediate layout save failed", saveErr)
+            end
+        end
 
         -- Auto-save if enabled
         if Config.get("performance.enableDebugMode") then
@@ -423,6 +541,12 @@ function Config.apply()
         if ALUI.ConfigGUI and Config.get("features.enableConfigGUI", true) then
             -- ConfigGUI will handle its own updates via change handlers
         end
+
+        -- Re-apply layout after config loads so persisted values are reflected
+        -- even when GUI scripts were initialized before the config module.
+        if ALUI.GUI.setBackground then ALUI.GUI.setBackground() end
+        if ALUI.GUI.setBorders then ALUI.GUI.setBorders() end
+        if ALUI.GUI.resizeBoxes then ALUI.GUI.resizeBoxes() end
 
     end
 
@@ -490,6 +614,10 @@ end
 function Config.manageBackups()
     local backupDir = MUDLET_HOME_DIR .. "/alui_config_backups"
     local retentionDays = Config.get("advanced.backupRetentionDays", 30)
+
+    if type(lfs) ~= "table" or type(lfs.mkdir) ~= "function" or type(lfs.dir) ~= "function" or type(lfs.attributes) ~= "function" then
+        return
+    end
 
     -- Create backup directory if it doesn't exist
     lfs.mkdir(backupDir)

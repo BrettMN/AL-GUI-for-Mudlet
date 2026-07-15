@@ -6,15 +6,28 @@ local GUI = (ALUI and ALUI.GUI) or GUI or {}
 local Config = (ALUI and ALUI.Config) or {}
 local RM = ALUI and ALUI.ResourceManager
 
+local function getRuntimeConfig()
+    return (ALUI and ALUI.Config) or Config
+end
+
+local function asNumber(value, default)
+    local n = tonumber(value)
+    if n == nil then
+        return default
+    end
+    return n
+end
+
 -- Get configuration values with fallbacks
 local sideBorderPercent = 25
 local topBorderPercent = 5
 local containerConfig = {}
 
-if Config.get then
-    sideBorderPercent = Config.get("ui.sideBorderPercent", 25)
-    topBorderPercent = Config.get("ui.topBorderPercent", 5)
-    containerConfig = Config.get("ui.containers", {})
+local runtimeConfig = getRuntimeConfig()
+if runtimeConfig and runtimeConfig.get then
+    sideBorderPercent = asNumber((runtimeConfig.get("ui.sideBorderPercent", 25)), 25)
+    topBorderPercent = asNumber((runtimeConfig.get("ui.topBorderPercent", 5)), 5)
+    containerConfig = runtimeConfig.get("ui.containers", {})
 end
 
 -- Set default container config values
@@ -26,8 +39,24 @@ containerConfig.fullHeight = containerConfig.fullHeight or "100%"
 
 local function ensureHorizontalLayoutState()
     GUI.Layout = GUI.Layout or {}
-    GUI.Layout.leftBorderPercent = tonumber(GUI.Layout.leftBorderPercent) or sideBorderPercent
-    GUI.Layout.rightBorderPercent = tonumber(GUI.Layout.rightBorderPercent) or sideBorderPercent
+    local cfg = getRuntimeConfig()
+    local defaultSideBorderPercent = sideBorderPercent
+    local configEpoch = nil
+    if cfg and cfg.get then
+        defaultSideBorderPercent = asNumber((cfg.get("ui.sideBorderPercent", defaultSideBorderPercent)), defaultSideBorderPercent)
+        configEpoch = tonumber((cfg.get("ui.layout.lastSavedEpoch", 0))) or 0
+    end
+
+    if cfg and cfg.get and GUI.Layout.horizontalConfigEpoch ~= configEpoch then
+        GUI.Layout.leftBorderPercent = asNumber((cfg.get("ui.layout.leftBorderPercent", defaultSideBorderPercent)), defaultSideBorderPercent)
+        GUI.Layout.rightBorderPercent = asNumber((cfg.get("ui.layout.rightBorderPercent", defaultSideBorderPercent)), defaultSideBorderPercent)
+        GUI.Layout.minSidePercent = asNumber((cfg.get("ui.layout.minSidePercent", 10)), 10)
+        GUI.Layout.minCenterPercent = asNumber((cfg.get("ui.layout.minCenterPercent", 20)), 20)
+        GUI.Layout.horizontalConfigEpoch = configEpoch
+    end
+
+    GUI.Layout.leftBorderPercent = tonumber(GUI.Layout.leftBorderPercent) or defaultSideBorderPercent
+    GUI.Layout.rightBorderPercent = tonumber(GUI.Layout.rightBorderPercent) or defaultSideBorderPercent
     GUI.Layout.minSidePercent = tonumber(GUI.Layout.minSidePercent) or 10
     GUI.Layout.minCenterPercent = tonumber(GUI.Layout.minCenterPercent) or 20
     if GUI.Layout.activeHorizontalDrag ~= nil and type(GUI.Layout.activeHorizontalDrag) ~= "table" then
@@ -36,34 +65,81 @@ local function ensureHorizontalLayoutState()
     return GUI.Layout
 end
 
+local function persistHorizontalLayout()
+    local runtimeConfig = (ALUI and ALUI.Config) or Config
+    if not runtimeConfig or type(runtimeConfig.set) ~= "function" then
+        return
+    end
+
+    local layout = ensureHorizontalLayoutState()
+    local cfg = getRuntimeConfig()
+    local mainWindowPadding = 6
+    if cfg and cfg.get then
+        mainWindowPadding = asNumber((cfg.get("ui.mainWindowPadding", mainWindowPadding)), 6)
+    end
+
+    local windowWidth = tonumber(getTotalUIWidth())
+    if windowWidth and windowWidth > 0 then
+        if GUI.Left and type(GUI.Left.get_width) == "function" then
+            local leftWidth = tonumber(GUI.Left:get_width())
+            if leftWidth then
+                layout.leftBorderPercent = ((leftWidth - mainWindowPadding) / windowWidth) * 100
+            end
+        end
+
+        if GUI.Right and type(GUI.Right.get_width) == "function" then
+            local rightWidth = tonumber(GUI.Right:get_width())
+            if rightWidth then
+                layout.rightBorderPercent = ((rightWidth - mainWindowPadding) / windowWidth) * 100
+            end
+        end
+    end
+
+    local currentLayout = runtimeConfig.current and runtimeConfig.current.ui and runtimeConfig.current.ui.layout
+    if type(currentLayout) == "table" then
+        currentLayout.leftBorderPercent = tonumber(layout.leftBorderPercent) or sideBorderPercent
+        currentLayout.rightBorderPercent = tonumber(layout.rightBorderPercent) or sideBorderPercent
+        currentLayout.minSidePercent = tonumber(layout.minSidePercent) or 10
+        currentLayout.minCenterPercent = tonumber(layout.minCenterPercent) or 20
+        currentLayout.lastSavedEpoch = os.time()
+    else
+        runtimeConfig.set("ui.layout.leftBorderPercent", tonumber(layout.leftBorderPercent) or sideBorderPercent)
+        runtimeConfig.set("ui.layout.rightBorderPercent", tonumber(layout.rightBorderPercent) or sideBorderPercent)
+        runtimeConfig.set("ui.layout.minSidePercent", tonumber(layout.minSidePercent) or 10)
+        runtimeConfig.set("ui.layout.minCenterPercent", tonumber(layout.minCenterPercent) or 20)
+        if runtimeConfig.current and runtimeConfig.current.ui and runtimeConfig.current.ui.layout then
+            runtimeConfig.current.ui.layout.lastSavedEpoch = os.time()
+        end
+    end
+    if runtimeConfig.save then
+        local ok, err = runtimeConfig.save()
+        if not ok and type(cecho) == "function" then
+            cecho(("<red>ALUI layout save failed: %s\n"):format(tostring(err)))
+        end
+    end
+end
+
+local horizontalPersistTimer = nil
+
+local function scheduleHorizontalPersist()
+    if horizontalPersistTimer then
+        pcall(function() killTimer(horizontalPersistTimer) end)
+        horizontalPersistTimer = nil
+    end
+
+    horizontalPersistTimer = tempTimer(0.35, function()
+        horizontalPersistTimer = nil
+        persistHorizontalLayout()
+    end)
+end
+
 local function clamp(value, minValue, maxValue)
     return math.max(minValue, math.min(maxValue, value))
 end
 
 local function getTotalUIWidth()
-    if GUI.Left and GUI.Top and GUI.Right
-        and type(GUI.Left.get_width) == "function"
-        and type(GUI.Top.get_width) == "function"
-        and type(GUI.Right.get_width) == "function" then
-        local leftW = GUI.Left:get_width()
-        local topW = GUI.Top:get_width()
-        local rightW = GUI.Right:get_width()
-
-        if type(leftW) == "number" and type(topW) == "number" and type(rightW) == "number"
-            and leftW > 0 and topW > 0 and rightW > 0 then
-            return leftW + topW + rightW
-        end
-    end
-
-    if GUI.Right and type(GUI.Right.get_x) == "function" and type(GUI.Right.get_width) == "function" then
-        local rightX = GUI.Right:get_x()
-        local rightW = GUI.Right:get_width()
-        if type(rightX) == "number" and type(rightW) == "number" and rightW > 0 then
-            return rightX + rightW
-        end
-    end
-
-    return select(1, getMainWindowSize())
+    local width = getMainWindowSize()
+    return width
 end
 
 local horizontalHandleStyles = {
@@ -152,21 +228,26 @@ local function dragHorizontal(edge, event)
         return
     end
 
-    local windowWidth = getTotalUIWidth()
+    local windowWidth = tonumber(getTotalUIWidth())
     if not windowWidth or windowWidth <= 0 then
         return
     end
 
     local mainWindowPadding = 6
-    if Config.get then
-        mainWindowPadding = Config.get("ui.mainWindowPadding", mainWindowPadding)
+    local cfg = getRuntimeConfig()
+    if cfg and cfg.get then
+        mainWindowPadding = asNumber((cfg.get("ui.mainWindowPadding", mainWindowPadding)), 6)
     end
 
-    local minSidePx = math.max(80, math.floor(windowWidth * (layout.minSidePercent / 100)))
-    local minCenterPx = math.max(220, math.floor(windowWidth * (layout.minCenterPercent / 100)))
+    local minSidePercent = tonumber(layout.minSidePercent) or 10
+    local minCenterPercent = tonumber(layout.minCenterPercent) or 20
+    local minSidePx = math.max(80, math.floor(windowWidth * (minSidePercent / 100)))
+    local minCenterPx = math.max(220, math.floor(windowWidth * (minCenterPercent / 100)))
 
-    local leftBorderPx = tonumber(layout.leftBorderPx) or ((windowWidth * (layout.leftBorderPercent / 100)) + mainWindowPadding)
-    local rightBorderPx = tonumber(layout.rightBorderPx) or ((windowWidth * (layout.rightBorderPercent / 100)) + mainWindowPadding)
+    local leftBorderPct = tonumber(layout.leftBorderPercent) or sideBorderPercent
+    local rightBorderPct = tonumber(layout.rightBorderPercent) or sideBorderPercent
+    local leftBorderPx = (windowWidth * (leftBorderPct / 100)) + mainWindowPadding
+    local rightBorderPx = (windowWidth * (rightBorderPct / 100)) + mainWindowPadding
 
     local delta = event.globalX - (drag.lastGlobalX or event.globalX)
     if delta == 0 then
@@ -184,13 +265,21 @@ local function dragHorizontal(edge, event)
 
     layout.leftBorderPx = leftBorderPx
     layout.rightBorderPx = rightBorderPx
+    layout.leftBorderPercent = ((leftBorderPx - mainWindowPadding) / windowWidth) * 100
+    layout.rightBorderPercent = ((rightBorderPx - mainWindowPadding) / windowWidth) * 100
 
     applyHorizontalResize()
+    scheduleHorizontalPersist()
 end
 
 local function endHorizontalDrag()
     local layout = ensureHorizontalLayoutState()
     layout.activeHorizontalDrag = nil
+    if horizontalPersistTimer then
+        pcall(function() killTimer(horizontalPersistTimer) end)
+        horizontalPersistTimer = nil
+    end
+    persistHorizontalLayout()
     setAllHorizontalHandlesIdle()
 end
 
@@ -302,31 +391,26 @@ GUI.HorizontalResizeHandlesByName = {
 local function setBackground()
     local mainWindowPadding = 6
 
-    if Config.get then
-        topBorderPercent = Config.get("ui.topBorderPercent", topBorderPercent)
-        mainWindowPadding = Config.get("ui.mainWindowPadding", mainWindowPadding)
+    local cfg = getRuntimeConfig()
+    if cfg and cfg.get then
+        topBorderPercent = asNumber((cfg.get("ui.topBorderPercent", topBorderPercent)), topBorderPercent)
+        mainWindowPadding = asNumber((cfg.get("ui.mainWindowPadding", mainWindowPadding)), 6)
     end
 
     local layout = ensureHorizontalLayoutState()
 
-    local mainWidth, height = getMainWindowSize()
-    local width = getTotalUIWidth()
-    if type(width) ~= "number" or width <= 0 then
-        width = mainWidth
-    end
-    local minSidePx = math.max(80, math.floor(width * (layout.minSidePercent / 100)))
-    local minCenterPx = math.max(220, math.floor(width * (layout.minCenterPercent / 100)))
+    local _, height = getMainWindowSize()
+    local width = tonumber(getTotalUIWidth())
+    if type(width) ~= "number" or width <= 0 then return end
+    local minSidePercent = tonumber(layout.minSidePercent) or 10
+    local minCenterPercent = tonumber(layout.minCenterPercent) or 20
+    local minSidePx = math.max(80, math.floor(width * (minSidePercent / 100)))
+    local minCenterPx = math.max(220, math.floor(width * (minCenterPercent / 100)))
 
-    local leftBorderPx = tonumber(layout.leftBorderPx)
-    local rightBorderPx = tonumber(layout.rightBorderPx)
-
-    if not leftBorderPx then
-        leftBorderPx = (width * (layout.leftBorderPercent / 100)) + mainWindowPadding
-    end
-
-    if not rightBorderPx then
-        rightBorderPx = (width * (layout.rightBorderPercent / 100)) + mainWindowPadding
-    end
+    local leftBorderPct = tonumber(layout.leftBorderPercent) or sideBorderPercent
+    local rightBorderPct = tonumber(layout.rightBorderPercent) or sideBorderPercent
+    local leftBorderPx = (width * (leftBorderPct / 100)) + mainWindowPadding
+    local rightBorderPx = (width * (rightBorderPct / 100)) + mainWindowPadding
 
     local maxLeftPx = math.max(minSidePx, width - rightBorderPx - minCenterPx)
     leftBorderPx = clamp(leftBorderPx, minSidePx, maxLeftPx)

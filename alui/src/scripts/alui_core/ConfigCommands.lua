@@ -21,6 +21,7 @@ local function handleConfigCommand(action, category, key, value)
         cecho("<white>  config list [category]      <dim_grey>- List configuration options\n")
         cecho("<white>  config reset [category]     <dim_grey>- Reset to defaults\n")
         cecho("<white>  config save                 <dim_grey>- Save configuration to file\n")
+        cecho("<white>  config path                 <dim_grey>- Show config file location\n")
         cecho("<white>  config reload               <dim_grey>- Reload from file\n")
         cecho("<white>  config export               <dim_grey>- Export configuration as JSON\n")
         cecho("<white>  config schema               <dim_grey>- Show configuration schema\n")
@@ -135,6 +136,15 @@ local function handleConfigCommand(action, category, key, value)
     elseif action == "save" then
         Config.save()
         cecho("<green>Configuration saved to file\n")
+    elseif action == "path" or action == "where" then
+        local paths = Config.getPaths and Config.getPaths() or Config.paths
+        if paths then
+            cecho(f "<cyan>Config file:<white> {paths.config}\n")
+            cecho(f "<cyan>Backup file:<white> {paths.backup}\n")
+            cecho(f "<cyan>Mudlet home:<white> {paths.home}\n")
+        else
+            cecho("<red>Config path information unavailable.\n")
+        end
     elseif action == "reload" then
         Config.load()
         cecho("<green>Configuration reloaded from file\n")

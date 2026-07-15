@@ -60,6 +60,10 @@ function _.apply_room_environment(roomID, terrain)
     if type(terrain) ~= "string" then return end
     local target = _.terrain_types[terrain]
     if not target then
+        local lowered = string.lower(terrain)
+        target = _.terrain_types[lowered]
+    end
+    if not target then
         local canonical = _.normalize_terrain_name(terrain)
         if canonical then
             target = _.terrain_types[canonical]

@@ -16,33 +16,29 @@ local function setBorders()
     local mainWindowPadding = 6
 
     if Config.get then
-        local defaultSide = Config.get("ui.sideBorderPercent", 25) / 100
+        local defaultSide = (tonumber((Config.get("ui.sideBorderPercent", 25))) or 25) / 100
         leftBorderPercent = defaultSide
         rightBorderPercent = defaultSide
-        topBorderPercent = Config.get("ui.topBorderPercent", 5) / 100
-        mainWindowPadding = Config.get("ui.mainWindowPadding", 6)
+        topBorderPercent = (tonumber((Config.get("ui.topBorderPercent", 5))) or 5) / 100
+        mainWindowPadding = tonumber((Config.get("ui.mainWindowPadding", 6))) or 6
     end
 
     local layout = GUI_NS.Layout
     if layout then
-        if tonumber(layout.leftBorderPx) then
-            leftBorderPercent = nil
-        end
-        if tonumber(layout.rightBorderPx) then
-            rightBorderPercent = nil
-        end
-        if leftBorderPercent ~= nil and tonumber(layout.leftBorderPercent) then
+        if tonumber(layout.leftBorderPercent) then
             leftBorderPercent = tonumber(layout.leftBorderPercent) / 100
         end
-        if rightBorderPercent ~= nil and tonumber(layout.rightBorderPercent) then
+        if tonumber(layout.rightBorderPercent) then
             rightBorderPercent = tonumber(layout.rightBorderPercent) / 100
         end
     end
 
-    local leftBorder = (leftBorderPercent and ((w * leftBorderPercent) + mainWindowPadding))
-        or (tonumber(layout and layout.leftBorderPx) or ((w * 0.25) + mainWindowPadding))
-    local rightBorder = (rightBorderPercent and ((w * rightBorderPercent) + mainWindowPadding))
-        or (tonumber(layout and layout.rightBorderPx) or ((w * 0.25) + mainWindowPadding))
+    leftBorderPercent = tonumber(leftBorderPercent) or 0.25
+    rightBorderPercent = tonumber(rightBorderPercent) or 0.25
+    topBorderPercent = tonumber(topBorderPercent) or (1 / 20)
+
+    local leftBorder = (w * leftBorderPercent) + mainWindowPadding
+    local rightBorder = (w * rightBorderPercent) + mainWindowPadding
     local topBorder = (h * topBorderPercent) + mainWindowPadding
 
     setBorderLeft(leftBorder)
