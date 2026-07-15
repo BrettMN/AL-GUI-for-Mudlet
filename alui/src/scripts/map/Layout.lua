@@ -76,7 +76,12 @@ function _.create_neighbors_for_current_room(roomID, posCache)
             -- Treat such IDs as missing so the candidate-search runs.
             if type(targetID) == "number" and targetID > 0 then
                 local existingArea = getRoomArea(targetID)
-                if not existingArea or existingArea < 1 then
+                local tx, ty, tz = getRoomCoordinates(targetID)
+                local targetName = getRoomName(targetID)
+                local hasName = type(targetName) == "string" and targetName ~= ""
+                local hasCoords = tx ~= nil and ty ~= nil and tz ~= nil
+                if not existingArea or existingArea < 1 or (not hasCoords and not hasName) then
+                    pcall(setRoomIDbyHash, targetID, "")
                     targetID = -1
                 end
             end
@@ -197,11 +202,17 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 if type(candidateID) == "number" and candidateID > 0 then
                     local cHash = type(getRoomHashByID) == "function"
                         and getRoomHashByID(candidateID) or nil
-                    if cHash == nil or cHash == "" then
-                        -- Hashless room: adopt fully — bind the GMCP vnum to it.
+                    local candidateIsPlaceholder = type(_.is_placeholder) == "function"
+                        and _.is_placeholder(candidateID)
+                    if cHash == nil or cHash == "" or candidateIsPlaceholder then
+                        -- Hashless room OR placeholder: adopt fully — bind this
+                        -- GMCP vnum to the existing room to avoid stacking.
+                        if type(cHash) == "string" and cHash ~= "" and cHash ~= targetVnum then
+                            pcall(setRoomIDbyHash, candidateID, "")
+                        end
                         setRoomIDbyHash(candidateID, targetVnum)
                         _.mark_autowalk_dirty()
-                        _.debug_echo("Adopted hashless room " .. candidateID
+                        _.debug_echo("Adopted existing room " .. candidateID
                             .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
                     else
                         -- Room already has its own identity; just reuse it to
@@ -329,10 +340,18 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                 if type(getRoomHashByID) == "function" then
                                     local dupHash  = getRoomHashByID(dup)
                                     local keepHash = getRoomHashByID(keep)
-                                    if (keepHash == nil or keepHash == "")
-                                        and type(dupHash) == "string" and dupHash ~= "" then
-                                        pcall(setRoomIDbyHash, dup, "")
-                                        setRoomIDbyHash(keep, dupHash)
+                                    local keepIsPlaceholder = has_is_placeholder and _.is_placeholder(keep)
+                                    if type(dupHash) == "string" and dupHash ~= "" then
+                                        if ((keepHash == nil or keepHash == "") or keepIsPlaceholder) then
+                                            if type(keepHash) == "string" and keepHash ~= ""
+                                                and keepHash ~= dupHash then
+                                                pcall(setRoomIDbyHash, keep, "")
+                                            end
+                                            pcall(setRoomIDbyHash, dup, "")
+                                            setRoomIDbyHash(keep, dupHash)
+                                        else
+                                            pcall(setRoomIDbyHash, dup, "")
+                                        end
                                     end
                                 end
                                 if type(deleteRoom) == "function" then
@@ -349,7 +368,12 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                         -- Ensure the incoming GMCP vnum points at the survivor.
                         local keepHash = type(getRoomHashByID) == "function"
                             and getRoomHashByID(keep) or nil
-                        if keepHash == nil or keepHash == "" then
+                        local keepIsPlaceholder = has_is_placeholder and _.is_placeholder(keep)
+                        if keepHash == nil or keepHash == ""
+                            or (keepIsPlaceholder and keepHash ~= targetVnum) then
+                            if type(keepHash) == "string" and keepHash ~= "" and keepHash ~= targetVnum then
+                                pcall(setRoomIDbyHash, keep, "")
+                            end
                             setRoomIDbyHash(keep, targetVnum)
                         end
                         targetID = keep
@@ -431,10 +455,18 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                         if type(getRoomHashByID) == "function" then
                             local dupHash  = getRoomHashByID(dup)
                             local keepHash = getRoomHashByID(keep)
-                            if (keepHash == nil or keepHash == "")
-                                and type(dupHash) == "string" and dupHash ~= "" then
-                                pcall(setRoomIDbyHash, dup, "")
-                                setRoomIDbyHash(keep, dupHash)
+                            local keepIsPlaceholder = has_is_placeholder and _.is_placeholder(keep)
+                            if type(dupHash) == "string" and dupHash ~= "" then
+                                if ((keepHash == nil or keepHash == "") or keepIsPlaceholder) then
+                                    if type(keepHash) == "string" and keepHash ~= ""
+                                        and keepHash ~= dupHash then
+                                        pcall(setRoomIDbyHash, keep, "")
+                                    end
+                                    pcall(setRoomIDbyHash, dup, "")
+                                    setRoomIDbyHash(keep, dupHash)
+                                else
+                                    pcall(setRoomIDbyHash, dup, "")
+                                end
                             end
                         end
                         -- Re-wire any exits from the current room that

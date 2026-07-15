@@ -65,6 +65,8 @@ local function ensureHorizontalLayoutState()
     return GUI.Layout
 end
 
+local getTotalUIWidth
+
 local function persistHorizontalLayout()
     local runtimeConfig = (ALUI and ALUI.Config) or Config
     if not runtimeConfig or type(runtimeConfig.set) ~= "function" then
@@ -137,7 +139,7 @@ local function clamp(value, minValue, maxValue)
     return math.max(minValue, math.min(maxValue, value))
 end
 
-local function getTotalUIWidth()
+getTotalUIWidth = function()
     local width = getMainWindowSize()
     return width
 end

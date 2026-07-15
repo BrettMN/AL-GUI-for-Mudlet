@@ -19,6 +19,7 @@ local room_event_queue    = {}
 local queue_processing    = false
 local queue_drain_timer   = nil
 local queue_timer_pending = false -- prevents scheduling a second drain timer
+local queue_max_per_tick  = 3     -- process a small batch each timer tick
 
 -- vertical directions used by check_doors (exposed here for event handler)
 local verticalDirs        = { u = true, up = true, d = true, down = true }
@@ -267,6 +268,17 @@ local function handle_move(isLastInBatch)
         local rnum = getRoomIDbyHash(info.vnum)
         local roomWasCreatedOrAdopted = false
         if type(rnum) ~= "number" then rnum = -1 end
+        if type(rnum) == "number" and rnum > 0 then
+            local areaID = getRoomArea(rnum)
+            local rx, ry, rz = getRoomCoordinates(rnum)
+            local roomName = getRoomName(rnum)
+            local hasName = type(roomName) == "string" and roomName ~= ""
+            local hasCoords = rx ~= nil and ry ~= nil and rz ~= nil
+            if not areaID or areaID < 1 or (not hasCoords and not hasName) then
+                pcall(setRoomIDbyHash, rnum, "")
+                rnum = -1
+            end
+        end
         if rnum < 1 then
             local warn = "handle_move: vnum " .. tostring(info.vnum)
                 .. " has no room (getRoomIDbyHash returned " .. tostring(rnum)
@@ -484,7 +496,9 @@ local function handle_move(isLastInBatch)
             end
 
             local stubs = getExitStubs1(rnum)
-            _.debug_echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
+            if map.configs.debug_mapper then
+                _.debug_echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
+            end
 
             if stubs then
                 for _i, n in ipairs(stubs) do
@@ -517,15 +531,15 @@ end
 
 local function process_room_queue()
     queue_timer_pending = false
-    -- Drain ONE event per timer tick.  Yielding back to Mudlet's event loop
-    -- between events keeps the UI responsive (typing, scrolling, mouse) even
-    -- when a batch of rapid GMCP updates would otherwise back up.
-    if #room_event_queue > 0 then
+    -- Drain a small batch per timer tick. This keeps Mudlet responsive while
+    -- reducing visible map lag when Room.Info events arrive in bursts.
+    local drained = 0
+    while #room_event_queue > 0 and drained < queue_max_per_tick do
         local snapshot = table.remove(room_event_queue, 1)
         local ok, err  = pcall(function()
             map.prev_info = map.room_info
             map.room_info = snapshot
-            local isLast  = (#room_event_queue == 0)
+            local isLast  = (#room_event_queue == 0) or (drained == queue_max_per_tick - 1)
             handle_move(isLast)
         end)
         if not ok then
@@ -537,6 +551,7 @@ local function process_room_queue()
             end
             if type(debugc) == "function" then debugc(msg) end
         end
+        drained = drained + 1
     end
     if #room_event_queue > 0 then
         queue_timer_pending = true
@@ -580,11 +595,17 @@ function map.eventHandler(event, ...)
             terrain = gmcp.Room.Info.terrain,
             exits   = exits,
         }
-        table.insert(room_event_queue, snapshot)
+        -- Coalesce duplicate queued updates for the same room so repeated
+        -- Room.Info payloads do not create avoidable queue lag.
+        local qlen = #room_event_queue
+        if qlen > 0 and room_event_queue[qlen] and room_event_queue[qlen].vnum == snapshot.vnum then
+            room_event_queue[qlen] = snapshot
+        else
+            table.insert(room_event_queue, snapshot)
+        end
         if not queue_processing and not queue_timer_pending then
-            queue_timer_pending = true
-            queue_processing    = true
-            queue_drain_timer   = tempTimer(0, function() process_room_queue() end)
+            queue_processing = true
+            process_room_queue()
         end
         if map.walking and _.get_active_speedwalk_wait and _.get_active_speedwalk_wait()
             and _.get_active_speedwalk_delay and _.get_active_speedwalk_delay() <= 0 then
