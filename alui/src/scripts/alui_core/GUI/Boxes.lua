@@ -12,6 +12,19 @@ local function getRuntimeConfig()
     return (ALUI and ALUI.Config) or Config
 end
 
+local function getThemePalette()
+    if GUI.getThemePalette then
+        return GUI.getThemePalette()
+    end
+    return {
+        boxBackground = "black",
+        consoleBackground = "black",
+        text = "white",
+        border = "white",
+        neutralStatus = "rgba(0,0,0,100)",
+    }
+end
+
 local function getGuiPadding()
     local runtimeConfig = getRuntimeConfig()
     if runtimeConfig and runtimeConfig.get then
@@ -518,6 +531,7 @@ local function setBoxes()
     local guiPadding = 10
     local borderRadius = 10
     local transparentBg = "rgba(0,0,0,0)"
+    local themePalette = getThemePalette()
     local runtimeConfig = getRuntimeConfig()
 
     if runtimeConfig and runtimeConfig.get then
@@ -528,28 +542,28 @@ local function setBoxes()
     end
 
     GUI.BoxCSS = CSSMan.new(string.format([[
-  background-color: black;
+  background-color: %s;
   border-style: solid;
   border-width: 1px;
   border-radius: %dpx;
-  border-color: white;
+  border-color: %s;
   margin: %dpx;
-]], borderRadius, guiPadding))
+]], themePalette.boxBackground, borderRadius, themePalette.border, guiPadding))
 
     GUI.GaugeBackCSS = CSSMan.new(string.format([[
   background-color: %s;
   margin-top: 5px;
   margin-bottom: 5px;
   border-style: solid;
-  border-color: white;
-]], transparentBg))
+  border-color: %s;
+]], transparentBg, themePalette.border))
 
     GUI.GaugeFrontCSS = CSSMan.new([[
   background-color: rgba(0,0,0,0);
   margin-top: 5px;
   margin-bottom: 5px;
   border-style: solid;
-  border-color: white;
+  border-color: ]] .. themePalette.border .. [[;
 ]])
 
     -- Register CSS objects with ResourceManager
@@ -626,7 +640,13 @@ local function setBoxes()
             width = Style_Button_Width,
             tooltip = 'Increase ' .. name .. ' Some',
 
-            style = [[ margin: 5px; border-radius:5px; background-color: ]] .. color .. [[; border: 1px solid white; ]],
+            style = [[ margin: 5px; border-radius:5px; background-color: ]]
+                .. color
+                .. [[; border: 1px solid ]]
+                .. themePalette.border
+                .. [[; color: ]]
+                .. themePalette.text
+                .. [[; ]],
 
         }, parent)
         button:echo("<center>" .. name)
@@ -754,7 +774,7 @@ local function setBoxes()
         y = Gui_Padding * 2,
         width = GUI.Room_Container:get_width() - (Gui_Padding * 4),
         height = GUI.Room_Container:get_height() - (Gui_Padding * 4),
-        color = "black",
+        color = themePalette.consoleBackground,
         autoWrap = true,
     }, GUI.Room_Container)
 
@@ -771,7 +791,7 @@ local function setBoxes()
         y = Gui_Padding * 2,
         height = GUI.Status_Container:get_height() - (Gui_Padding * 4),
         width = GUI.Status_Container:get_width() - (Gui_Padding * 4),
-        color = "black",
+        color = themePalette.consoleBackground,
         autoWrap = true,
     }, GUI.Status_Container)
 
@@ -854,7 +874,7 @@ local function setBoxes()
         y = survey_padding,
         width = GUI.Survey_Container:get_width() - (survey_padding * 2),
         height = GUI.Survey_Container:get_height() - (survey_padding * 2),
-        color = "black",
+        color = themePalette.consoleBackground,
     }, GUI.Survey_Container)
 
     -- Register survey mini console with ResourceManager
@@ -890,7 +910,52 @@ local function setBoxes()
     }, GUI.Chat_Container)
 end
 
+local function applyTheme()
+    local themePalette = getThemePalette()
+    if not themePalette then
+        return
+    end
+
+    if GUI.BoxCSS then
+        GUI.BoxCSS:set("background-color", themePalette.boxBackground)
+        GUI.BoxCSS:set("border-color", themePalette.border)
+        local boxCSS = GUI.BoxCSS:getCSS()
+        local boxNames = { "Box1", "Box2", "Box3", "Box4", "Box5", "Box7" }
+        for _, name in ipairs(boxNames) do
+            local box = GUI[name]
+            if box then
+                box:setStyleSheet(boxCSS)
+            end
+        end
+    end
+
+    if GUI.GaugeBackCSS then
+        GUI.GaugeBackCSS:set("border-color", themePalette.border)
+    end
+    if GUI.GaugeFrontCSS then
+        GUI.GaugeFrontCSS:set("border-color", themePalette.border)
+    end
+
+    local function applyConsoleColor(console)
+        if console and type(console.setColor) == "function" then
+            console:setColor(themePalette.consoleBackground)
+        end
+    end
+
+    if GUI.Components then
+        applyConsoleColor(GUI.Components.roommini)
+        applyConsoleColor(GUI.Components.combatmini)
+        applyConsoleColor(GUI.Components.surveymini)
+        applyConsoleColor(GUI.Components.chat_cap)
+    end
+
+    if GUI.refreshHeaderTheme then
+        GUI.refreshHeaderTheme()
+    end
+end
+
 GUI.resizeBoxes = function()
+    applyTheme()
     applyBoxLayout()
     resizeContentAreas()
     GUI.Box1:show()
@@ -946,6 +1011,7 @@ end
 -- Register function in both old and new namespaces for compatibility
 GUI.setBoxes = setBoxes
 GUI.resizeContentAreas = resizeContentAreas
+GUI.applyTheme = applyTheme
 
 -- Register in new ALUI namespace if available
 if GUI then

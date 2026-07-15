@@ -125,6 +125,14 @@ function ALUI.disable()
         stopNamedEventHandler(getProfileName(), 'ALUI.events.resize')
         ALUI.GUI.Events.resize = nil
     end
+    if ALUI.GUI.Events.themeStyleSheetChanged then
+        stopNamedEventHandler(getProfileName(), 'ALUI.events.themeStyleSheetChanged')
+        ALUI.GUI.Events.themeStyleSheetChanged = nil
+    end
+    if ALUI.GUI.Events.themeSettingChanged then
+        stopNamedEventHandler(getProfileName(), 'ALUI.events.themeSettingChanged')
+        ALUI.GUI.Events.themeSettingChanged = nil
+    end
 
     -- 2. Kill cleanup timers before RM wipes everything.
     cleanupTimers()

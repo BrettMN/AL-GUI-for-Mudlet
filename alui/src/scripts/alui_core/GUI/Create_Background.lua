@@ -18,6 +18,83 @@ local function asNumber(value, default)
     return n
 end
 
+local THEME_PALETTES = {
+    dark = {
+        mode = "dark",
+        background = "#353535",
+        boxBackground = "black",
+        consoleBackground = "black",
+        text = "white",
+        border = "white",
+        neutralStatus = "rgba(0,0,0,100)",
+    },
+    light = {
+        mode = "light",
+        background = "#E9E9E9",
+        boxBackground = "#F8F8F8",
+        consoleBackground = "white",
+        text = "black",
+        border = "#444444",
+        neutralStatus = "rgba(255,255,255,210)",
+    }
+}
+
+local function normalizeAppearance(value)
+    if type(value) == "boolean" then
+        return value and "dark" or "light"
+    end
+
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local v = value:lower()
+    if v:find("dark", 1, true) then
+        return "dark"
+    end
+    if v:find("light", 1, true) then
+        return "light"
+    end
+
+    return nil
+end
+
+local function resolveThemeMode()
+    -- Prefer config API if it exposes appearance information.
+    if type(getConfig) == "function" then
+        local keys = { "appearance", "theme", "themeMode", "colorScheme", "colorMode", "darkMode" }
+        for _, key in ipairs(keys) do
+            local ok, value = pcall(getConfig, key)
+            if ok then
+                local mode = normalizeAppearance(value)
+                if mode then
+                    return mode
+                end
+            end
+        end
+    end
+
+    -- Fall back to common Mudlet globals if present.
+    if type(mudlet) == "table" then
+        local mode = normalizeAppearance(mudlet.appearance)
+            or normalizeAppearance(mudlet.theme)
+            or normalizeAppearance(mudlet.themeMode)
+            or normalizeAppearance(mudlet.darkMode)
+            or normalizeAppearance(mudlet.isDarkMode)
+            or normalizeAppearance(mudlet.isDarkTheme)
+        if mode then
+            return mode
+        end
+    end
+
+    return "dark"
+end
+
+local function getActiveThemePalette()
+    local mode = resolveThemeMode()
+    return THEME_PALETTES[mode] or THEME_PALETTES.dark
+end
+
 -- Get configuration values with fallbacks
 local sideBorderPercent = 25
 local topBorderPercent = 5
@@ -389,6 +466,55 @@ GUI.HorizontalResizeHandlesByName = {
     ["GUI.HorizontalResizeRight"] = GUI.HorizontalResizeHandles.Right,
 }
 
+local function refreshThemeDrivenUI()
+    if GUI.setBackground then GUI.setBackground() end
+    if GUI.applyTheme then GUI.applyTheme() end
+    if GUI.resizeBoxes then GUI.resizeBoxes() end
+end
+
+if type(registerNamedEventHandler) == "function" and type(getProfileName) == "function" then
+    local profile = getProfileName()
+    GUI.Events = GUI.Events or {}
+
+    if GUI.Events.themeStyleSheetChanged then
+        stopNamedEventHandler(profile, "ALUI.events.themeStyleSheetChanged")
+        GUI.Events.themeStyleSheetChanged = nil
+    end
+    GUI.Events.themeStyleSheetChanged = registerNamedEventHandler(
+        profile,
+        "ALUI.events.themeStyleSheetChanged",
+        "sysAppStyleSheetChange",
+        function(_, _, source)
+            if source == "system" then
+                refreshThemeDrivenUI()
+            end
+        end,
+        false
+    )
+
+    if GUI.Events.themeSettingChanged then
+        stopNamedEventHandler(profile, "ALUI.events.themeSettingChanged")
+        GUI.Events.themeSettingChanged = nil
+    end
+    GUI.Events.themeSettingChanged = registerNamedEventHandler(
+        profile,
+        "ALUI.events.themeSettingChanged",
+        "sysSettingChanged",
+        function(_, settingName)
+            if type(settingName) ~= "string" then
+                return
+            end
+            local lowerSettingName = settingName:lower()
+            if lowerSettingName:find("theme", 1, true)
+                or lowerSettingName:find("appearance", 1, true)
+                or lowerSettingName:find("style", 1, true) then
+                refreshThemeDrivenUI()
+            end
+        end,
+        false
+    )
+end
+
 -- Core background setup function
 local function setBackground()
     local mainWindowPadding = 6
@@ -426,6 +552,19 @@ local function setBackground()
 
     local topBorderPx = (height * (topBorderPercent / 100)) + mainWindowPadding
     local centerWidthPx = math.max(1, width - leftBorderPx - rightBorderPx)
+
+    local palette = getActiveThemePalette()
+    GUI.Theme = GUI.Theme or {}
+    GUI.Theme.mode = palette.mode
+    GUI.Theme.palette = palette
+
+    if GUI.BackgroundCSS then
+        GUI.BackgroundCSS:set("background-color", palette.background)
+        local bgCSS = GUI.BackgroundCSS:getCSS()
+        if GUI.Left then GUI.Left:setStyleSheet(bgCSS) end
+        if GUI.Right then GUI.Right:setStyleSheet(bgCSS) end
+        if GUI.Top then GUI.Top:setStyleSheet(bgCSS) end
+    end
 
     GUI.Left:move(0, 0)
     GUI.Left:resize(leftBorderPx, height)
@@ -472,6 +611,7 @@ GUI.setBackground = setBackground
 -- Register in new ALUI namespace if available
 if ALUI and ALUI.GUI then
     ALUI.GUI.setBackground = setBackground
+    ALUI.GUI.getThemePalette = getActiveThemePalette
     ALUI.GUI.Components = ALUI.GUI.Components or {}
     ALUI.GUI.Components.background = setBackground
 

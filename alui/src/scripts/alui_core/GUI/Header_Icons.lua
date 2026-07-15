@@ -17,8 +17,23 @@ local function getColor(configPath, fallbackColor)
     return fallbackColor
 end
 
+local function getThemePalette()
+    if GUI.getThemePalette then
+        return GUI.getThemePalette()
+    end
+    return {
+        border = "white",
+        neutralStatus = "rgba(0,0,0,100)",
+    }
+end
+
 local blue = getColor("colors.primary.blue", Colors.blue or '#2A768C')
 local red = getColor("colors.primary.red", Colors.red or '#830000')
+
+local function getNeutralBg()
+    local themePalette = getThemePalette()
+    return getColor("colors.status.neutral", themePalette.neutralStatus)
+end
 
 GUI.Header = Geyser.HBox:new({
     name = "GUI.Header",
@@ -36,38 +51,39 @@ if RM then
     RM.registerUIElement("mainHeader", GUI.Header, "header")
 end
 
--- Use configuration for styling if available
-local neutralBg = getColor("colors.status.neutral", "rgba(0,0,0,100)")
-
 -- Create individual CSS objects for each menu item to prevent shared state issues
 local function createInfoCSS()
+    local themePalette = getThemePalette()
+    local neutralBg = getNeutralBg()
     local css = CSSMan.new(string.format([[
       background-color: %s;
       border-style: solid;
       border-width: 1px;
-      border-color: white;
+      border-color: %s;
       border-radius: 5px;
       margin: 5px;
       qproperty-wordWrap: true;
       background-position: center;
       background-repeat: no-repeat;
       background-size: auto 50%%;
-    ]], neutralBg))
+    ]], neutralBg, themePalette.border))
     return css
 end
 
 local function createActionCSS()
+    local themePalette = getThemePalette()
+    local neutralBg = getNeutralBg()
     local css = CSSMan.new(string.format([[
       background-color: %s;
       border-style: solid;
       border-width: 1px;
-      border-color: white;
+      border-color: %s;
       margin: 5px;
       qproperty-wordWrap: true;
       background-position: center;
       background-repeat: no-repeat;
       background-size: auto 50%%;
-    ]], neutralBg))
+    ]], neutralBg, themePalette.border))
     return css
 end
 
@@ -143,7 +159,7 @@ GUI.Menu.Hunger = createMenuItem("Hunger", function(self)
         if backgroundColor then
             hungerCSS:set("background-color", backgroundColor)
         else
-            hungerCSS:set("background-color", "rgba(0,0,0,100)")
+            hungerCSS:set("background-color", getNeutralBg())
         end
 
         self:setStyleSheet(hungerCSS:getCSS())
@@ -166,7 +182,7 @@ GUI.Menu.Thirst = createMenuItem("Thirst", function(self)
         if backgroundColor then
             thirstCSS:set("background-color", backgroundColor)
         else
-            thirstCSS:set("background-color", "rgba(0,0,0,100)")
+            thirstCSS:set("background-color", getNeutralBg())
         end
 
         self:setStyleSheet(thirstCSS:getCSS())
@@ -189,7 +205,7 @@ GUI.Menu.Fatigue = createMenuItem("Fatigue", function(self)
         if backgroundColor then
             fatigueCSS:set("background-color", backgroundColor)
         else
-            fatigueCSS:set("background-color", "rgba(0,0,0,100)")
+            fatigueCSS:set("background-color", getNeutralBg())
         end
 
         self:setStyleSheet(fatigueCSS:getCSS())
@@ -216,7 +232,7 @@ GUI.Menu.Posture = createMenuItem("Posture", function(self)
         local postureCSS = createInfoCSS()
 
         postureCSS:set("background-image", "none")
-        postureCSS:set("background-color", "rgba(0,0,0,100)")
+        postureCSS:set("background-color", getNeutralBg())
 
         if label and label ~= "" then
             self:clear()
@@ -361,7 +377,7 @@ GUI.Menu.Help = createMenuItem("Help", function(self)
 
         GUI.ActionCSS:set("background-image", iconPath)
 
-        GUI.ActionCSS:set("background-color", neutralBg)
+        GUI.ActionCSS:set("background-color", getNeutralBg())
 
         self:setStyleSheet(GUI.ActionCSS:getCSS())
     end,
@@ -373,6 +389,18 @@ setLabelToolTip("GUI.Menu.Help", 'Help')
 GUI.Menu.Help:setClickCallback(function()
     openUrl("https://brettmn.github.io/al-help-site/")
 end)
+
+GUI.refreshHeaderTheme = function()
+    GUI.InfoCSS = createInfoCSS()
+    GUI.ActionCSS = createActionCSS()
+    if GUI.Menu then
+        for _, item in pairs(GUI.Menu) do
+            if item and type(item.update) == "function" then
+                item:update()
+            end
+        end
+    end
+end
 
 -- Register components in ALUI namespace if available
 if ALUI and ALUI.GUI then

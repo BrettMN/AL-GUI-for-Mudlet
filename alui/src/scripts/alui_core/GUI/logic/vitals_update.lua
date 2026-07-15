@@ -24,6 +24,13 @@ local function getColor(configPath, fallbackColor)
     return fallbackColor
 end
 
+local function normalizeVitalState(value)
+    if type(value) ~= "string" then
+        return nil
+    end
+    return value:lower():gsub("^%s+", ""):gsub("%s+$", "")
+end
+
 -- Use configured colors or fallback to hardcoded values
 local blue = getColor("colors.primary.blue", Colors.blue or '#2A768C')
 local green = getColor("colors.primary.green", Colors.green or '#2EA652')
@@ -40,7 +47,7 @@ if Config.get then
     local vitalsConfig = Config.get("colors.vitals", {})
     if vitalsConfig.thirst then
         thirst_colors = {
-            ["bloated"] = vitalsConfig.thirst[1] or blue,
+            ["bloated"] = blue,
             ["quenched"] = vitalsConfig.thirst[1] or green,
             ["not thirsty"] = vitalsConfig.thirst[1] or green,
             ["slightly thirsty"] = vitalsConfig.thirst[2] or yellow,
@@ -55,7 +62,7 @@ if Config.get then
 
     if vitalsConfig.hunger then
         hunger_colors = {
-            ["stuffed"] = vitalsConfig.hunger[1] or blue,
+            ["stuffed"] = blue,
             ["full"] = vitalsConfig.hunger[1] or green,
             ["satiated"] = vitalsConfig.hunger[1] or green,
             ["not hungry"] = vitalsConfig.hunger[1] or green,
@@ -133,11 +140,12 @@ local function updateVitals(e)
     local vit = gmcp.Char.Vitals
 
     -- Update hunger status with validation
-    if vit.Hunger and hunger_colors[vit.Hunger] then
+    local hungerState = normalizeVitalState(vit.Hunger)
+    if hungerState and hunger_colors[hungerState] then
         -- Update ALUI namespace structure
         if ALUI and ALUI.Status then
             if ALUI.Status.vitals then
-                ALUI.Status.vitals.hunger = hunger_colors[vit.Hunger]
+                ALUI.Status.vitals.hunger = hunger_colors[hungerState]
             end
         end
 
@@ -147,11 +155,12 @@ local function updateVitals(e)
     end
 
     -- Update thirst status with validation
-    if vit.Thirst and thirst_colors[vit.Thirst] then
+    local thirstState = normalizeVitalState(vit.Thirst)
+    if thirstState and thirst_colors[thirstState] then
         -- Update ALUI namespace structure
         if ALUI and ALUI.Status then
             if ALUI.Status.vitals then
-                ALUI.Status.vitals.thirst = thirst_colors[vit.Thirst]
+                ALUI.Status.vitals.thirst = thirst_colors[thirstState]
             end
         end
 
