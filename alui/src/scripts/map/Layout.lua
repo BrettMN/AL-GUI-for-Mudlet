@@ -51,8 +51,14 @@ function _.create_neighbors_for_current_room(roomID, posCache)
 
     -- Build the position cache here if the caller didn't supply one.  Sharing
     -- it with handle_move/reconcile avoids repeated O(area) walks per event.
+    -- For large areas skip the O(N) full build; sub-functions will fall back
+    -- to direct getRoomsByPosition() calls on cache misses.
     if posCache == nil or posCache._areaID ~= areaID then
-        posCache = _.build_pos_cache(areaID)
+        if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
+            posCache = { _areaID = areaID, _rooms = {}, _large_area = true }
+        else
+            posCache = _.build_pos_cache(areaID)
+        end
     end
 
     local forcedZ          = _.get_forced_z_for_room(roomID)
@@ -105,6 +111,11 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 -- normalisation hint for whole-component passes, not for
                 -- individual room placement (see Data.lua forced_z_by_terrain_name).
                 local near = _.pos_cache_get(posCache, tx, ty, tz)
+                -- Large-area sentinel: cache has no coord mapping, so fall back
+                -- to Mudlet's native positional look-up.
+                if near == nil and type(getRoomsByPosition) == "function" then
+                    near = getRoomsByPosition(areaID, tx, ty, tz)
+                end
                 local realAtPos = nil
                 local function is_live_real(rid)
                     if type(rid) ~= "number" or rid < 1 then return false end
@@ -189,6 +200,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     -- Do NOT override tz with forcedZ: candidate search must look
                     -- at the actual adjacent position on the current z-plane.
                     local near = _.pos_cache_get(posCache, tx, ty, tz)
+                    -- Large-area sentinel: fall back to native positional look-up.
+                    if near == nil and type(getRoomsByPosition) == "function" then
+                        near = getRoomsByPosition(areaID, tx, ty, tz)
+                    end
                     if type(near) == "table" then
                         for _, rid in ipairs(near) do
                             if is_live(rid) then
@@ -228,6 +243,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
             if targetID < 1 then
                 targetID = createRoomID()
                 addRoom(targetID)
+                -- Keep the lightweight room-count estimate current.
+                if type(_.adjust_area_room_count) == "function" then
+                    _.adjust_area_room_count(areaID, 1)
+                end
                 setRoomIDbyHash(targetID, targetVnum)
                 created = true
                 createdCount = createdCount + 1
@@ -283,6 +302,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     -- Record this position so the backstop only scans touched spots.
                     touchedPositions[_.pos_cache_key(fx, fy, fz)] = true
                     local hits = _.pos_cache_get(posCache, fx, fy, fz)
+                    -- Large-area sentinel: fall back to native positional look-up.
+                    if hits == nil and type(getRoomsByPosition) == "function" then
+                        hits = getRoomsByPosition(areaID, fx, fy, fz)
+                    end
                     local liveIDs = {}
                     local function consider(rid)
                         if type(rid) == "number" and rid > 0 then
@@ -856,6 +879,21 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     end
 
     local areaName_display = getAreaTableSwap and getAreaTableSwap()[areaID] or ("area #" .. areaID)
+
+    -- Warn early when the area is very large: the full BFS + dedup passes below
+    -- can take many minutes (or longer) on areas with hundreds of thousands of
+    -- rooms.  Give the user a chance to abort before the freeze starts.
+    if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
+        local cnt  = type(_.get_estimated_area_room_count) == "function"
+                     and _.get_estimated_area_room_count(areaID) or "many"
+        local thr  = tonumber(map.configs and map.configs.large_area_threshold) or 50000
+        cecho(string.format(
+            "<yellow>Warning: '%s' has ~%s rooms (threshold %d). "
+            .. "Normalize may take a very long time. "
+            .. "Consider splitting the area into smaller sub-areas.\n<reset>",
+            areaName_display, tostring(cnt), thr))
+    end
+
     local areaRooms        = getAreaRooms(areaID)
     if type(areaRooms) ~= "table" then areaRooms = {} end
 

@@ -167,6 +167,11 @@ local function make_room()
     local thisRoom = createRoomID()
     addRoom(thisRoom)
     _.mark_autowalk_dirty()
+    -- Keep the lightweight room-count estimate in sync so is_large_area() stays
+    -- accurate without a full getAreaRooms() call on every movement.
+    if type(_.adjust_area_room_count) == "function" then
+        _.adjust_area_room_count(areaID, 1)
+    end
     setRoomIDbyHash(thisRoom, info.vnum)
     setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
@@ -377,12 +382,24 @@ local function handle_move(isLastInBatch)
             -- Room.Info.  The cache is mutated in-place by pos_cache_add/drop
             -- so it stays consistent.  Invalidate when the area changes or on
             -- reconnect (sysConnectionEvent sets map._pos_cache = nil).
+            -- For large areas the full build would freeze Mudlet for minutes;
+            -- use a sentinel (no coord mapping) so sub-functions fall back to
+            -- direct getRoomsByPosition() calls instead.
             local posCache = nil
             if type(currentAreaID) == "number" and currentAreaID > 0
                 and type(_.build_pos_cache) == "function" then
                 if type(map._pos_cache) ~= "table"
                     or map._pos_cache._areaID ~= currentAreaID then
-                    map._pos_cache = _.build_pos_cache(currentAreaID)
+                    if type(_.is_large_area) == "function"
+                        and _.is_large_area(currentAreaID) then
+                        map._pos_cache = {
+                            _areaID     = currentAreaID,
+                            _rooms      = {},
+                            _large_area = true,
+                        }
+                    else
+                        map._pos_cache = _.build_pos_cache(currentAreaID)
+                    end
                 end
                 posCache = map._pos_cache
             end

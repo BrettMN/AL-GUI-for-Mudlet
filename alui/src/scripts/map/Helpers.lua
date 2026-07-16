@@ -486,7 +486,57 @@ end
 -- Room placement helpers
 -- --------------------------------------------------------------------------
 
+-- --------------------------------------------------------------------------
+-- Large-area helpers
+-- --------------------------------------------------------------------------
+-- Lightweight room-count cache.  Rather than calling getAreaRooms() every time
+-- we need to know whether an area is "large", we cache the count the first
+-- time it is queried and keep it updated incrementally as rooms are added.
+-- The cache lives in map._area_room_counts (a table keyed by areaID).
+
+function _.get_estimated_area_room_count(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return 0 end
+    map._area_room_counts = map._area_room_counts or {}
+    local cached = map._area_room_counts[areaID]
+    if type(cached) == "number" then return cached end
+    -- One-time cost: count via getAreaRooms and cache the result.
+    local rooms = getAreaRooms(areaID)
+    local count = type(rooms) == "table" and #rooms or 0
+    map._area_room_counts[areaID] = count
+    return count
+end
+
+-- Increment (or decrement with a negative delta) the cached room count for
+-- areaID.  Call this whenever a room is added or deleted in areaID so the
+-- estimate stays accurate without repeated getAreaRooms() calls.
+function _.adjust_area_room_count(areaID, delta)
+    if type(areaID) ~= "number" or areaID < 1 then return end
+    map._area_room_counts = map._area_room_counts or {}
+    local c = map._area_room_counts[areaID]
+    if type(c) == "number" then
+        map._area_room_counts[areaID] = math.max(0, c + (delta or 1))
+    end
+    -- If the count was never cached, leave it unknown so the next query
+    -- does a fresh getAreaRooms() rather than returning a wrong estimate.
+end
+
+-- Discard the cached count for areaID (e.g. after bulk dedupe).
+function _.invalidate_area_room_count(areaID)
+    if type(map._area_room_counts) == "table" then
+        map._area_room_counts[areaID] = nil
+    end
+end
+
+-- Returns true when the area exceeds the configured large_area_threshold.
+function _.is_large_area(areaID)
+    local threshold = tonumber(map.configs and map.configs.large_area_threshold) or 50000
+    return _.get_estimated_area_room_count(areaID) >= threshold
+end
+
 function _.should_skip_stretch_for_area(areaID)
+    -- Always skip stretch for large areas: iterating millions of rooms to
+    -- shift coordinates would freeze Mudlet for a long time.
+    if _.is_large_area(areaID) then return true end
     return _.current_room_uses_grid_mode()
 end
 

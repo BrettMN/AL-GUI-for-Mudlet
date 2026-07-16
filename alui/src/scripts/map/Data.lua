@@ -16,6 +16,11 @@ map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = false
 map.configs.debug_mapper = map.configs.debug_mapper == true
 map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
+-- Areas with at least this many rooms skip the full pos_cache build on entry
+-- (which would freeze Mudlet for minutes on very large areas) and instead use
+-- direct getRoomsByPosition look-ups.  Lower the value to tune the cut-over
+-- point; raise it to re-enable the cache for moderately large areas.
+map.configs.large_area_threshold = map.configs.large_area_threshold or 50000
 
 -- Private cross-file table; helpers and functions are stored here so they are
 -- accessible across Lua chunks without polluting the global namespace.
