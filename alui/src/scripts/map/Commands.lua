@@ -43,8 +43,9 @@ end
 
 -- --------------------------------------------------------------------------
 -- Lock / unlock the current room.  Locked rooms are pinned in place: the
--- layout passes (stretch, reconcile, recalculate, flatten, dedup) all skip
--- them, so manually-positioned rooms survive subsequent room updates.
+-- layout/rebuild passes skip them, so manually-positioned rooms survive
+-- subsequent room updates. (`map normalize` temporarily treats only the
+-- current room as pinned so repair can spread out from your position.)
 -- --------------------------------------------------------------------------
 function map.lock_current_room()
     local id = _.current_player_room_id and _.current_player_room_id() or nil
@@ -342,7 +343,7 @@ end
 -- Deletes placeholder rooms in the current (or named) area that are either:
 --   (a) at the same map position as a real non-placeholder room, OR
 --   (b) orphaned — no non-placeholder room in the area has an exit leading to them.
-function map.clean_placeholders(areaNameArg)
+function map.clean_placeholders(areaNameArg, silent)
     if type(deleteRoom) ~= "function" then
         echo("Error: deleteRoom is not available in this Mudlet version.\n")
         return
@@ -353,7 +354,9 @@ function map.clean_placeholders(areaNameArg)
     end
 
     local areaID
-    if type(areaNameArg) == "string" and areaNameArg ~= "" then
+    if type(areaNameArg) == "number" and areaNameArg > 0 then
+        areaID = areaNameArg
+    elseif type(areaNameArg) == "string" and areaNameArg ~= "" then
         local areas = getAreaTable()
         if type(areas) == "table" then
             for name, id in pairs(areas) do
@@ -432,11 +435,14 @@ function map.clean_placeholders(areaNameArg)
         end
     end
 
-    if deletedCount > 0 then updateMap() end
-    local areaDisplayName = _.get_area_name_by_id(areaID) or tostring(areaID)
-    echo("Deleted " .. deletedCount .. " placeholder room"
-        .. (deletedCount == 1 and "" or "s")
-        .. " in area '" .. areaDisplayName .. "'.\n")
+    if deletedCount > 0 and not silent then updateMap() end
+    if not silent then
+        local areaDisplayName = _.get_area_name_by_id(areaID) or tostring(areaID)
+        echo("Deleted " .. deletedCount .. " placeholder room"
+            .. (deletedCount == 1 and "" or "s")
+            .. " in area '" .. areaDisplayName .. "'.\n")
+    end
+    return deletedCount
 end
 
 -- --------------------------------------------------------------------------
@@ -460,7 +466,8 @@ function map.show_help()
     echo("       user_data.coord values stored during room capture. Sub-graphs with no coord anchor\n")
     echo("       remain in Mudlet-relative space and are reported.\n")
     echo("    7) Reports remaining anomalies by category (cyclic mismatches, shared-target bugs, etc.).\n")
-    echo("    Manual coordinate tweaks are preserved; locked/pinned rooms are never moved.\n")
+    echo("    Manual coordinate tweaks are preserved; normalize pins the current room and\n")
+    echo("    allows other rooms to move so the repair can spread outward from your location.\n")
     echo("    Defaults: maxPasses=" ..
         map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
     echo("    Example: map normalize 5 500\n\n")

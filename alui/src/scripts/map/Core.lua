@@ -273,6 +273,14 @@ local function handle_move(isLastInBatch)
         local rnum = getRoomIDbyHash(info.vnum)
         local roomWasCreatedOrAdopted = false
         if type(rnum) ~= "number" then rnum = -1 end
+        -- Self-heal a forward/reverse hash-index desync before treating the
+        -- room as missing.  A room may still store this hash even when the
+        -- reverse lookup fails; without this repair handle_move would fall into
+        -- "adopt or create" and spawn placeholder stubs / stacked duplicates.
+        if rnum < 1 and type(_.resolve_room_id_by_hash) == "function" then
+            rnum = _.resolve_room_id_by_hash(info.vnum, resolve_area_id_for_room_info(info))
+            if type(rnum) ~= "number" then rnum = -1 end
+        end
         if type(rnum) == "number" and rnum > 0 then
             local areaID = getRoomArea(rnum)
             local rx, ry, rz = getRoomCoordinates(rnum)

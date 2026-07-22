@@ -36,6 +36,9 @@ local underground_name_patterns = {
 -- Name patterns that indicate a room is on an elevated z-level (+1 from surface).
 local elevated_name_patterns    = {
     "stone wall",
+    "top of a huge tree",
+    "a tall wooden watchtower",
+    "upper tower floor",
 }
 
 -- Cardinals before diagonals so BFS uses the most meaningful direction for
@@ -184,6 +187,82 @@ function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
 end
 
 _.find_placeholder_for_arrival = _.find_placeholder_for_arrival
+
+-- --------------------------------------------------------------------------
+-- Self-healing hash lookup
+-- --------------------------------------------------------------------------
+-- Mudlet keeps two mappings for room hashes: forward (getRoomHashByID, stored
+-- on the room) and reverse (getRoomIDbyHash, an index).  These can drift out
+-- of sync — a room still stores its hash, but the reverse index returns -1.
+-- When that happens, handle_move / create_neighbors treat the room as MISSING
+-- and fall into "adopt or create", which spawns placeholder stubs and stacked
+-- duplicates (the fan-out you see in the JSON dumps).
+--
+-- This helper repairs the desync in place: on a reverse-index miss it scans a
+-- bounded set of rooms for one whose stored hash matches `vnum`, re-binds the
+-- reverse index, and returns the real room ID — so no placeholder is created.
+--
+--   vnum     : the GMCP room hash we are trying to resolve.
+--   areaHint : optional area ID to scan first (keeps the cost bounded).
+-- Returns a valid room ID, or -1 when no matching room exists.
+function _.resolve_room_id_by_hash(vnum, areaHint)
+    if type(vnum) ~= "string" or vnum == "" then return -1 end
+
+    -- Fast path: reverse index is intact and points at a live room.
+    local id = getRoomIDbyHash(vnum)
+    if type(id) == "number" and id > 0 then
+        local a = getRoomArea(id)
+        if type(a) == "number" and a > 0 then
+            return id
+        end
+    end
+
+    if type(getRoomHashByID) ~= "function" then return -1 end
+
+    -- Slow path: reverse-scan for a room whose stored hash matches vnum.
+    local function scan(areaID)
+        if type(areaID) ~= "number" or areaID < 1 then return nil end
+        -- Never O(N)-scan an enormous world: a rare miss is cheaper to accept
+        -- than a multi-second freeze walking hundreds of thousands of rooms.
+        if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
+            return nil
+        end
+        local rooms = getAreaRooms(areaID)
+        if type(rooms) ~= "table" then return nil end
+        for _, rid in ipairs(rooms) do
+            if getRoomHashByID(rid) == vnum then
+                return rid
+            end
+        end
+        return nil
+    end
+
+    local found = scan(areaHint)
+
+    -- Fall back to the previous room's area (we almost always move within it).
+    if not found and type(map.prev_info) == "table"
+        and type(map.prev_info.vnum) == "string" then
+        local prevID = getRoomIDbyHash(map.prev_info.vnum)
+        if type(prevID) == "number" and prevID > 0 then
+            local prevArea = getRoomArea(prevID)
+            if prevArea ~= areaHint then
+                found = scan(prevArea)
+            end
+        end
+    end
+
+    if type(found) == "number" and found > 0 then
+        pcall(setRoomIDbyHash, found, vnum)
+        if type(_.mark_autowalk_dirty) == "function" then _.mark_autowalk_dirty() end
+        if type(_.debug_echo) == "function" then
+            _.debug_echo("Repaired stale hash index: re-bound vnum " .. vnum
+                .. " to existing room " .. found .. "\n")
+        end
+        return found
+    end
+
+    return -1
+end
 
 -- --------------------------------------------------------------------------
 -- Exit-set scoring and real-room adoption
@@ -533,6 +612,33 @@ function _.is_large_area(areaID)
     return _.get_estimated_area_room_count(areaID) >= threshold
 end
 
+-- Compute a sensible default move cap for the deep reconcile BFS.
+--
+-- The reconcile in Layout.lua bails out of its BFS as soon as it has
+-- repositioned `maxMoves` rooms (`if moved >= maxMoves then return moved end`).
+-- On very large areas the static default (reconcile_deep_max_moves, ~5000) is
+-- hit almost immediately, so the vast majority of rooms are never repositioned
+-- and show up in the audit as "delta mismatches remaining".
+--
+-- To let a large area actually finish normalising we scale the cap with the
+-- area size: every room may be moved at most once per pass, so roomCount *
+-- maxPasses is an upper bound on the useful work.  Convergence normally stops
+-- far earlier (each pass breaks when it makes zero moves), and maxPasses still
+-- bounds the number of passes, so this only removes the premature mid-pass
+-- bail-out — it does not make a converging area loop forever.
+--
+-- The user can still override the cap explicitly (e.g. "map normalize 200"),
+-- in which case callers should pass their value through unchanged.
+function _.scaled_reconcile_move_cap(roomCount, maxPasses, baseCap)
+    baseCap   = tonumber(baseCap) or 5000
+    roomCount = tonumber(roomCount) or 0
+    maxPasses = tonumber(maxPasses) or 1
+    if roomCount < 1 or maxPasses < 1 then return baseCap end
+    local scaled = roomCount * maxPasses
+    if scaled > baseCap then return scaled end
+    return baseCap
+end
+
 function _.should_skip_stretch_for_area(areaID)
     -- Always skip stretch for large areas: iterating millions of rooms to
     -- shift coordinates would freeze Mudlet for a long time.
@@ -620,13 +726,181 @@ function _.pos_cache_drop(cache, x, y, z, id)
     if x ~= nil and id ~= nil then _.pos_cache_remove(cache, x, y, z, id) end
 end
 
+-- Find the nearest unoccupied cell to (x,y,z) on the same z-plane, searched in
+-- expanding Chebyshev rings out to maxRadius.  "Unoccupied" is judged from the
+-- supplied position cache, so callers must keep the cache current (via
+-- pos_cache_move) as they relocate rooms.  Returns nx,ny,nz or nil if the whole
+-- search radius is full.
+function _.find_free_cell_near(cache, x, y, z, maxRadius)
+    if cache == nil or x == nil then return nil end
+    maxRadius = tonumber(maxRadius) or 64
+    for r = 1, maxRadius do
+        for dx = -r, r do
+            for dy = -r, r do
+                if dx == -r or dx == r or dy == -r or dy == r then
+                    local nx, ny = x + dx, y + dy
+                    if _.pos_cache_get(cache, nx, ny, z) == nil then
+                        return nx, ny, z
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Separate genuinely-distinct rooms that ended up sharing the same map cell.
+--
+-- The reconcile/anchor passes embed the room graph into a 3-D grid by walking
+-- exits from a seed; they give no global guarantee that two rooms in different
+-- sub-graphs (or a stale, un-normalised cluster) never land on the same cell.
+-- dedupe_area_by_hash only merges *same-hash* duplicates, so two real rooms
+-- with different hashes can still overlap after normalise (they hide each other
+-- on the map).
+--
+-- This pass keeps the best-anchored occupant of each shared cell and nudges the
+-- other occupants to the nearest free cell on the same z-plane.  It is a
+-- last-resort visual fix: a nudged room may gain new delta mismatches with its
+-- own neighbours, but the overlap is removed.  Locked rooms and the player's
+-- current room are never moved, and are preferred as the cell's keeper.
+--
+-- Returns { separated = N, unresolved = M }.
+--   separated  — rooms moved off a shared cell onto a free one
+--   unresolved — rooms left overlapping (no free cell within maxRadius, or all
+--                occupants were immobile)
+function _.resolve_room_overlaps(areaID, posCache, maxRadius)
+    local result = { separated = 0, unresolved = 0 }
+    if type(areaID) ~= "number" or areaID < 1 then return result end
+    maxRadius = tonumber(maxRadius) or 64
+
+    local cache = posCache
+    if type(cache) ~= "table" or cache._areaID ~= areaID then
+        cache = _.build_pos_cache(areaID)
+    end
+
+    local playerID = type(_.current_player_room_id) == "function"
+        and _.current_player_room_id() or nil
+
+    -- Real lock status read straight from user-data, independent of any
+    -- temporary override installed by normalize's single-anchor wrapper, so a
+    -- manually-pinned room is never nudged.
+    local function real_locked(rid)
+        if type(rid) ~= "number" or rid < 1 then return false end
+        return getRoomUserData(rid, "locked") == "1"
+    end
+    local function immobile(rid)
+        return real_locked(rid) or (playerID ~= nil and rid == playerID)
+    end
+
+    -- Number of exits whose actual coord delta already matches the expected
+    -- shift; a higher score means the room is better placed within its cluster
+    -- and should be the occupant that keeps the cell.
+    local function consistency_score(rid)
+        local exits = getRoomExits(rid)
+        if type(exits) ~= "table" then return 0 end
+        local rx, ry, rz = getRoomCoordinates(rid)
+        if rx == nil then return 0 end
+        local score = 0
+        for dir, tgt in pairs(exits) do
+            if type(tgt) == "string" then tgt = tonumber(tgt) end
+            if type(tgt) == "number" and tgt > 0 and tgt ~= rid then
+                local shift = _.get_shift_for_exit_key(dir)
+                if shift then
+                    local tx, ty, tz = getRoomCoordinates(tgt)
+                    if tx ~= nil and (tx - rx) == shift[1]
+                        and (ty - ry) == shift[2] and (tz - rz) == shift[3] then
+                        score = score + 1
+                    end
+                end
+            end
+        end
+        return score
+    end
+
+    -- Pick the occupant that keeps the cell: locked first, then the player's
+    -- room, then the most exit-consistent, then lowest id.
+    local function pick_keeper(ids)
+        local best       = ids[1]
+        local bestLocked = real_locked(best)
+        local bestPlayer = (best == playerID)
+        local bestScore  = consistency_score(best)
+        for i = 2, #ids do
+            local rid    = ids[i]
+            local locked = real_locked(rid)
+            local player = (rid == playerID)
+            local score  = consistency_score(rid)
+            local better
+            if locked ~= bestLocked then
+                better = locked
+            elseif player ~= bestPlayer then
+                better = player
+            elseif score ~= bestScore then
+                better = score > bestScore
+            else
+                better = rid < best
+            end
+            if better then
+                best, bestLocked, bestPlayer, bestScore = rid, locked, player, score
+            end
+        end
+        return best
+    end
+
+    -- Nearest free cell on the same z-plane, searched in expanding rings.
+    local function find_free_cell(x, y, z)
+        return _.find_free_cell_near(cache, x, y, z, maxRadius)
+    end
+
+    -- Snapshot the colliding cell keys first: the cache is mutated below, so we
+    -- must not iterate it live.
+    local collisions = {}
+    for k, list in pairs(cache) do
+        if type(k) == "string" and k:sub(1, 1) ~= "_"
+            and type(list) == "table" and #list > 1 then
+            collisions[#collisions + 1] = k
+        end
+    end
+
+    for _c = 1, #collisions do
+        local list = cache[collisions[_c]]
+        if type(list) == "table" and #list > 1 then
+            local ids = {}
+            for i = 1, #list do ids[i] = list[i] end
+            local keeper = pick_keeper(ids)
+            for i = 1, #ids do
+                local rid = ids[i]
+                if rid ~= keeper then
+                    local x, y, z = getRoomCoordinates(rid)
+                    if immobile(rid) or x == nil then
+                        result.unresolved = result.unresolved + 1
+                    else
+                        local fx, fy, fz = find_free_cell(x, y, z)
+                        if fx == nil then
+                            result.unresolved = result.unresolved + 1
+                        else
+                            setRoomCoordinates(rid, fx, fy, fz)
+                            _.pos_cache_move(cache, x, y, z, fx, fy, fz, rid)
+                            result.separated = result.separated + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
 -- --------------------------------------------------------------------------
 -- Room lock (pinning manually-placed rooms)
 -- --------------------------------------------------------------------------
 -- A "locked" room has a user-data flag set to "1".  All layout passes
 -- (stretch, reconcile, flatten, recalculate) refuse to move locked rooms,
--- and the dedup passes refuse to delete them.  This lets `map shift`,
--- `map lock`, and external manual placement persist across room updates.
+-- and the dedup passes refuse to delete them. `map normalize` is the one
+-- exception: it temporarily treats only the current room as pinned so the
+-- BFS can propagate fixes outward from your current position.
+-- This still lets `map shift`, `map lock`, and external manual placement
+-- persist across normal room updates.
 
 function _.is_room_locked(rid)
     if type(rid) ~= "number" or rid < 1 then return false end
@@ -894,8 +1168,13 @@ end
 -- For each in-area room G with an `up` exit to U where U is also in the area:
 --   - If multiple in-area rooms share the same `up` target hash, that violates
 --     the global hash-uniqueness rule → counted as shared_target_bug, not moved.
---   - If U is locked or the target cell (gx,gy,gz+1) is already occupied by a
---     different live room → counted as blocked.
+--   - If U is locked or the target cell (gx,gy,gz+1) is occupied, normalize
+--     first tries to resolve the overlap:
+--       * same room identifier (hash)     → merge duplicates
+--       * one has terrain, one does not   → keep the terrain room
+--     If the occupant still cannot be merged, it is nudged to the nearest free
+--     cell so the pair can still snap; only immobile occupants (locked / player
+--     room) or a completely full neighbourhood leave the snap blocked.
 --   - Otherwise U is moved to (gx, gy, gz+1).
 -- Mirror logic applies for `down` exits (U placed at gz-1).
 -- Cross-area exits are ignored entirely.
@@ -938,6 +1217,55 @@ function _.snap_vertical_pair(areaID)
     local blocked   = 0
     local bug_count = 0
 
+    local function room_identifier(rid)
+        if type(getRoomHashByID) ~= "function" then return nil end
+        local hash = getRoomHashByID(rid)
+        if type(hash) ~= "string" or hash == "" then return nil end
+        return hash
+    end
+
+    local function room_has_terrain(rid)
+        local terrain = _.get_room_terrain_name and _.get_room_terrain_name(rid) or nil
+        return type(terrain) == "string" and terrain ~= ""
+    end
+
+    local function resolve_overlap(targetID, occupantID)
+        if type(targetID) ~= "number" or targetID < 1 then return nil, targetID end
+        if type(occupantID) ~= "number" or occupantID < 1 then return nil, targetID end
+        if targetID == occupantID then return "resolved", targetID end
+        if getRoomArea(occupantID) ~= areaID then return nil, targetID end
+
+        local targetHash = room_identifier(targetID)
+        local occupHash  = room_identifier(occupantID)
+        local sameHash   = targetHash ~= nil and occupHash ~= nil and targetHash == occupHash
+        local targetTerr = room_has_terrain(targetID)
+        local occupTerr  = room_has_terrain(occupantID)
+
+        local survivor, loser
+        if sameHash then
+            -- Merge same-identifier rooms. Prefer terrain-bearing room, then lower ID.
+            if targetTerr ~= occupTerr then
+                survivor = targetTerr and targetID or occupantID
+            else
+                survivor = targetID < occupantID and targetID or occupantID
+            end
+            loser = survivor == targetID and occupantID or targetID
+        elseif targetTerr ~= occupTerr then
+            -- Keep the room with terrain metadata.
+            survivor = targetTerr and targetID or occupantID
+            loser = survivor == targetID and occupantID or targetID
+        else
+            return nil, targetID
+        end
+
+        if _.is_room_immobile(loser) then
+            return nil, targetID
+        end
+
+        _.merge_duplicate_room(survivor, loser, posCache, nil)
+        return "resolved", survivor
+    end
+
     local function try_snap(groundID, targetID, dz)
         -- Skip cross-area exits.
         if getRoomArea(targetID) ~= areaID then return end
@@ -965,11 +1293,40 @@ function _.snap_vertical_pair(areaID)
         -- Check target cell occupancy.
         local occupants = _.pos_cache_get(posCache, wantX, wantY, wantZ)
         if type(occupants) == "table" then
-            for _i, oid in ipairs(occupants) do
+            -- Snapshot the occupant list: the cache mutates as we merge/relocate.
+            local occ = {}
+            for _i, oid in ipairs(occupants) do occ[#occ + 1] = oid end
+            for _i, oid in ipairs(occ) do
                 if oid ~= targetID and getRoomArea(oid) == areaID then
-                    blocked = blocked + 1
-                    return
+                    local resolved
+                    resolved, targetID = resolve_overlap(targetID, oid)
+                    if not resolved then
+                        -- Couldn't merge the two rooms.  Rather than abandon the
+                        -- snap, nudge the blocking occupant to the nearest free
+                        -- cell so the vertical pair can still line up.  Only give
+                        -- up (count blocked) when the occupant is immobile or the
+                        -- neighbourhood is completely full.
+                        if _.is_room_immobile(oid) then
+                            blocked = blocked + 1
+                            return
+                        end
+                        local ox, oy, oz = getRoomCoordinates(oid)
+                        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz, 64)
+                        if fx == nil then
+                            blocked = blocked + 1
+                            return
+                        end
+                        setRoomCoordinates(oid, fx, fy, fz)
+                        _.pos_cache_move(posCache, ox, oy, oz, fx, fy, fz, oid)
+                    end
                 end
+            end
+            -- Merging can replace targetID with the occupant that is already
+            -- sitting in the wanted cell.
+            cx, cy, cz = getRoomCoordinates(targetID)
+            if cx == wantX and cy == wantY and cz == wantZ then
+                snapped = snapped + 1
+                return
             end
         end
 
@@ -1005,6 +1362,7 @@ end
 --   cross_area        — exits that link to a room in a different area
 --   shared_target_bug — two+ in-area rooms share the same directional exit target (hash uniqueness violation)
 --   duplicate_hash_rooms — multiple mapper IDs resolve to the same GMCP hash
+--   overlapping_rooms — distinct rooms occupying the same (x,y,z) cell (visual overlap)
 --   unreachable       — rooms in the area with no exits and no exit-stubs pointing at them
 --
 -- NOTE: This function is intentionally read-only; it never calls setRoomCoordinates or setExit.
@@ -1016,6 +1374,7 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         cross_area         = 0,
         shared_target_bug  = 0,
         duplicate_hash_rooms = 0,
+        overlapping_rooms  = 0,
         unreachable        = 0,
     }
     if type(roomIDs) ~= "table" or #roomIDs == 0 then return counts end
@@ -1070,8 +1429,15 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         end
     end
 
+    -- Rooms sharing an identical (x,y,z) cell (distinct rooms overlapping).
+    local coordCount = {}
+
     for _i, rid in ipairs(roomIDs) do
         local rx, ry, rz = getRoomCoordinates(rid)
+        if rx ~= nil then
+            local ck = rx .. "," .. ry .. "," .. rz
+            coordCount[ck] = (coordCount[ck] or 0) + 1
+        end
         local exits = getRoomExits(rid)
         local hasAnyExit = false
 
@@ -1125,6 +1491,13 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         -- Unreachable: no exits and no in-scope room exits to this room.
         if not hasAnyExit and not hasIncoming[rid] then
             counts.unreachable = counts.unreachable + 1
+        end
+    end
+
+    -- Distinct rooms sharing a cell: every occupant beyond the first is an overlap.
+    for _k, n in pairs(coordCount) do
+        if n > 1 then
+            counts.overlapping_rooms = counts.overlapping_rooms + (n - 1)
         end
     end
 

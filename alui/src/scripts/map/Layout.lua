@@ -34,6 +34,22 @@ local function safe_current_player_room_id()
     return nil
 end
 
+-- Run a function while treating only anchorRoomID as "locked".
+-- This lets normalize spread from the current room even when stale lock flags
+-- exist elsewhere in the area.
+local function with_single_locked_anchor(anchorRoomID, fn)
+    if type(fn) ~= "function" then return nil end
+    local previous = _.is_room_locked
+    _.is_room_locked = function(rid)
+        return type(rid) == "number" and rid == anchorRoomID
+    end
+
+    local ok, a, b, c, d = xpcall(fn, debug.traceback)
+    _.is_room_locked = previous
+    if not ok then error(a) end
+    return a, b, c, d
+end
+
 -- --------------------------------------------------------------------------
 -- Placement: neighbours
 -- --------------------------------------------------------------------------
@@ -763,7 +779,7 @@ end
 -- audit:            table returned by _.audit_layout_anomalies
 -- dedupeResult: table returned by map.dedupe_area_by_hash (may be nil)
 -- anchorResult:  table returned by _.apply_anchor_translation (may be nil)
-local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit, dedupeResult, anchorResult)
+local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit, dedupeResult, anchorResult, overlapResult)
     local parts = {}
     if selfLoopsRemoved > 0 then
         parts[#parts + 1] = selfLoopsRemoved
@@ -815,10 +831,20 @@ local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audi
             .. " sub-graph" .. (anchorResult.skipped == 1 and "" or "s")
             .. " not translated (locked room or collision)"
     end
+    if overlapResult and overlapResult.separated > 0 then
+        parts[#parts + 1] = overlapResult.separated
+            .. " overlapping room" .. (overlapResult.separated == 1 and "" or "s")
+            .. " separated"
+    end
     if audit.duplicate_hash_rooms > 0 then
         parts[#parts + 1] = audit.duplicate_hash_rooms
             .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
             .. " remaining (re-enter to merge)"
+    end
+    if audit.overlapping_rooms > 0 then
+        parts[#parts + 1] = audit.overlapping_rooms
+            .. " overlapping room" .. (audit.overlapping_rooms == 1 and "" or "s")
+            .. " remaining (no free cell / all locked)"
     end
     if audit.delta_mismatches > 0 then
         parts[#parts + 1] = audit.delta_mismatches
@@ -837,10 +863,12 @@ local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audi
 end
 
 function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
+    local userSuppliedMoves = maxMoves ~= nil
     maxPasses = maxPasses or map.configs.reconcile_deep_max_passes
     maxMoves  = maxMoves or map.configs.reconcile_deep_max_moves
 
     local areaID
+    local currentRoomID
     if type(areaName) == "string" and areaName ~= "" then
         -- Resolve area by name (case-insensitive substring match).
         local lower = areaName:lower()
@@ -871,7 +899,8 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
             echo("Cannot normalise: current room is unknown.\n")
             return
         end
-        areaID = getRoomArea(roomID)
+        currentRoomID = roomID
+        areaID = getRoomArea(currentRoomID)
         if not areaID then
             echo("Cannot normalise: current room has no area.\n")
             return
@@ -897,61 +926,87 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     local areaRooms        = getAreaRooms(areaID)
     if type(areaRooms) ~= "table" then areaRooms = {} end
 
+    -- Scale the reconcile move cap to the area size unless the user gave an
+    -- explicit value.  Without this a large area bails out of the BFS after the
+    -- static default (~5000) moves, leaving most rooms unpositioned and hugely
+    -- inflating the "delta mismatches remaining" tally.
+    if not userSuppliedMoves and type(_.scaled_reconcile_move_cap) == "function" then
+        maxMoves = _.scaled_reconcile_move_cap(#areaRooms, maxPasses, maxMoves)
+    end
+
     -- 1. Strip self-loop exits before BFS so the reconcile doesn't follow them.
     local selfLoopsRemoved = _.strip_self_loop_exits(areaRooms)
 
-    -- 2. De-duplicate rooms that share the same hash.
-    --    This must run before reconcile because duplicate stubs cause phantom
-    --    occupancy that blocks _.reconcile_connected_rooms from moving rooms.
-    local posCache    = _.build_pos_cache(areaID)
-    local dedupeResult = map.dedupe_area_by_hash(areaID, posCache)
-    -- Refresh room list after potential deletes
-    areaRooms = getAreaRooms(areaID)
-    if type(areaRooms) ~= "table" then areaRooms = {} end
+    local function run_normalize_pipeline()
+        -- 2. De-duplicate rooms that share the same hash.
+        --    This must run before reconcile because duplicate stubs cause phantom
+        --    occupancy that blocks _.reconcile_connected_rooms from moving rooms.
+        local posCache = _.build_pos_cache(areaID)
+        local dedupeResult = map.dedupe_area_by_hash(areaID, posCache)
+        -- Refresh room list after potential deletes
+        areaRooms = getAreaRooms(areaID)
+        if type(areaRooms) ~= "table" then areaRooms = {} end
 
-    -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
-    local moved = 0
-    if allRooms then
-        echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
-        local globalVisited = {}
-        local seedCount     = 0
-        for _i, seedID in ipairs(areaRooms) do
-            if not globalVisited[seedID] then
-                local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
-                _.flatten_cardinal_connected_rooms(seedID)
-                moved     = moved + (subMoved or 0)
-                seedCount = seedCount + 1
+        -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
+        local moved = 0
+        if allRooms then
+            echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
+            local globalVisited = {}
+            local seedCount     = 0
+            for _i, seedID in ipairs(areaRooms) do
+                if not globalVisited[seedID] then
+                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
+                    _.flatten_cardinal_connected_rooms(seedID)
+                    moved = moved + (subMoved or 0)
+                    seedCount = seedCount + 1
+                end
             end
+            echo("Normalised across " .. seedCount .. " subgraph" .. (seedCount == 1 and "" or "s") .. ".\n")
+        else
+            local seedID = currentRoomID and currentRoomID or find_best_seed(areaID)
+            if not seedID then
+                echo("Cannot normalise: no rooms with exits found in '" .. areaName_display .. "'.\n")
+                return nil, nil, nil
+            end
+            echo("Normalising '" .. areaName_display .. "'...\n")
+            moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves)
+            _.flatten_cardinal_connected_rooms(seedID)
         end
-        echo("Normalised across " .. seedCount .. " subgraph" .. (seedCount == 1 and "" or "s") .. ".\n")
-    else
-        local seedID = find_best_seed(areaID)
-        if not seedID then
-            echo("Cannot normalise: no rooms with exits found in '" .. areaName_display .. "'.\n")
-            return
-        end
-        echo("Normalising '" .. areaName_display .. "'...\n")
-        moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves)
-        _.flatten_cardinal_connected_rooms(seedID)
+
+        -- 4. Snap in-area up/down room pairs to adjacent z-levels.
+        local snapResult = _.snap_vertical_pair(areaID)
+
+        -- 5. Anchor translate: align sub-graphs to game coordinate frame using
+        --    user_data.coord values present on captured rooms.
+        local freshPosCache = _.build_pos_cache(areaID)
+        local anchorResult  = _.apply_anchor_translation(areaID, freshPosCache)
+
+        return dedupeResult, moved, snapResult, anchorResult
     end
 
-    -- 4. Snap in-area up/down room pairs to adjacent z-levels.
-    local snapResult = _.snap_vertical_pair(areaID)
+    local dedupeResult, moved, snapResult, anchorResult
+    if currentRoomID and getRoomArea(currentRoomID) == areaID then
+        dedupeResult, moved, snapResult, anchorResult = with_single_locked_anchor(currentRoomID, run_normalize_pipeline)
+    else
+        dedupeResult, moved, snapResult, anchorResult = run_normalize_pipeline()
+    end
+    if not dedupeResult then return end
 
-    -- 5. Anchor translate: align sub-graphs to game coordinate frame using
-    --    user_data.coord values present on captured rooms.
-    local freshPosCache = _.build_pos_cache(areaID)
-    local anchorResult  = _.apply_anchor_translation(areaID, freshPosCache)
+    -- 6. Separate distinct rooms that landed on the same cell.  Run this after
+    --    the single-anchor wrapper unwinds so real lock flags are honoured and
+    --    manually-pinned rooms are never nudged.
+    local overlapResult = _.resolve_room_overlaps(areaID)
 
-    -- 6. Audit remaining anomalies in the (now-updated) area.
+    -- 7. Audit remaining anomalies in the (now-updated) area.
     local freshRooms = getAreaRooms(areaID)
     local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
 
     updateMap()
-    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit, dedupeResult, anchorResult)
+    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit, dedupeResult, anchorResult, overlapResult)
 end
 
 function map.normalize_all_areas(maxPasses, maxMoves)
+    local userSuppliedMoves = maxMoves ~= nil
     maxPasses   = maxPasses or map.configs.reconcile_deep_max_passes
     maxMoves    = maxMoves or map.configs.reconcile_deep_max_moves
 
@@ -966,6 +1021,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     local totalMoved      = 0
     local totalSnapped    = 0
     local totalTranslated = 0
+    local totalSeparated  = 0
     local areaCount       = 0
     local areaNames      = {}
     for name, _ in pairs(areas) do areaNames[#areaNames + 1] = name end
@@ -981,10 +1037,16 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             totalDedupe = totalDedupe + (dedupeResult.removed or 0)
             areaRooms = getAreaRooms(id)
             if type(areaRooms) ~= "table" then areaRooms = {} end
+            -- Scale the move cap to this area's size unless the user overrode it,
+            -- so large areas fully normalise instead of bailing out early.
+            local areaMaxMoves = maxMoves
+            if not userSuppliedMoves and type(_.scaled_reconcile_move_cap) == "function" then
+                areaMaxMoves = _.scaled_reconcile_move_cap(#areaRooms, maxPasses, maxMoves)
+            end
             local globalVisited = {}
             for _j, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
-                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
+                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, areaMaxMoves, nil, globalVisited)
                     _.flatten_cardinal_connected_rooms(seedID)
                     totalMoved = totalMoved + (subMoved or 0)
                 end
@@ -994,6 +1056,8 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             local freshPosCache = _.build_pos_cache(id)
             local anchorResult  = _.apply_anchor_translation(id, freshPosCache)
             totalTranslated = totalTranslated + (anchorResult.translated or 0)
+            local overlapResult = _.resolve_room_overlaps(id, freshPosCache)
+            totalSeparated = totalSeparated + (overlapResult.separated or 0)
             areaCount    = areaCount + 1
         end
     end
@@ -1017,6 +1081,10 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         parts[#parts + 1] = totalTranslated
             .. " sub-graph" .. (totalTranslated == 1 and "" or "s")
             .. " aligned to game coords"
+    end
+    if totalSeparated > 0 then
+        parts[#parts + 1] = totalSeparated
+            .. " overlapping room" .. (totalSeparated == 1 and "" or "s") .. " separated"
     end
     echo(table.concat(parts, ", ") .. " across "
         .. areaCount .. " area" .. (areaCount == 1 and "" or "s") .. ".\n")
