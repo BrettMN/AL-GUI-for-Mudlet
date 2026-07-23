@@ -42,10 +42,11 @@ end
 -- --------------------------------------------------------------------------
 
 -- --------------------------------------------------------------------------
--- Lock / unlock the current room.  Locked rooms are pinned in place: the
--- layout/rebuild passes skip them, so manually-positioned rooms survive
--- subsequent room updates. (`map normalize` temporarily treats only the
--- current room as pinned so repair can spread out from your position.)
+-- Lock / unlock the current room.  Locked rooms are pinned in place: normal
+-- per-move layout logic skips them, so manually-positioned rooms survive
+-- subsequent room updates. (`map normalize` and `map recalculate` ignore
+-- this flag for every room except the one the process starts from, so repair
+-- can spread out from your position without being blocked by old pins.)
 -- --------------------------------------------------------------------------
 function map.lock_current_room()
     local id = _.current_player_room_id and _.current_player_room_id() or nil
@@ -461,7 +462,7 @@ function map.show_help()
     echo("    3) Reconciles connected exits: walks the exit graph and gently moves rooms whose coordinates\n")
     echo("       disagree with their exit offsets, skipping rooms that can't move due to collisions.\n")
     echo("    4) Flattens cardinally connected rooms to the current room's z-level.\n")
-    echo("    5) Snaps in-area up/down room pairs to exact ±1 z-offsets (fixes sky-room horizontal drift).\n")
+    echo("    5) Snaps in-area up/down room pairs to exact ±1 z-offsets, without moving their (x,y).\n")
     echo("    6) Aligns each connected sub-graph to the game's coordinate frame using the\n")
     echo("       user_data.coord values stored during room capture. Sub-graphs with no coord anchor\n")
     echo("       remain in Mudlet-relative space and are reported.\n")
@@ -511,7 +512,7 @@ function map.show_help()
     echo("    4) Underground rooms (caves, tunnels) are placed on a separate z-level automatically.\n")
     echo("    5) Snaps in-area up/down pairs that BFS didn't align (unreachable rooms, etc.).\n")
     echo("    6) Removes stale BFS placeholder stubs; reports anomalies by category.\n")
-    echo("    Pinned/locked rooms are not moved; their position anchors surrounding rooms.\n")
+    echo("    Only the room you start it from is pinned; other locked rooms may still be moved.\n")
     echo("    More thorough than 'map normalize' — will displace any room that's in the way.\n")
     echo("    When to use: when large groups of rooms have fundamentally wrong coordinates,\n")
     echo("    e.g. two independently mapped groups linked by exits, or vertical stubs at z:0.\n")

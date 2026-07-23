@@ -761,14 +761,21 @@ end
 -- This pass keeps the best-anchored occupant of each shared cell and nudges the
 -- other occupants to the nearest free cell on the same z-plane.  It is a
 -- last-resort visual fix: a nudged room may gain new delta mismatches with its
--- own neighbours, but the overlap is removed.  Locked rooms and the player's
--- current room are never moved, and are preferred as the cell's keeper.
+-- own neighbours, but the overlap is removed.
+--
+-- anchorRoomID: the room the calling pass started from, if any — always
+--   immovable. respectRealLocks: when true, rooms with the "locked" flag (and
+--   the player's current room) are ALSO immovable; single-room normalize /
+--   recalculate pass false here (only the anchor is pinned — see
+--   with_single_locked_anchor), while bulk passes with no single anchor
+--   (map normalize all / normalize_all_areas) pass true to keep respecting
+--   locks as they always have.
 --
 -- Returns { separated = N, unresolved = M }.
 --   separated  — rooms moved off a shared cell onto a free one
 --   unresolved — rooms left overlapping (no free cell within maxRadius, or all
 --                occupants were immobile)
-function _.resolve_room_overlaps(areaID, posCache, maxRadius)
+function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, respectRealLocks)
     local result = { separated = 0, unresolved = 0 }
     if type(areaID) ~= "number" or areaID < 1 then return result end
     maxRadius = tonumber(maxRadius) or 64
@@ -778,18 +785,13 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius)
         cache = _.build_pos_cache(areaID)
     end
 
-    local playerID = type(_.current_player_room_id) == "function"
-        and _.current_player_room_id() or nil
-
-    -- Real lock status read straight from user-data, independent of any
-    -- temporary override installed by normalize's single-anchor wrapper, so a
-    -- manually-pinned room is never nudged.
-    local function real_locked(rid)
-        if type(rid) ~= "number" or rid < 1 then return false end
-        return getRoomUserData(rid, "locked") == "1"
-    end
     local function immobile(rid)
-        return real_locked(rid) or (playerID ~= nil and rid == playerID)
+        if anchorRoomID ~= nil and rid == anchorRoomID then return true end
+        if not respectRealLocks then return false end
+        if type(rid) == "number" and rid > 0 and getRoomUserData(rid, "locked") == "1" then
+            return true
+        end
+        return type(_.current_player_room_id) == "function" and rid == _.current_player_room_id()
     end
 
     -- Number of exits whose actual coord delta already matches the expected
@@ -817,30 +819,26 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius)
         return score
     end
 
-    -- Pick the occupant that keeps the cell: locked first, then the player's
-    -- room, then the most exit-consistent, then lowest id.
+    -- Pick the occupant that keeps the cell: the anchor first, then the most
+    -- exit-consistent, then lowest id.
     local function pick_keeper(ids)
-        local best       = ids[1]
-        local bestLocked = real_locked(best)
-        local bestPlayer = (best == playerID)
+        local best      = ids[1]
+        local bestAnchor = immobile(best)
         local bestScore  = consistency_score(best)
         for i = 2, #ids do
             local rid    = ids[i]
-            local locked = real_locked(rid)
-            local player = (rid == playerID)
+            local anchor = immobile(rid)
             local score  = consistency_score(rid)
             local better
-            if locked ~= bestLocked then
-                better = locked
-            elseif player ~= bestPlayer then
-                better = player
+            if anchor ~= bestAnchor then
+                better = anchor
             elseif score ~= bestScore then
                 better = score > bestScore
             else
                 better = rid < best
             end
             if better then
-                best, bestLocked, bestPlayer, bestScore = rid, locked, player, score
+                best, bestAnchor, bestScore = rid, anchor, score
             end
         end
         return best
@@ -894,13 +892,14 @@ end
 -- --------------------------------------------------------------------------
 -- Room lock (pinning manually-placed rooms)
 -- --------------------------------------------------------------------------
--- A "locked" room has a user-data flag set to "1".  All layout passes
--- (stretch, reconcile, flatten, recalculate) refuse to move locked rooms,
--- and the dedup passes refuse to delete them. `map normalize` is the one
--- exception: it temporarily treats only the current room as pinned so the
--- BFS can propagate fixes outward from your current position.
+-- A "locked" room has a user-data flag set to "1".  Normal per-move layout
+-- logic (stretch, per-step reconcile) refuses to move or delete locked rooms.
+-- `map normalize` and `map recalculate` are the exception: for the duration
+-- of the run they treat only the room the process started from as pinned, so
+-- the repair BFS can propagate fixes outward without being blocked by old
+-- pins elsewhere in the area (see with_single_locked_anchor in Layout.lua).
 -- This still lets `map shift`, `map lock`, and external manual placement
--- persist across normal room updates.
+-- persist across normal (non-normalize/recalculate) room updates.
 
 function _.is_room_locked(rid)
     if type(rid) ~= "number" or rid < 1 then return false end
@@ -1162,21 +1161,25 @@ function _.strip_self_loop_exits(roomIDs)
     return removed
 end
 
--- Snap vertical room pairs so that sky/elevated rooms sit directly above their
--- ground room and underground rooms sit directly below.
+-- Snap vertical room pairs so that a room with an `up`/`down` exit to another
+-- in-area room ends up exactly one z-level away from it.
 --
 -- For each in-area room G with an `up` exit to U where U is also in the area:
 --   - If multiple in-area rooms share the same `up` target hash, that violates
 --     the global hash-uniqueness rule → counted as shared_target_bug, not moved.
---   - If U is locked or the target cell (gx,gy,gz+1) is occupied, normalize
+--   - If U is locked or the target cell (ux,uy,gz+1) is occupied, normalize
 --     first tries to resolve the overlap:
 --       * same room identifier (hash)     → merge duplicates
 --       * one has terrain, one does not   → keep the terrain room
 --     If the occupant still cannot be merged, it is nudged to the nearest free
 --     cell so the pair can still snap; only immobile occupants (locked / player
 --     room) or a completely full neighbourhood leave the snap blocked.
---   - Otherwise U is moved to (gx, gy, gz+1).
--- Mirror logic applies for `down` exits (U placed at gz-1).
+--   - Otherwise U's z is set to gz+1, keeping U's own (x,y).  An up/down exit
+--     is not required to lead to a room directly above/below on the map — only
+--     the z-level is corrected here; x/y are left alone so a target that is
+--     already correctly placed by its own horizontal exits is never dragged
+--     out of position to match a ground room that may itself be mid-repair.
+-- Mirror logic applies for `down` exits (U's z set to gz-1).
 -- Cross-area exits are ignored entirely.
 --
 -- Returns { snapped=N, blocked=N, shared_target_bug=N }.
@@ -1286,12 +1289,17 @@ function _.snap_vertical_pair(areaID)
         local gx, gy, gz = getRoomCoordinates(groundID)
         if gx == nil then return end
 
-        local wantX, wantY, wantZ = gx, gy, gz + dz
         local cx, cy, cz = getRoomCoordinates(targetID)
-        if cx == wantX and cy == wantY and cz == wantZ then return end -- already correct
+        if cx == nil then return end
+
+        -- Only the z-level is forced to line up with the ground room; the
+        -- target keeps its own (x,y) rather than being pulled onto ground's
+        -- column.
+        local wantZ = gz + dz
+        if cz == wantZ then return end -- already correct
 
         -- Check target cell occupancy.
-        local occupants = _.pos_cache_get(posCache, wantX, wantY, wantZ)
+        local occupants = _.pos_cache_get(posCache, cx, cy, wantZ)
         if type(occupants) == "table" then
             -- Snapshot the occupant list: the cache mutates as we merge/relocate.
             local occ = {}
@@ -1324,14 +1332,14 @@ function _.snap_vertical_pair(areaID)
             -- Merging can replace targetID with the occupant that is already
             -- sitting in the wanted cell.
             cx, cy, cz = getRoomCoordinates(targetID)
-            if cx == wantX and cy == wantY and cz == wantZ then
+            if cz == wantZ then
                 snapped = snapped + 1
                 return
             end
         end
 
-        setRoomCoordinates(targetID, wantX, wantY, wantZ)
-        _.pos_cache_move(posCache, cx, cy, cz, wantX, wantY, wantZ, targetID)
+        setRoomCoordinates(targetID, cx, cy, wantZ)
+        _.pos_cache_move(posCache, cx, cy, cz, cx, cy, wantZ, targetID)
         snapped = snapped + 1
     end
 

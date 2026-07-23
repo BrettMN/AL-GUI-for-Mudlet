@@ -35,8 +35,9 @@ local function safe_current_player_room_id()
 end
 
 -- Run a function while treating only anchorRoomID as "locked".
--- This lets normalize spread from the current room even when stale lock flags
--- exist elsewhere in the area.
+-- Used by both map normalize and map recalculate so the repair BFS can
+-- spread freely from the room the process started from — no other room's
+-- lock flag is honoured for the duration of fn, even if the user pinned it.
 local function with_single_locked_anchor(anchorRoomID, fn)
     if type(fn) ~= "function" then return nil end
     local previous = _.is_room_locked
@@ -992,10 +993,10 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     end
     if not dedupeResult then return end
 
-    -- 6. Separate distinct rooms that landed on the same cell.  Run this after
-    --    the single-anchor wrapper unwinds so real lock flags are honoured and
-    --    manually-pinned rooms are never nudged.
-    local overlapResult = _.resolve_room_overlaps(areaID)
+    -- 6. Separate distinct rooms that landed on the same cell.  Only the
+    --    room the normalize started from (if any) is treated as immovable
+    --    here, matching the rest of the pipeline.
+    local overlapResult = _.resolve_room_overlaps(areaID, nil, nil, currentRoomID)
 
     -- 7. Audit remaining anomalies in the (now-updated) area.
     local freshRooms = getAreaRooms(areaID)
@@ -1056,7 +1057,9 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             local freshPosCache = _.build_pos_cache(id)
             local anchorResult  = _.apply_anchor_translation(id, freshPosCache)
             totalTranslated = totalTranslated + (anchorResult.translated or 0)
-            local overlapResult = _.resolve_room_overlaps(id, freshPosCache)
+            -- No single "current room" anchor across a bulk all-areas pass,
+            -- so fall back to respecting real lock flags as before.
+            local overlapResult = _.resolve_room_overlaps(id, freshPosCache, nil, nil, true)
             totalSeparated = totalSeparated + (overlapResult.separated or 0)
             areaCount    = areaCount + 1
         end
@@ -1120,6 +1123,14 @@ function map.recalculate_room_layout()
     local areaRooms        = getAreaRooms(areaID)
     local selfLoopsRemoved = type(areaRooms) == "table" and _.strip_self_loop_exits(areaRooms) or 0
 
+    -- Only the room the recalculation starts from is pinned; any other room
+    -- (locked or not) may be repositioned so the BFS can rebuild the whole
+    -- area consistently outward from here. Mirrors map normalize's anchor
+    -- behaviour (see with_single_locked_anchor above).
+    local movedCount, nudgeCount, levelCount, separateCount, deletedPlaceholderCount = 0, 0, 0, 0, 0
+    local snapResult
+
+    local function run_recalculate_pipeline()
     -- Determine whether the seed room is underground or elevatedso we know the
     -- base z-level for each classification (surface vs underground vs elevated).
     local seedUG        = _.classify_room_underground(seedID, false)
@@ -1133,17 +1144,11 @@ function map.recalculate_room_layout()
     local qHead         = 1
     local visited       = { [seedID] = true }
     local occupied      = { [pos_key(sx, sy, sz)] = seedID }
-    local movedCount    = 0
-    local nudgeCount    = 0
-    local levelCount    = 0
-    local separateCount = 0
 
     -- Build a reverse lookup: roomID → { x, y, z } for the post-BFS separation pass.
     local roomPositions = { [seedID] = { x = sx, y = sy, z = sz } }
-    -- Track parent shift for each room so the separation pass knows the axis to extend along.
+    -- Track parent shift for each room so the separation pass knows the axis to nudge along.
     local roomShifts    = {}
-    -- Track BFS parent so the separation pass can shift entire subtrees.
-    local roomParents   = {}
     local MAX_BFS_ROOMS = 200000 -- safety cap; prevents indefinite freeze on huge areas
 
     while qHead <= #queue do
@@ -1210,7 +1215,6 @@ function map.recalculate_room_layout()
                         occupied[posKey]        = targetID
                         roomPositions[targetID] = { x = tx, y = ty, z = tz }
                         roomShifts[targetID]    = shift
-                        roomParents[targetID]   = entry.id
 
                         local cx, cy, cz        = getRoomCoordinates(targetID)
                         if (cx ~= tx or cy ~= ty or cz ~= tz)
@@ -1229,31 +1233,11 @@ function map.recalculate_room_layout()
     -- Post-BFS separation pass: now that ALL rooms are placed, check each room
     -- that arrived via a pure cardinal exit.  If its perpendicular neighbours
     -- are unconnected rooms (i.e. it visually blends into an unrelated line),
-    -- shift its entire BFS subtree further along the exit direction to create
-    -- a visible gap.  Moving the whole subtree keeps relative positions intact.
-
-    -- Build children lookup from parent tracking.
-    local bfsChildren = {}
-    for childID, parentID in pairs(roomParents) do
-        if not bfsChildren[parentID] then bfsChildren[parentID] = {} end
-        bfsChildren[parentID][#bfsChildren[parentID] + 1] = childID
-    end
-
-    -- Collect all BFS descendants of a room (inclusive).
-    local function collectSubtree(rootID)
-        local subtree = { rootID }
-        local stack   = { rootID }
-        while #stack > 0 do
-            local cur = table.remove(stack)
-            if bfsChildren[cur] then
-                for _, cid in ipairs(bfsChildren[cur]) do
-                    subtree[#subtree + 1] = cid
-                    stack[#stack + 1]     = cid
-                end
-            end
-        end
-        return subtree
-    end
+    -- nudge just that one room further along the exit direction to create a
+    -- visible gap.  Earlier this dragged the room's entire BFS subtree along
+    -- with it, which could displace dozens of unrelated descendant rooms just
+    -- because one coincidental neighbour happened to be adjacent — moving only
+    -- the flagged room keeps the blast radius to a single cell.
 
     -- Helper: are two rooms connected by an exit in either direction?
     local function rooms_connected(idA, idB)
@@ -1272,7 +1256,7 @@ function map.recalculate_room_layout()
         return false
     end
 
-    local shifted = {}             -- rooms already moved as part of a subtree
+    local shifted = {}             -- rooms already nudged this pass
     local MAX_SEPARATIONS = 200000 -- safety cap for very large areas
     local separationChecks = 0
 
@@ -1287,7 +1271,8 @@ function map.recalculate_room_layout()
         -- Only process rooms that arrived via a pure cardinal horizontal exit
         if shift and not shifted[roomID]
             and shift[3] == 0
-            and ((shift[1] == 0) ~= (shift[2] == 0)) then
+            and ((shift[1] == 0) ~= (shift[2] == 0))
+            and not safe_is_room_locked(roomID) then
             local tx, ty, tz = pos.x, pos.y, pos.z
             local perpPositions
             if shift[1] ~= 0 and shift[2] == 0 then
@@ -1307,54 +1292,17 @@ function map.recalculate_room_layout()
             end
 
             if needsSeparation then
-                local subtree    = collectSubtree(roomID)
-                local subtreeSet = {}
-                for _, rid in ipairs(subtree) do subtreeSet[rid] = true end
-
-                -- Probe increasing distances along the arrival direction until
-                -- the entire subtree fits without colliding with non-subtree rooms.
-                local dx, dy  = shift[1], shift[2]
-                local maxDist = 5
-                local found   = false
-                local dist    = 1
-                while dist <= maxDist do
-                    local ok = true
-                    for _, rid in ipairs(subtree) do
-                        local rp = roomPositions[rid]
-                        local nk = pos_key(rp.x + dx * dist, rp.y + dy * dist, rp.z)
-                        local occupant = occupied[nk]
-                        if occupant and not subtreeSet[occupant] then
-                            ok = false
-                            break
-                        end
-                    end
-                    if ok then
-                        found = true; break
-                    end
-                    dist = dist + 1
-                end
-
-                if found then
-                    -- Remove old positions from occupied.
-                    for _, rid in ipairs(subtree) do
-                        local rp       = roomPositions[rid]
-                        local oKey     = pos_key(rp.x, rp.y, rp.z)
-                        occupied[oKey] = nil
-                    end
-                    -- Place at new positions.
-                    for _, rid in ipairs(subtree) do
-                        local rp = roomPositions[rid]
-                        rp.x = rp.x + dx * dist
-                        rp.y = rp.y + dy * dist
-                        local nKey = pos_key(rp.x, rp.y, rp.z)
-                        occupied[nKey] = rid
-                        if not safe_is_room_locked(rid) then
-                            setRoomCoordinates(rid, rp.x, rp.y, rp.z)
-                        end
-                        shifted[rid] = true
-                        movedCount = movedCount + 1
-                    end
-                    separateCount = separateCount + #subtree
+                -- Nudge just this room to the nearest free cell along the
+                -- arrival axis. Descendants are left where they are.
+                local nx, ny, nz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift)
+                if nx ~= tx or ny ~= ty then
+                    occupied[pos_key(tx, ty, tz)] = nil
+                    pos.x, pos.y = nx, ny
+                    occupied[pos_key(nx, ny, nz)] = roomID
+                    setRoomCoordinates(roomID, nx, ny, nz)
+                    shifted[roomID] = true
+                    movedCount      = movedCount + 1
+                    separateCount   = separateCount + 1
                 end
             end
         end
@@ -1365,7 +1313,6 @@ function map.recalculate_room_layout()
     --   (b) orphaned placeholders — every room whose exit points here is also
     --       a placeholder (the stub was created by a duplicate room that will
     --       never be properly visited).
-    local deletedPlaceholderCount = 0
     if type(deleteRoom) == "function" and type(_.is_placeholder) == "function" then
         -- Build a reverse-exit index over all BFS-visited rooms so we can
         -- cheaply check whether any real room leads to a given placeholder.
@@ -1409,7 +1356,10 @@ function map.recalculate_room_layout()
 
     -- Snap in-area up/down pairs that BFS may not have aligned (e.g. rooms
     -- unreachable from the seed, or sky rooms first reached via horizontal paths).
-    local snapResult = _.snap_vertical_pair(areaID)
+    snapResult = _.snap_vertical_pair(areaID)
+    end -- run_recalculate_pipeline
+
+    with_single_locked_anchor(seedID, run_recalculate_pipeline)
 
     -- Audit remaining anomalies in the final state.
     local freshRooms = getAreaRooms(areaID)
@@ -1449,7 +1399,7 @@ function map.recalculate_room_layout()
         details[#details + 1] = levelCount .. " moved to separate z-level"
     end
     if separateCount > 0 then
-        details[#details + 1] = separateCount .. " extended for visual separation"
+        details[#details + 1] = separateCount .. " nudged for visual separation"
     end
     if deletedPlaceholderCount > 0 then
         details[#details + 1] = deletedPlaceholderCount
