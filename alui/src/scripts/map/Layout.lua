@@ -657,7 +657,15 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                 if cx == nil then
                     -- skip; room has no coordinates
                 else
-                    for dir, targetID in pairs(exits) do
+                    -- Canonical (cardinals-first) order, not raw pairs(): when a
+                    -- room graph has a genuine cyclic/conflicting-delta bug, which
+                    -- neighbour "wins" a contested cell depends on visit order.
+                    -- pairs() order over Mudlet's exit table is not guaranteed
+                    -- stable across calls, which made reconcile (and therefore
+                    -- map normalize) resolve such conflicts differently from run
+                    -- to run. map.recalculate_room_layout already uses this same
+                    -- canonical order for exactly this reason.
+                    for dir, targetID in _.sorted_exit_pairs(exits) do
                         if type(targetID) == "string" then
                             targetID = tonumber(targetID)
                         end
@@ -742,7 +750,10 @@ function _.flatten_cardinal_connected_rooms(anchorID)
         if type(exits) ~= "table" then
         else
             local cx, cy, cz = getRoomCoordinates(current)
-            for dir, targetID in pairs(exits) do
+            -- Canonical order (see the matching comment in reconcile_connected_rooms)
+            -- so which parent's z a room inherits doesn't depend on Mudlet's
+            -- exit-table iteration order when the same room is reachable two ways.
+            for dir, targetID in _.sorted_exit_pairs(exits) do
                 if type(targetID) == "string" then
                     targetID = tonumber(targetID)
                 end
@@ -849,7 +860,7 @@ local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audi
     end
     if audit.delta_mismatches > 0 then
         parts[#parts + 1] = audit.delta_mismatches
-            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "s")
+            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "es")
             .. " remaining (cyclic or unfixable)"
     end
     if audit.vertical_drift > 0 then
@@ -1127,28 +1138,25 @@ function map.recalculate_room_layout()
     -- (locked or not) may be repositioned so the BFS can rebuild the whole
     -- area consistently outward from here. Mirrors map normalize's anchor
     -- behaviour (see with_single_locked_anchor above).
-    local movedCount, nudgeCount, levelCount, separateCount, deletedPlaceholderCount = 0, 0, 0, 0, 0
+    local movedCount, nudgeCount, deletedPlaceholderCount = 0, 0, 0
     local snapResult
 
     local function run_recalculate_pipeline()
-    -- Determine whether the seed room is underground or elevatedso we know the
-    -- base z-level for each classification (surface vs underground vs elevated).
-    local seedUG        = _.classify_room_underground(seedID, false)
-    local seedEL        = _.classify_room_elevated(seedID)
-    local surfaceZ      = (seedUG and (sz + 1)) or (seedEL and (sz - 1)) or sz
-    local undergroundZ  = surfaceZ - 1
-    local elevatedZ     = surfaceZ + 1
-
-    -- FIFO queue: each entry carries position, underground, and elevated flags for z-separation.
-    local queue         = { { id = seedID, x = sx, y = sy, z = sz, underground = seedUG, elevated = seedEL } }
+    -- FIFO queue: each entry carries the position it was placed at. z comes
+    -- purely from accumulated exit deltas (see the shift[3] below) — there is
+    -- no name-based underground/elevated auto z-split. That heuristic used to
+    -- force a z-jump whenever it crossed from a room whose name matched
+    -- cave/tunnel/underground/etc. into one that didn't, which regularly tore
+    -- a single, consistently-connected area (e.g. a den with rooms named
+    -- "A tunnel under X" next to "A hallway in X") across two z-planes over
+    -- an ordinary cardinal exit.
+    local queue         = { { id = seedID, x = sx, y = sy, z = sz } }
     local qHead         = 1
     local visited       = { [seedID] = true }
     local occupied      = { [pos_key(sx, sy, sz)] = seedID }
 
-    -- Build a reverse lookup: roomID → { x, y, z } for the post-BFS separation pass.
+    -- Build a reverse lookup: roomID → { x, y, z } for the post-BFS placeholder cleanup.
     local roomPositions = { [seedID] = { x = sx, y = sy, z = sz } }
-    -- Track parent shift for each room so the separation pass knows the axis to nudge along.
-    local roomShifts    = {}
     local MAX_BFS_ROOMS = 200000 -- safety cap; prevents indefinite freeze on huge areas
 
     while qHead <= #queue do
@@ -1178,131 +1186,49 @@ function map.recalculate_room_layout()
                         local ty = entry.y + shift[2]
                         local tz = entry.z + shift[3]
 
-                        -- Auto-detect underground rooms and place them on a
-                        -- separate z-level so they don't visually overlap
-                        -- with surface rooms in the mapper.
-                        local targetUG = _.classify_room_underground(targetID, entry.underground)
-                        local targetEL = _.classify_room_elevated(targetID)
-                        if not entry.underground and targetUG then
-                            -- Transition surface → underground
-                            tz = undergroundZ
-                            levelCount = levelCount + 1
-                        elseif entry.underground and not targetUG then
-                            -- Transition underground → surface
-                            tz = surfaceZ
-                            levelCount = levelCount + 1
-                        elseif not entry.elevated and targetEL and not targetUG then
-                            -- Transition surface → elevated (e.g. "Stone wall")
-                            tz = elevatedZ
-                            setRoomUserData(targetID, "elevationAdjustment", tostring(elevatedZ - surfaceZ))
-                            levelCount = levelCount + 1
-                        elseif entry.elevated and not targetEL and not targetUG then
-                            -- Transition elevated → surface
-                            tz = surfaceZ
-                            levelCount = levelCount + 1
-                        end
-
                         -- Collision avoidance: if the ideal position is already
                         -- taken by an earlier BFS room, nudge to the nearest
                         -- free spot so rooms don't stack on top of each other.
                         local posKey = pos_key(tx, ty, tz)
                         if occupied[posKey] then
+                            if type(_.debug_echo) == "function" then
+                                _.debug_echo("[recalculate] collision placing " .. targetID
+                                    .. " (parent " .. entry.id .. " -" .. tostring(dir) .. "-> ), wanted ("
+                                    .. tx .. "," .. ty .. "," .. tz .. "), already occupied by "
+                                    .. tostring(occupied[posKey]) .. "\n")
+                            end
                             tx, ty, tz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift)
                             posKey = pos_key(tx, ty, tz)
                             nudgeCount = nudgeCount + 1
                         end
 
-                        occupied[posKey]        = targetID
-                        roomPositions[targetID] = { x = tx, y = ty, z = tz }
-                        roomShifts[targetID]    = shift
-
-                        local cx, cy, cz        = getRoomCoordinates(targetID)
-                        if (cx ~= tx or cy ~= ty or cz ~= tz)
-                            and not safe_is_room_locked(targetID) then
+                        local cx, cy, cz = getRoomCoordinates(targetID)
+                        if safe_is_room_locked(targetID) and cx ~= nil then
+                            -- Can't move this room: anchor its subtree to
+                            -- where it REALLY is instead of the hypothetical
+                            -- BFS-computed cell above. Using the computed
+                            -- cell here would place every descendant relative
+                            -- to a position the room was never actually moved
+                            -- to, producing spurious delta mismatches through
+                            -- the whole subtree.
+                            occupied[posKey] = nil
+                            tx, ty, tz = cx, cy, cz
+                            posKey = pos_key(tx, ty, tz)
+                        elseif cx ~= tx or cy ~= ty or cz ~= tz then
                             setRoomCoordinates(targetID, tx, ty, tz)
                             movedCount = movedCount + 1
                         end
-                        table.insert(queue,
-                            { id = targetID, x = tx, y = ty, z = tz, underground = targetUG, elevated = targetEL })
+
+                        occupied[posKey]        = targetID
+                        roomPositions[targetID] = { x = tx, y = ty, z = tz }
+                        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
+                    elseif type(_.debug_echo) == "function" then
+                        _.debug_echo("[recalculate] skipped " .. targetID
+                            .. " (parent " .. entry.id .. " -" .. tostring(dir)
+                            .. "-> ): shift=" .. tostring(shift ~= nil)
+                            .. " targetArea=" .. tostring(targetAreaID)
+                            .. " areaID=" .. tostring(areaID) .. " (marked visited, never placed)\n")
                     end
-                end
-            end
-        end
-    end
-
-    -- Post-BFS separation pass: now that ALL rooms are placed, check each room
-    -- that arrived via a pure cardinal exit.  If its perpendicular neighbours
-    -- are unconnected rooms (i.e. it visually blends into an unrelated line),
-    -- nudge just that one room further along the exit direction to create a
-    -- visible gap.  Earlier this dragged the room's entire BFS subtree along
-    -- with it, which could displace dozens of unrelated descendant rooms just
-    -- because one coincidental neighbour happened to be adjacent — moving only
-    -- the flagged room keeps the blast radius to a single cell.
-
-    -- Helper: are two rooms connected by an exit in either direction?
-    local function rooms_connected(idA, idB)
-        local exA = getRoomExits(idA)
-        if type(exA) == "table" then
-            for _, eid in pairs(exA) do
-                if tonumber(eid) == idB then return true end
-            end
-        end
-        local exB = getRoomExits(idB)
-        if type(exB) == "table" then
-            for _, eid in pairs(exB) do
-                if tonumber(eid) == idA then return true end
-            end
-        end
-        return false
-    end
-
-    local shifted = {}             -- rooms already nudged this pass
-    local MAX_SEPARATIONS = 200000 -- safety cap for very large areas
-    local separationChecks = 0
-
-    for roomID, pos in pairs(roomPositions) do
-        separationChecks = separationChecks + 1
-        if separationChecks > MAX_SEPARATIONS then
-            echo("[map recalculate] Separation pass capped at "
-                .. MAX_SEPARATIONS .. " rooms.\n")
-            break
-        end
-        local shift = roomShifts[roomID]
-        -- Only process rooms that arrived via a pure cardinal horizontal exit
-        if shift and not shifted[roomID]
-            and shift[3] == 0
-            and ((shift[1] == 0) ~= (shift[2] == 0))
-            and not safe_is_room_locked(roomID) then
-            local tx, ty, tz = pos.x, pos.y, pos.z
-            local perpPositions
-            if shift[1] ~= 0 and shift[2] == 0 then
-                perpPositions = { { tx, ty + 1, tz }, { tx, ty - 1, tz } }
-            else
-                perpPositions = { { tx + 1, ty, tz }, { tx - 1, ty, tz } }
-            end
-
-            local needsSeparation = false
-            for _, pp in ipairs(perpPositions) do
-                local perpKey    = pos_key(pp[1], pp[2], pp[3])
-                local perpRoomID = occupied[perpKey]
-                if perpRoomID and not rooms_connected(roomID, perpRoomID) then
-                    needsSeparation = true
-                    break
-                end
-            end
-
-            if needsSeparation then
-                -- Nudge just this room to the nearest free cell along the
-                -- arrival axis. Descendants are left where they are.
-                local nx, ny, nz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift)
-                if nx ~= tx or ny ~= ty then
-                    occupied[pos_key(tx, ty, tz)] = nil
-                    pos.x, pos.y = nx, ny
-                    occupied[pos_key(nx, ny, nz)] = roomID
-                    setRoomCoordinates(roomID, nx, ny, nz)
-                    shifted[roomID] = true
-                    movedCount      = movedCount + 1
-                    separateCount   = separateCount + 1
                 end
             end
         end
@@ -1395,12 +1321,6 @@ function map.recalculate_room_layout()
     if nudgeCount > 0 then
         details[#details + 1] = nudgeCount .. " nudged to avoid overlap"
     end
-    if levelCount > 0 then
-        details[#details + 1] = levelCount .. " moved to separate z-level"
-    end
-    if separateCount > 0 then
-        details[#details + 1] = separateCount .. " nudged for visual separation"
-    end
     if deletedPlaceholderCount > 0 then
         details[#details + 1] = deletedPlaceholderCount
             .. " placeholder" .. (deletedPlaceholderCount == 1 and "" or "s") .. " removed"
@@ -1425,7 +1345,7 @@ function map.recalculate_room_layout()
     end
     if audit.delta_mismatches > 0 then
         details[#details + 1] = audit.delta_mismatches
-            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "s")
+            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "es")
             .. " remaining"
     end
     if #details > 0 then

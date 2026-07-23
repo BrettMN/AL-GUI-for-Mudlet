@@ -268,20 +268,23 @@ end
 -- Diagnostics
 -- --------------------------------------------------------------------------
 
-function map.test_normalize_determinism(numRuns)
+-- Shared by map test-normalize / map test-recalculate: runs `mutateFn` numRuns
+-- times against the current room's area, snapshotting all room coordinates
+-- after each run, then diffs every run against run 1.
+local function run_layout_determinism_test(label, mutateFn, numRuns)
     numRuns = numRuns or 5
 
     local roomID = getRoomIDbyHash(map.room_info.vnum)
-    if roomID < 1 then
+    if type(roomID) ~= "number" or roomID < 1 then
         echo("Cannot test: current room is unknown.\n")
         return
     end
 
     local snapshots = {}
-    echo("Running map normalize " .. numRuns .. " times to test determinism...\n")
+    echo("Running " .. label .. " " .. numRuns .. " times to test determinism...\n")
 
     for runNum = 1, numRuns do
-        map.normalize_room_layout()
+        mutateFn()
         local areaID = getRoomArea(roomID)
         if areaID then
             local rooms = getAreaRooms(areaID)
@@ -294,7 +297,7 @@ function map.test_normalize_determinism(numRuns)
                     end
                 end
                 snapshots[runNum] = snapshot
-                echo("  Run " .. runNum .. ": captured " .. table.count(snapshot) .. " rooms.\n")
+                echo("  Run " .. runNum .. ": captured " .. table.size(snapshot) .. " rooms.\n")
             end
         end
     end
@@ -335,6 +338,14 @@ function map.test_normalize_determinism(numRuns)
     else
         echo("✗ DETERMINISM TEST FAILED: Some runs produced different layouts.\n")
     end
+end
+
+function map.test_normalize_determinism(numRuns)
+    run_layout_determinism_test("map normalize", map.normalize_room_layout, numRuns)
+end
+
+function map.test_recalculate_determinism(numRuns)
+    run_layout_determinism_test("map recalculate", map.recalculate_room_layout, numRuns)
 end
 
 -- --------------------------------------------------------------------------
@@ -507,11 +518,11 @@ function map.show_help()
     echo("    1) Removes self-loop exits (same as normalize).\n")
     echo("    2) Merges duplicate areas that share the same inferred area-vnum key.\n")
     echo("    3) Rebuilds all room coordinates from scratch via BFS from the current room.\n")
-    echo("       Each room is placed at parent-coords + exit-direction; first BFS path wins.\n")
-    echo("       Rooms that land on an occupied position are nudged to the nearest free spot.\n")
-    echo("    4) Underground rooms (caves, tunnels) are placed on a separate z-level automatically.\n")
-    echo("    5) Snaps in-area up/down pairs that BFS didn't align (unreachable rooms, etc.).\n")
-    echo("    6) Removes stale BFS placeholder stubs; reports anomalies by category.\n")
+    echo("       Each room is placed at parent-coords + exit-direction (z included); first BFS\n")
+    echo("       path wins. Rooms that land on an occupied position are nudged to the nearest\n")
+    echo("       free spot. z is purely exit-derived; there is no name-based auto z-split.\n")
+    echo("    4) Snaps in-area up/down pairs that BFS didn't align (unreachable rooms, etc.).\n")
+    echo("    5) Removes stale BFS placeholder stubs; reports anomalies by category.\n")
     echo("    Only the room you start it from is pinned; other locked rooms may still be moved.\n")
     echo("    More thorough than 'map normalize' — will displace any room that's in the way.\n")
     echo("    When to use: when large groups of rooms have fundamentally wrong coordinates,\n")

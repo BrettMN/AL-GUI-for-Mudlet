@@ -72,6 +72,10 @@
         "regex": "^map\\s+test-normalize(?:\\s+(\\d+))?$"
     },
     {
+        "name": "map test-recalculate",
+        "regex": "^map\\s+test-recalculate(?:\\s+(\\d+))?$"
+    },
+    {
         "name": "map apply-terrain",
         "regex": "^map\\s+apply-terrain$"
     },
