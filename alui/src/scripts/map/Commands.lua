@@ -967,6 +967,14 @@ function map.speedwalk(roomID, walkPath, walkDirs, options)
     local currentRoomID = _.get_current_area_context()
     if not currentRoomID or currentRoomID < 1 then
         echo("Cannot speedwalk: current room is unknown.\n")
+        if type(map.room_info) == "table" and type(map.room_info.vnum) == "string" then
+            echo("  Debug: vnum=" .. map.room_info.vnum .. ", lookup returned " .. tostring(getRoomIDbyHash(map.room_info.vnum)) .. "\n")
+        else
+            echo("  Debug: map.room_info.vnum is not available\n")
+        end
+        if type(getPlayerRoom) == "function" then
+            echo("  Debug: getPlayerRoom()=" .. tostring(getPlayerRoom()) .. "\n")
+        end
         return
     end
 
