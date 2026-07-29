@@ -269,7 +269,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 _.bind_room_hash(targetID, targetVnum, areaID)
                 created = true
                 createdCount = createdCount + 1
-                setRoomName(targetID, targetVnum)
+                _.set_room_name(targetID, targetVnum, areaID)
                 -- Mark as unvisited (dimmed colour) so it is visually distinct
                 -- from rooms the player has actually entered.
                 _.apply_room_environment(targetID, "unvisited")
@@ -365,7 +365,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                 if has_is_placeholder
                                     and _.is_placeholder(keep) and not _.is_placeholder(dup) then
                                     local n = getRoomName(dup)
-                                    if type(n) == "string" and n ~= "" then setRoomName(keep, n) end
+                                    if type(n) == "string" and n ~= "" then _.set_room_name(keep, n) end
                                     local env = getRoomEnv(dup)
                                     if type(env) == "number" and env > 0 then
                                         setRoomEnv(keep, env)
@@ -480,7 +480,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                         if has_is_placeholder
                             and _.is_placeholder(keep) and not _.is_placeholder(dup) then
                             local n = getRoomName(dup)
-                            if type(n) == "string" and n ~= "" then setRoomName(keep, n) end
+                            if type(n) == "string" and n ~= "" then _.set_room_name(keep, n) end
                             local env = getRoomEnv(dup)
                             if type(env) == "number" and env > 0 then
                                 setRoomEnv(keep, env)
@@ -923,16 +923,19 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
 
     local areaName_display = getAreaTableSwap and getAreaTableSwap()[areaID] or ("area #" .. areaID)
 
-    -- Warn early when the area is very large: the full BFS + dedup passes below
-    -- can take many minutes (or longer) on areas with hundreds of thousands of
-    -- rooms.  Give the user a chance to abort before the freeze starts.
+    -- Warn early when the area is large: the full BFS + dedup passes below are
+    -- O(rooms) with heavy per-room work and run synchronously, so Mudlet is
+    -- unresponsive until they finish.  Give the user a chance to abort first.
+    -- This deliberately keys off large_area_threshold rather than the (much
+    -- higher) index cap — normalize is per-command work that is never amortised.
     if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
         local cnt  = type(_.get_estimated_area_room_count) == "function"
                      and _.get_estimated_area_room_count(areaID) or "many"
-        local thr  = tonumber(map.configs and map.configs.large_area_threshold) or 50000
+        local thr  = tonumber(map.configs and map.configs.large_area_threshold) or 5000
         cecho(string.format(
             "<yellow>Warning: '%s' has ~%s rooms (threshold %d). "
-            .. "Normalize may take a very long time. "
+            .. "Normalize runs synchronously and will freeze Mudlet until it "
+            .. "finishes; the wait grows sharply with area size. "
             .. "Consider splitting the area into smaller sub-areas.\n<reset>",
             areaName_display, tostring(cnt), thr))
     end

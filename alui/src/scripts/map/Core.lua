@@ -174,7 +174,7 @@ local function make_room()
     end
     -- areaID is passed explicitly: setRoomArea has not run yet.
     _.bind_room_hash(thisRoom, info.vnum, areaID)
-    setRoomName(thisRoom, info.name)
+    _.set_room_name(thisRoom, info.name, areaID)
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
     -- Loud warning when we end up creating a brand-new room near the
@@ -423,7 +423,7 @@ local function handle_move(isLastInBatch)
 
             if type(info.name) == "string" and info.name ~= "" then
                 if getRoomName(rnum) ~= info.name then
-                    setRoomName(rnum, info.name)
+                    _.set_room_name(rnum, info.name, currentAreaID)
                 end
             end
 
@@ -647,7 +647,7 @@ function map.eventHandler(event, ...)
         end
     elseif event == "sysConnectionEvent" then
         map._pos_cache  = nil -- force posCache rebuild for the new session's area
-        map._hash_index = nil -- ditto for the per-area hash → roomID index
+        map._area_index = nil -- ditto for the per-area hash/name index
         config()
         if _.register_mapper_context_menu then
             _.register_mapper_context_menu()

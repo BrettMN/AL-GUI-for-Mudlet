@@ -72,15 +72,19 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       scaling linearly with area size. `find_real_room_to_adopt` has no `is_large_area` guard.
       *Fix:* maintain a hash→ID index per area (invalidated on `setRoomIDbyHash`) instead of
       re-scanning; gate Phase 2 behind the same large-area check.
-      **Done.** `map._hash_index[areaID] = { [hash] = roomID }` with `_.build_hash_index` /
-      `_.get_hash_index` / `_.invalidate_hash_index` / `_.note_room_hash` in `Helpers.lua`;
-      capped at 8 resident areas and dropped on `sysConnectionEvent`. Every *binding*
-      `setRoomIDbyHash` call now goes through `_.bind_room_hash` (Core 3 sites, Layout 6);
-      clearing calls are unchanged because a hit is re-verified against
-      `getRoomHashByID`/`getRoomArea` on read, with a single rebuild-and-retry when stale.
-      Phase 2 gained the `is_large_area` guard and now tests `getRoomName` before
-      `is_adoptable`, halving its per-room calls. Note the guard only bites once
-      **PERF-10** lowers `large_area_threshold` from 50000.
+      **Done.** One per-area index in `Helpers.lua` serves both scans:
+      `map._area_index[areaID] = { byHash = {[hash]=id}, byName = {[lowerName]={id,...}} }`,
+      built by `_.build_area_index`, capped at 8 resident areas, dropped on
+      `sysConnectionEvent`. `resolve_room_id_by_hash` and `find_real_room_to_adopt` Phase 2
+      are both now O(matches) instead of O(area); Phase 2 no longer walks `getAreaRooms`
+      at all (`_.rooms_with_name`).
+      Staleness is asymmetric: bindings we make are folded in via `_.bind_room_hash` /
+      `_.set_room_name` (Core 5 sites, Layout 5), so the index never *misses* an entry;
+      clears, renames, deletes and area moves are caught on read by re-verifying each
+      candidate against `getRoomHashByID`/`getRoomName`/`getRoomArea` and pruning, so the
+      13 `setRoomIDbyHash(id, "")` sites in the dedup code stayed untouched.
+      Sized by the new `index_area_threshold` (50000), not `large_area_threshold` — the
+      index survives area changes, so it amortises where the pos cache does not.
 
 - [ ] **PERF-2 — `build_reverse_exit_index` walks the entire world, once per merge**
       `Helpers.lua:1601-1634`, `Helpers.lua:1268`, `Helpers.lua:1651-1656`
@@ -141,11 +145,26 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       rate is capped at 3 per timer tick.
       *Fix:* use a head index (as `Helpers.lua:1867` already does) and cap queue length.
 
-- [ ] **PERF-10 — `large_area_threshold = 50000` is far above its stated intent**
+- [x] **PERF-10 — `large_area_threshold = 50000` is far above its stated intent**
       `Data.lua:23`
       The comment cites freezes "for minutes", but a 49,999-room area still takes the full
       path — 50k `getRoomCoordinates` calls on every area change and after every reconnect.
       3k–5k matches the intent much better.
+      **Done, but the single knob had to be split first.** At 50000 it gated four things
+      with opposite cost profiles. `large_area_threshold` is now 5000 and covers only the
+      work that is re-paid and never amortised — the pos cache (rebuilt on every area change
+      and reconnect) and the hot-path map stretch. The per-area hash/name index from
+      **PERF-1** moved to its own `index_area_threshold` (50000) because it is built once and
+      survives area changes; leaving it on the 5000 knob would have silently disabled hash
+      repair and Phase 2 adoption on every area over 5k rooms, undoing PERF-1.
+      The `map normalize` size warning keeps the 5000 knob (per-command work, not amortised)
+      and its text was retuned, since "hundreds of thousands of rooms" no longer describes
+      the trigger.
+      *Follow-up:* this makes **BUG-3** materially worse — the room-count estimate only ever
+      drifts upward, and crossing 5000 is 10x more likely than crossing 50000. Partly
+      mitigated: `_.record_area_room_count` now corrects the estimate for free from the
+      `getAreaRooms` walk that `build_area_index` and `build_pos_cache` already do. That does
+      not unlatch an area already misjudged as large, so BUG-3 should be the next item.
 
 - [ ] **PERF-11 — Duplicate event handlers on script reload**
       `Commands.lua:1466-1468`

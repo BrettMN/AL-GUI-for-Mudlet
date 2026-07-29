@@ -16,11 +16,20 @@ map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = false
 map.configs.debug_mapper = map.configs.debug_mapper == true
 map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
--- Areas with at least this many rooms skip the full pos_cache build on entry
--- (which would freeze Mudlet for minutes on very large areas) and instead use
--- direct getRoomsByPosition look-ups.  Lower the value to tune the cut-over
--- point; raise it to re-enable the cache for moderately large areas.
-map.configs.large_area_threshold = map.configs.large_area_threshold or 50000
+-- Areas with at least this many rooms skip work that is redone repeatedly and
+-- is therefore never amortised: the full pos_cache build (rebuilt on every area
+-- change and after every reconnect, so sub-functions fall back to direct
+-- getRoomsByPosition look-ups instead) and the map stretch pass (O(area)
+-- setRoomCoordinates writes every time a room is created).  Lower the value to
+-- cut over sooner; raise it to re-enable both for moderately large areas.
+map.configs.large_area_threshold = map.configs.large_area_threshold or 5000
+
+-- Areas with at least this many rooms get no per-area hash/name index (see the
+-- "Per-area room index" section in Helpers.lua).  That index is built once and
+-- then reused across steps *and* across area changes, so it tolerates a far
+-- bigger area than the per-entry pos_cache does — this cap exists only to bound
+-- the one-off build and the memory the index holds, not a per-step cost.
+map.configs.index_area_threshold = map.configs.index_area_threshold or 50000
 
 -- Private cross-file table; helpers and functions are stored here so they are
 -- accessible across Lua chunks without polluting the global namespace.

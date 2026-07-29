@@ -189,30 +189,65 @@ end
 _.find_placeholder_for_arrival = _.find_placeholder_for_arrival
 
 -- --------------------------------------------------------------------------
--- Per-area hash → roomID index
+-- Per-area room index (hash → ID, name → IDs)
 -- --------------------------------------------------------------------------
--- `resolve_room_id_by_hash` used to answer every reverse-index miss with a
--- full getAreaRooms() walk calling getRoomHashByID() per room — twice per
--- newly-discovered room (hint area, then the previous room's area).  On the
--- movement hot path that is thousands of C++ round-trips per step and it
--- scales with area size.
+-- Two hot-path lookups used to answer every query with a full getAreaRooms()
+-- walk plus a C++ round-trip per room:
 --
--- Instead we pay that walk once per area and keep the result in
--- map._hash_index[areaID] = { [hash] = roomID }.  Bindings we make ourselves
--- are folded in via bind_room_hash, so the index stays current without a
--- rebuild.  Hashes cleared or rooms deleted/moved elsewhere leave a stale
--- entry behind; those are caught on read (the candidate is re-verified against
--- Mudlet before it is returned) and the index is rebuilt once.
+--   * `resolve_room_id_by_hash` called getRoomHashByID() per room, twice per
+--     newly-discovered room (hint area, then the previous room's area);
+--   * `find_real_room_to_adopt` Phase 2 called getRoomName() per room on the
+--     same event.
+--
+-- Both scale linearly with area size and both fire on the movement hot path.
+-- Instead we pay one walk per area and keep the result in
+--
+--   map._area_index[areaID] = {
+--     byHash = { [hash]      = roomID    },
+--     byName = { [lowerName] = { roomID, ... } },
+--   }
+--
+-- Unlike the pos cache this survives area changes, so the build is amortised
+-- over the whole session rather than re-paid on every entry — hence its own,
+-- much higher size cap (index_area_threshold, see Data.lua).
+--
+-- Staleness is handled asymmetrically.  Bindings we make ourselves are folded
+-- in through bind_room_hash / set_room_name, so the index never *misses* an
+-- entry.  Cleared hashes, renames, deletes and area moves leave a stale entry
+-- behind instead; every read re-verifies its candidates against Mudlet before
+-- handing them back and prunes whatever no longer holds, so a stale entry can
+-- never produce a wrong answer.
 
-function _.build_hash_index(areaID)
-    local index = {}
+-- Areas at or above index_area_threshold are left unindexed: the one-off build
+-- would freeze Mudlet, and the callers all degrade gracefully to "not found".
+function _.is_indexable_area(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return false end
+    local threshold = tonumber(map.configs and map.configs.index_area_threshold) or 50000
+    return _.get_estimated_area_room_count(areaID) < threshold
+end
+
+function _.build_area_index(areaID)
+    local index = { byHash = {}, byName = {} }
     if type(areaID) ~= "number" or areaID < 1 then return index end
-    if type(getRoomHashByID) ~= "function" then return index end
     local rooms = getAreaRooms(areaID)
     if type(rooms) ~= "table" then return index end
+    _.record_area_room_count(areaID, #rooms)
+    local has_hash = type(getRoomHashByID) == "function"
     for _, rid in ipairs(rooms) do
-        local h = getRoomHashByID(rid)
-        if type(h) == "string" and h ~= "" then index[h] = rid end
+        if has_hash then
+            local h = getRoomHashByID(rid)
+            if type(h) == "string" and h ~= "" then index.byHash[h] = rid end
+        end
+        local n = getRoomName(rid)
+        if type(n) == "string" and n ~= "" then
+            local key = string.lower(n)
+            local list = index.byName[key]
+            if list == nil then
+                index.byName[key] = { rid }
+            else
+                list[#list + 1] = rid
+            end
+        end
     end
     return index
 end
@@ -220,57 +255,104 @@ end
 -- How many area indexes to keep resident.  Resolution only ever consults the
 -- hint area and the previous room's area, so a handful covers every realistic
 -- movement pattern; the cap just stops a long session in a big world from
--- accumulating one string key per room per area visited.
-local HASH_INDEX_MAX_AREAS = 8
+-- accumulating one entry per room for every area ever visited.
+local AREA_INDEX_MAX_AREAS = 8
 
--- Returns the (lazily built) index for areaID.  Callers must have already
--- ruled out large areas — building the index there is the very freeze this
--- whole path exists to avoid.
-function _.get_hash_index(areaID)
-    if type(areaID) ~= "number" or areaID < 1 then return nil end
-    map._hash_index = map._hash_index or {}
-    local index = map._hash_index[areaID]
+-- Returns the (lazily built) index for areaID, or nil when the area is too
+-- large to index.
+function _.get_area_index(areaID)
+    if not _.is_indexable_area(areaID) then return nil end
+    map._area_index = map._area_index or {}
+    local index = map._area_index[areaID]
     if index == nil then
         local cached = 0
-        for _k in pairs(map._hash_index) do cached = cached + 1 end
-        if cached >= HASH_INDEX_MAX_AREAS then map._hash_index = {} end
-        index = _.build_hash_index(areaID)
-        map._hash_index[areaID] = index
+        for _k in pairs(map._area_index) do cached = cached + 1 end
+        if cached >= AREA_INDEX_MAX_AREAS then map._area_index = {} end
+        index = _.build_area_index(areaID)
+        map._area_index[areaID] = index
     end
     return index
 end
 
 -- Drop the cached index for areaID, or every area when areaID is nil.
-function _.invalidate_hash_index(areaID)
-    if type(map._hash_index) ~= "table" then return end
+function _.invalidate_area_index(areaID)
+    if type(map._area_index) ~= "table" then return end
     if areaID == nil then
-        map._hash_index = {}
+        map._area_index = {}
     else
-        map._hash_index[areaID] = nil
+        map._area_index[areaID] = nil
     end
 end
 
--- Record a hash binding in the index.  No-op when the area's index has not
--- been built yet — the next build picks the binding up from Mudlet anyway.
--- `areaID` is optional and only needed when the room's area has not been set
--- yet (new rooms are hashed before setRoomArea).
-function _.note_room_hash(roomID, hash, areaID)
-    if type(map._hash_index) ~= "table" then return end
-    if type(roomID) ~= "number" or roomID < 1 then return end
-    if type(hash) ~= "string" or hash == "" then return end
+-- Resolve the area an index update applies to.  `areaID` is passed explicitly
+-- by callers that touch a room before setRoomArea has run (newly created rooms
+-- are hashed and named first).  Returns nil when the area has no live index,
+-- in which case the update is a no-op — the next build reads the truth from
+-- Mudlet anyway.
+local function live_index_for(roomID, areaID)
+    if type(map._area_index) ~= "table" then return nil end
+    if type(roomID) ~= "number" or roomID < 1 then return nil end
     if type(areaID) ~= "number" or areaID < 1 then areaID = getRoomArea(roomID) end
-    if type(areaID) ~= "number" or areaID < 1 then return end
-    local index = map._hash_index[areaID]
-    if index ~= nil then index[hash] = roomID end
+    if type(areaID) ~= "number" or areaID < 1 then return nil end
+    return map._area_index[areaID]
 end
 
--- setRoomIDbyHash + index bookkeeping.  Use this for every *binding* call so
--- the index never goes stale in the positive direction; clearing calls
--- (`setRoomIDbyHash(id, "")`) need no wrapper because a cleared hash is
--- detected by the read-side verification in resolve_room_id_by_hash.
+function _.note_room_hash(roomID, hash, areaID)
+    if type(hash) ~= "string" or hash == "" then return end
+    local index = live_index_for(roomID, areaID)
+    if index then index.byHash[hash] = roomID end
+end
+
+function _.note_room_name(roomID, name, areaID)
+    if type(name) ~= "string" or name == "" then return end
+    local index = live_index_for(roomID, areaID)
+    if index == nil then return end
+    local key = string.lower(name)
+    local list = index.byName[key]
+    if list == nil then
+        index.byName[key] = { roomID }
+        return
+    end
+    for i = 1, #list do if list[i] == roomID then return end end
+    list[#list + 1] = roomID
+    -- The room's previous name still lists it; that entry is pruned on read.
+end
+
+-- setRoomIDbyHash + index bookkeeping.  Use this for every *binding* call;
+-- clearing calls (`setRoomIDbyHash(id, "")`) need no wrapper because a cleared
+-- hash is caught by the read-side verification.
 function _.bind_room_hash(roomID, hash, areaID)
     setRoomIDbyHash(roomID, hash)
     _.note_room_hash(roomID, hash, areaID)
+end
+
+-- setRoomName + index bookkeeping.
+function _.set_room_name(roomID, name, areaID)
+    setRoomName(roomID, name)
+    _.note_room_name(roomID, name, areaID)
+end
+
+-- Rooms in areaID whose name lower-cases to `nameLower`, each verified against
+-- Mudlet so a stale entry can never hand back the wrong room.  Returns nil when
+-- the area is not indexable (callers treat that as "no answer available"), or
+-- an empty table when the area genuinely holds no such room.
+function _.rooms_with_name(areaID, nameLower)
+    local index = _.get_area_index(areaID)
+    if index == nil then return nil end
+    local ids = index.byName[nameLower]
+    if ids == nil then return {} end
+    local live = {}
+    for _, rid in ipairs(ids) do
+        local n = getRoomName(rid)
+        if type(n) == "string" and string.lower(n) == nameLower
+            and getRoomArea(rid) == areaID then
+            live[#live + 1] = rid
+        end
+    end
+    if #live ~= #ids then
+        index.byName[nameLower] = (#live > 0) and live or nil
+    end
+    return live
 end
 
 -- --------------------------------------------------------------------------
@@ -304,16 +386,12 @@ function _.resolve_room_id_by_hash(vnum, areaHint)
 
     if type(getRoomHashByID) ~= "function" then return -1 end
 
-    -- Slow path: consult the per-area hash index for a room whose stored hash
-    -- matches vnum.  The index costs one getAreaRooms() walk the first time an
-    -- area is queried and is O(1) thereafter.
+    -- Slow path: consult the per-area index for a room whose stored hash
+    -- matches vnum.  It costs one getAreaRooms() walk the first time an area is
+    -- queried and is O(1) thereafter; areas too big to index (and hence to
+    -- scan, which is what this used to do) simply report no match.
     local function scan(areaID)
         if type(areaID) ~= "number" or areaID < 1 then return nil end
-        -- Never O(N)-scan an enormous world: a rare miss is cheaper to accept
-        -- than a multi-second freeze walking hundreds of thousands of rooms.
-        if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
-            return nil
-        end
 
         -- A hit is only trusted once Mudlet confirms the room still stores the
         -- hash and still lives in this area; anything else means the index went
@@ -322,19 +400,19 @@ function _.resolve_room_id_by_hash(vnum, areaHint)
         -- Mudlet's API would have been answered by the fast path above.
         local function lookup(index)
             if index == nil then return nil end
-            local rid = index[vnum]
+            local rid = index.byHash[vnum]
             if type(rid) ~= "number" or rid < 1 then return nil, false end
             if getRoomHashByID(rid) == vnum and getRoomArea(rid) == areaID then
                 return rid, false
             end
-            index[vnum] = nil
+            index.byHash[vnum] = nil
             return nil, true
         end
 
-        local found, stale = lookup(_.get_hash_index(areaID))
+        local found, stale = lookup(_.get_area_index(areaID))
         if found == nil and stale then
-            _.invalidate_hash_index(areaID)
-            found = lookup(_.get_hash_index(areaID))
+            _.invalidate_area_index(areaID)
+            found = lookup(_.get_area_index(areaID))
         end
         return found
     end
@@ -474,23 +552,18 @@ function _.find_real_room_to_adopt(areaID)
         end
     end
 
-    -- Phase 2: area-wide name + exit-set scan.  This is an O(area) walk with a
-    -- C++ round-trip per room, so it gets the same large-area guard as
-    -- resolve_room_id_by_hash — on a huge area a missed adoption is far cheaper
-    -- than freezing Mudlet on every step into unmapped territory.
-    if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
-        return nil
-    end
-    local nameLower = string.lower(info.name)
-    local rooms     = getAreaRooms(areaID)
-    if type(rooms) ~= "table" then return nil end
+    -- Phase 2: name + exit-set match across the area.  The name lookup comes
+    -- from the per-area index rather than a getAreaRooms() walk with a
+    -- getRoomName() per room, so the cost is proportional to how many rooms
+    -- share this name (nearly always a handful) instead of to the area size.
+    -- nil means the area is too big to index: report no match rather than
+    -- freezing Mudlet on every step into unmapped territory.
+    local nameLower  = string.lower(info.name)
+    local candidates = _.rooms_with_name(areaID, nameLower)
+    if candidates == nil then return nil end
     local bestID, bestScore, tied = nil, 1, false
-    for _, rid in ipairs(rooms) do
-        -- Name first: it is one call and rejects nearly every room, whereas
-        -- is_adoptable costs getRoomHashByID plus the placeholder check.
-        local rname = getRoomName(rid)
-        if type(rname) == "string" and string.lower(rname) == nameLower
-            and is_adoptable(rid) then
+    for _, rid in ipairs(candidates) do
+        if is_adoptable(rid) then
             local s = score_exit_match(rid, info)
             if s > bestScore then
                 bestID, bestScore, tied = rid, s, false
@@ -715,9 +788,23 @@ function _.invalidate_area_room_count(areaID)
     end
 end
 
+-- Record an exact count observed from a getAreaRooms() walk.  The incremental
+-- estimate only ever drifts upward (adjust_area_room_count is called with +1 on
+-- creation but nothing decrements it on deleteRoom), which matters now that
+-- large_area_threshold sits at 5000 rather than 50000 — a few thousand rooms of
+-- create/delete churn is enough to latch a mid-size area as "large" and
+-- silently disable its pos cache and stretch pass.  Callers that already paid
+-- for the walk correct the estimate here for free.
+function _.record_area_room_count(areaID, count)
+    if type(areaID) ~= "number" or areaID < 1 then return end
+    if type(count) ~= "number" then return end
+    map._area_room_counts = map._area_room_counts or {}
+    map._area_room_counts[areaID] = count
+end
+
 -- Returns true when the area exceeds the configured large_area_threshold.
 function _.is_large_area(areaID)
-    local threshold = tonumber(map.configs and map.configs.large_area_threshold) or 50000
+    local threshold = tonumber(map.configs and map.configs.large_area_threshold) or 5000
     return _.get_estimated_area_room_count(areaID) >= threshold
 end
 
@@ -773,6 +860,7 @@ function _.build_pos_cache(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return cache end
     local rooms = getAreaRooms(areaID)
     if type(rooms) ~= "table" then return cache end
+    _.record_area_room_count(areaID, #rooms)
     cache._rooms = rooms
     for _, id in ipairs(rooms) do
         local x, y, z = getRoomCoordinates(id)
