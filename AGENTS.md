@@ -23,38 +23,7 @@ run C:\Programs\Muddler\bin\muddle.bat in the `alui` folder to build the package
 
 ## Project Structure
 
-Muddler uses **convention over configuration**. Do not deviate from this layout.
-
-```
-alui/
-├── mfile                   # JSON — package metadata (name, version, author)
-├── build/                  # OUTPUT ONLY — never edit; regenerated on each muddle run
-│   ├── <PackageName>.xml
-│   └── <PackageName>.mpackage
-└── src/
-    ├── aliases/
-    │   └── <GroupName>/
-    │           aliases.json
-    │           <alias>.lua
-    ├── keybindings/
-    │   └── <GroupName>/
-    │           keybindings.json
-    │           <keybinding>.lua
-    ├── resources/
-    ├── scripts/
-    │   └── <GroupName>/
-    │           scripts.json
-    │           <module>.lua
-    ├── timers/
-    │   └── <GroupName>/
-    │           timers.json
-    │           <timer>.lua
-    └── triggers/
-        └── <GroupName>/
-                triggers.json
-                <trigger>.lua
-
-```
+Muddler uses **convention over configuration**. Do not deviate from the `alui/src/<type>/<GroupName>/` layout already in the tree; `build/` is output only.
 
 > **GroupName** becomes the parent item name in Mudlet's editor. Nesting deeper subdirectories creates nested groups.
 
@@ -62,17 +31,7 @@ alui/
 
 ## mfile
 
-`mfile` is a JSON file in the project root. Minimum required field is `package`.
-
-```json
-{
-  "package": "MyPackageName",
-  "version": "1.0.0",
-  "author": "YourName",
-  "title": "My Mudlet UI",
-  "description": "What this package does."
-}
-```
+`mfile` is a JSON file in the package root (`alui/mfile`). Minimum required field is `package`.
 
 `@PKGNAME@` and `@VERSION@` tokens in Lua files are substituted at build time with these values.
 
@@ -80,18 +39,7 @@ alui/
 
 ## Build Commands
 
-```bash
-# Build package (run from project root)
-muddle
-
-# Scaffold a new project interactively
-muddle --generate
-
-# Scaffold with all defaults (good for CI/testing)
-muddle --default
-```
-
-Output lands in `build/` — both `.xml` (importable) and `.mpackage` (distributable).
+See the build command above. `build/` gets both `.xml` (importable) and `.mpackage` (distributable).
 
 ```lua
 -- Reload inside Mudlet console during development
@@ -102,20 +50,7 @@ lua uninstallPackage("MyPackageName"); installPackage("/path/to/build/MyPackageN
 
 ## JSON Config Files
 
-Each `src/<type>/<Group>/` folder has one `<type>.json` that describes all items in that group. Fields mirror Mudlet UI options. Example `triggers.json`:
-
-```json
-[
-  {
-    "name": "HP Trigger",
-    "type": "substring",
-    "pattern": "You have (\\d+) health",
-    "isActive": true,
-    "isFolder": false,
-    "script": "hp_trigger.lua"
-  }
-]
-```
+Each `src/<type>/<Group>/` folder has one `<type>.json` that describes all items in that group. Fields mirror Mudlet UI options; see any existing one in `src/` for the shape.
 
 Items are **parent→child** via nesting in the JSON array, matching Mudlet's tree structure.
 
@@ -162,19 +97,3 @@ Items are **parent→child** via nesting in the JSON array, matching Mudlet's tr
 - [Mudlet Lua API](https://wiki.mudlet.org/w/Manual:Lua_Functions)
 - [Geyser Manual](https://wiki.mudlet.org/w/Manual:Geyser)
 - [Mudlet Scripting Manual](https://wiki.mudlet.org/w/Manual:Scripting)
-```
-
----
-
-Key deltas from previous version:
-
-- **`mfile`** replaces `mudlet-package.xml` as source of truth — it's JSON, not XML
-- **`muddle`** command replaces manual ZIP process
-- **`build/` is generated** — gitignore it, never edit it
-- **JSON per folder** drives item config, not XML hand-editing
-- **`@PKGNAME@` / `@VERSION@` token substitution** called out explicitly
-- **DeMuddler** added for migrating existing packages in [^1]
-
-**References**
-
-[^1]: [Releases · demonnic/muddler · GitHub](https://github.com/demonnic/muddler/releases) (100%)
