@@ -1480,6 +1480,22 @@ function _.snap_vertical_pair(areaID)
         return type(terrain) == "string" and terrain ~= ""
     end
 
+    -- Reverse exit index shared by every merge this call performs.  It is a
+    -- whole-world walk, so it is built at most once and only when an overlap
+    -- actually needs merging — most calls resolve nothing and must not pay for
+    -- it.  merge_duplicate_room keeps it current as it rewires exits, which
+    -- matters here because resolve_overlap chains: the survivor of one merge
+    -- can be the loser of the next.  Every candidate loser is an in-area room
+    -- (resolve_overlap rejects out-of-area occupants), so areaRooms is the
+    -- complete target set.
+    local sharedRevIndex = nil
+    local function rev_index()
+        if sharedRevIndex == nil then
+            sharedRevIndex = _.build_reverse_exit_index(areaRooms)
+        end
+        return sharedRevIndex
+    end
+
     local function resolve_overlap(targetID, occupantID)
         if type(targetID) ~= "number" or targetID < 1 then return nil, targetID end
         if type(occupantID) ~= "number" or occupantID < 1 then return nil, targetID end
@@ -1513,7 +1529,7 @@ function _.snap_vertical_pair(areaID)
             return nil, targetID
         end
 
-        _.merge_duplicate_room(survivor, loser, posCache, nil)
+        _.merge_duplicate_room(survivor, loser, posCache, rev_index())
         return "resolved", survivor
     end
 
@@ -1843,10 +1859,17 @@ function _.choose_survivor(group)
     return best
 end
 
--- Build a reverse exit index for ALL rooms across all areas:
+-- Build a reverse exit index for the given target rooms:
 --   index[targetID] = { {sourceID, kind="normal", dir=...}, {sourceID, kind="special", cmd=...}, ... }
--- Building this once is efficient for batch merges.
-local function build_reverse_exit_index(targetIDs)
+--
+-- Sources are scanned across ALL areas, because an exit into a room can come
+-- from anywhere and Mudlet does not clean up exits pointing at a deleted room.
+-- That makes this a whole-world walk (getRooms plus getRoomExits and
+-- getSpecialExitsSwap per room), so it must be built ONCE per batch of merges
+-- and threaded through, never rebuilt per merge.  merge_duplicate_room keeps
+-- whatever index it is handed up to date as it rewires exits, so a survivor
+-- that later becomes a loser still has a complete inbound list.
+function _.build_reverse_exit_index(targetIDs)
     local targetSet = {}
     for _i, id in ipairs(targetIDs) do targetSet[id] = true end
 
@@ -1888,44 +1911,74 @@ end
 --  - Copies user_data keys from loser to survivor only when key is missing on survivor.
 --  - Clears loser's hash binding so getRoomIDbyHash no longer returns the deleted id.
 --  - Drops loser from posCache and deletes it.
--- `revIndex` is the reverse exit index produced by build_reverse_exit_index (optional
--- optimisation — pass nil to build a one-off scan, but that is slow in batch).
+-- `revIndex` is the reverse exit index produced by _.build_reverse_exit_index.
+-- Pass it whenever more than one merge is possible: it is mutated in place to
+-- stay accurate as exits are rewired, so one index serves a whole batch.  Nil
+-- falls back to a one-off whole-world scan for this loser alone, which is only
+-- acceptable for a genuinely isolated merge.
 function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
     if survivorID == loserID then return end
     if type(survivorID) ~= "number" or survivorID < 1 then return end
     if type(loserID) ~= "number" or loserID < 1 then return end
 
+    -- Keep a caller-supplied index in step with the rewiring below, so a batch
+    -- can build it once.  Without this a survivor that later becomes a loser
+    -- would be missing every inbound exit it inherited here, and those sources
+    -- would be left pointing at a deleted room.
+    local function note_inbound(targetID, entry)
+        if revIndex == nil then return end
+        if type(targetID) ~= "number" or targetID < 1 then return end
+        local list = revIndex[targetID]
+        if list == nil then
+            list = {}
+            revIndex[targetID] = list
+        end
+        list[#list + 1] = entry
+    end
+
+    -- A source recorded before an earlier merge may itself have been deleted
+    -- since.  Mudlet leaves ghost IDs behind, and writing an exit onto one can
+    -- resurrect it, so re-check the source is still a live room.
+    local function source_is_live(rid)
+        if type(rid) ~= "number" or rid < 1 then return false end
+        local a = getRoomArea(rid)
+        return type(a) == "number" and a > 0
+    end
+
     -- 1. Rewrite inbound exits: normal
     local inboundList = revIndex and (revIndex[loserID] or {}) or (function()
         local tmp = {}
-        local idx = build_reverse_exit_index({ loserID })
+        local idx = _.build_reverse_exit_index({ loserID })
         for _i, entry in ipairs(idx[loserID] or {}) do tmp[#tmp + 1] = entry end
         return tmp
     end)()
 
     for _i, entry in ipairs(inboundList) do
         local src = entry.sourceID
-        if entry.kind == "normal" then
-            local dir = entry.dir
-            -- Normalise numeric dir keys to string names (Mudlet sometimes returns ints)
-            if type(dir) == "number" then dir = _.stubmapFlipped[dir] end
-            if type(dir) == "string" then
-                pcall(setExit, src, survivorID, dir)
-                -- Preserve door state on the source room's exit direction
-                if getDoors and setDoor then
-                    local srcDoors = getDoors(src)
-                    if type(srcDoors) == "table" and srcDoors[dir] and srcDoors[dir] ~= 0 then
-                        pcall(setDoor, src, dir, srcDoors[dir])
+        if src ~= loserID and source_is_live(src) then
+            if entry.kind == "normal" then
+                local dir = entry.dir
+                -- Normalise numeric dir keys to string names (Mudlet sometimes returns ints)
+                if type(dir) == "number" then dir = _.stubmapFlipped[dir] end
+                if type(dir) == "string" then
+                    pcall(setExit, src, survivorID, dir)
+                    note_inbound(survivorID, { sourceID = src, kind = "normal", dir = dir })
+                    -- Preserve door state on the source room's exit direction
+                    if getDoors and setDoor then
+                        local srcDoors = getDoors(src)
+                        if type(srcDoors) == "table" and srcDoors[dir] and srcDoors[dir] ~= 0 then
+                            pcall(setDoor, src, dir, srcDoors[dir])
+                        end
                     end
                 end
-            end
-        elseif entry.kind == "special" then
-            -- Rewrite the SOURCE room's special exit cmd to point at survivorID
-            local src = entry.sourceID
-            local cmd = entry.cmd
-            if type(addSpecialExit) == "function" and type(clearSpecialExit) == "function" then
-                pcall(clearSpecialExit, src, cmd)
-                pcall(addSpecialExit, src, survivorID, cmd)
+            elseif entry.kind == "special" then
+                -- Rewrite the SOURCE room's special exit cmd to point at survivorID
+                local cmd = entry.cmd
+                if type(addSpecialExit) == "function" and type(clearSpecialExit) == "function" then
+                    pcall(clearSpecialExit, src, cmd)
+                    pcall(addSpecialExit, src, survivorID, cmd)
+                    note_inbound(survivorID, { sourceID = src, kind = "special", cmd = cmd })
+                end
             end
         end
     end
@@ -1941,6 +1994,7 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
                 local survivorHasDir = type(survivorExits) == "table" and survivorExits[dir] ~= nil
                 if not survivorHasDir then
                     pcall(setExit, survivorID, tgt, dir)
+                    note_inbound(tgt, { sourceID = survivorID, kind = "normal", dir = dir })
                     -- Carry door state
                     if getDoors and setDoor then
                         local loserDoors = getDoors(loserID)
@@ -1964,6 +2018,7 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
                     local survivorHasCmd = type(survivorSp) == "table" and survivorSp[cmd] ~= nil
                     if not survivorHasCmd then
                         pcall(addSpecialExit, survivorID, tgt, cmd)
+                        note_inbound(tgt, { sourceID = survivorID, kind = "special", cmd = cmd })
                     end
                 end
             end
@@ -2008,6 +2063,10 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
 
     -- 7. Delete the loser room
     _.delete_room(loserID)
+
+    -- 8. The loser is gone; its inbound list has been transferred to the
+    --    survivor, and source_is_live above skips any entry still naming it.
+    if revIndex then revIndex[loserID] = nil end
 end
 
 -- De-duplicate all rooms in areaID that share the same hash.
@@ -2054,7 +2113,7 @@ function map.dedupe_area_by_hash(areaID, posCache)
     end
 
     -- Build reverse exit index once for all losers.
-    local revIndex = build_reverse_exit_index(losers)
+    local revIndex = _.build_reverse_exit_index(losers)
 
     for _i, loserID in ipairs(losers) do
         local survivor = survivorFor[loserID]

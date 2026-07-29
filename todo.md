@@ -86,13 +86,29 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       Sized by the new `index_area_threshold` (50000), not `large_area_threshold` — the
       index survives area changes, so it amortises where the pos cache does not.
 
-- [ ] **PERF-2 — `build_reverse_exit_index` walks the entire world, once per merge**
+- [x] **PERF-2 — `build_reverse_exit_index` walks the entire world, once per merge**
       `Helpers.lua:1601-1634`, `Helpers.lua:1268`, `Helpers.lua:1651-1656`
       It calls `getRooms()` (all rooms, all areas) with `getRoomExits` + `getSpecialExitsSwap`
       per room. `map.dedupe_area_by_hash` correctly builds it once (`Helpers.lua:1809`), but
       `snap_vertical_pair` → `resolve_overlap` passes `nil`, so `merge_duplicate_room` rebuilds
       the whole-world index for *each* overlap merged. 50 overlaps = 50 full-world scans in
       one `map normalize`.
+      **Done.** `snap_vertical_pair` now owns one index for the whole call and threads it
+      into every `merge_duplicate_room`, so 50 overlaps cost 1 full-world walk instead of 50.
+      It is built **lazily** on the first merge that actually needs it: most calls resolve no
+      overlaps at all and previously paid nothing, so an eager build at the top would have
+      made the common path worse.
+      Sharing one index across chained merges needed `merge_duplicate_room` to stop treating
+      it as read-only, because `resolve_overlap` feeds each survivor back in as the next
+      target and that survivor can become the next loser. It now records every edge it
+      creates (inbound rewrites in step 1, inherited outbound exits in steps 2-3) and drops
+      the loser's list after deletion, so a later merge sees a complete inbound list rather
+      than silently leaving sources pointing at a deleted room.
+      Also added a live-source check before rewriting an inbound exit: an entry can name a
+      room a previous merge deleted, and writing an exit onto one of Mudlet's leftover ghost
+      IDs can resurrect it (the same failure `Layout.lua` guards against for positions).
+      `build_reverse_exit_index` moved from a file-local to `_.build_reverse_exit_index`
+      because `snap_vertical_pair` is defined above it.
 
 - [ ] **PERF-3 — Position cache rebuilt per reconcile pass and per subgraph seed**
       `Layout.lua:642`, `Layout.lua:968-975`, `Layout.lua:1059-1065`
