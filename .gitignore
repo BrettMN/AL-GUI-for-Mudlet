@@ -1,3 +1,4 @@
 
 # Ignore jetbrains idea files
 .idea/
+.claude/
