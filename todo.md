@@ -61,7 +61,7 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
 
 ## Performance
 
-- [ ] **PERF-1 — Two-to-three full-area scans on every newly-discovered room**
+- [x] **PERF-1 — Two-to-three full-area scans on every newly-discovered room**
       `Helpers.lua:230-238`, `Helpers.lua:376-393`
       Biggest item, because it fires on the hot path — walking into an unmapped room.
       `handle_move` sees `rnum < 1` → `_.resolve_room_id_by_hash` walks the hint area calling
@@ -72,6 +72,15 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       scaling linearly with area size. `find_real_room_to_adopt` has no `is_large_area` guard.
       *Fix:* maintain a hash→ID index per area (invalidated on `setRoomIDbyHash`) instead of
       re-scanning; gate Phase 2 behind the same large-area check.
+      **Done.** `map._hash_index[areaID] = { [hash] = roomID }` with `_.build_hash_index` /
+      `_.get_hash_index` / `_.invalidate_hash_index` / `_.note_room_hash` in `Helpers.lua`;
+      capped at 8 resident areas and dropped on `sysConnectionEvent`. Every *binding*
+      `setRoomIDbyHash` call now goes through `_.bind_room_hash` (Core 3 sites, Layout 6);
+      clearing calls are unchanged because a hit is re-verified against
+      `getRoomHashByID`/`getRoomArea` on read, with a single rebuild-and-retry when stale.
+      Phase 2 gained the `is_large_area` guard and now tests `getRoomName` before
+      `is_adoptable`, halving its per-room calls. Note the guard only bites once
+      **PERF-10** lowers `large_area_threshold` from 50000.
 
 - [ ] **PERF-2 — `build_reverse_exit_index` walks the entire world, once per merge**
       `Helpers.lua:1601-1634`, `Helpers.lua:1268`, `Helpers.lua:1651-1656`

@@ -189,6 +189,91 @@ end
 _.find_placeholder_for_arrival = _.find_placeholder_for_arrival
 
 -- --------------------------------------------------------------------------
+-- Per-area hash → roomID index
+-- --------------------------------------------------------------------------
+-- `resolve_room_id_by_hash` used to answer every reverse-index miss with a
+-- full getAreaRooms() walk calling getRoomHashByID() per room — twice per
+-- newly-discovered room (hint area, then the previous room's area).  On the
+-- movement hot path that is thousands of C++ round-trips per step and it
+-- scales with area size.
+--
+-- Instead we pay that walk once per area and keep the result in
+-- map._hash_index[areaID] = { [hash] = roomID }.  Bindings we make ourselves
+-- are folded in via bind_room_hash, so the index stays current without a
+-- rebuild.  Hashes cleared or rooms deleted/moved elsewhere leave a stale
+-- entry behind; those are caught on read (the candidate is re-verified against
+-- Mudlet before it is returned) and the index is rebuilt once.
+
+function _.build_hash_index(areaID)
+    local index = {}
+    if type(areaID) ~= "number" or areaID < 1 then return index end
+    if type(getRoomHashByID) ~= "function" then return index end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then return index end
+    for _, rid in ipairs(rooms) do
+        local h = getRoomHashByID(rid)
+        if type(h) == "string" and h ~= "" then index[h] = rid end
+    end
+    return index
+end
+
+-- How many area indexes to keep resident.  Resolution only ever consults the
+-- hint area and the previous room's area, so a handful covers every realistic
+-- movement pattern; the cap just stops a long session in a big world from
+-- accumulating one string key per room per area visited.
+local HASH_INDEX_MAX_AREAS = 8
+
+-- Returns the (lazily built) index for areaID.  Callers must have already
+-- ruled out large areas — building the index there is the very freeze this
+-- whole path exists to avoid.
+function _.get_hash_index(areaID)
+    if type(areaID) ~= "number" or areaID < 1 then return nil end
+    map._hash_index = map._hash_index or {}
+    local index = map._hash_index[areaID]
+    if index == nil then
+        local cached = 0
+        for _k in pairs(map._hash_index) do cached = cached + 1 end
+        if cached >= HASH_INDEX_MAX_AREAS then map._hash_index = {} end
+        index = _.build_hash_index(areaID)
+        map._hash_index[areaID] = index
+    end
+    return index
+end
+
+-- Drop the cached index for areaID, or every area when areaID is nil.
+function _.invalidate_hash_index(areaID)
+    if type(map._hash_index) ~= "table" then return end
+    if areaID == nil then
+        map._hash_index = {}
+    else
+        map._hash_index[areaID] = nil
+    end
+end
+
+-- Record a hash binding in the index.  No-op when the area's index has not
+-- been built yet — the next build picks the binding up from Mudlet anyway.
+-- `areaID` is optional and only needed when the room's area has not been set
+-- yet (new rooms are hashed before setRoomArea).
+function _.note_room_hash(roomID, hash, areaID)
+    if type(map._hash_index) ~= "table" then return end
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    if type(hash) ~= "string" or hash == "" then return end
+    if type(areaID) ~= "number" or areaID < 1 then areaID = getRoomArea(roomID) end
+    if type(areaID) ~= "number" or areaID < 1 then return end
+    local index = map._hash_index[areaID]
+    if index ~= nil then index[hash] = roomID end
+end
+
+-- setRoomIDbyHash + index bookkeeping.  Use this for every *binding* call so
+-- the index never goes stale in the positive direction; clearing calls
+-- (`setRoomIDbyHash(id, "")`) need no wrapper because a cleared hash is
+-- detected by the read-side verification in resolve_room_id_by_hash.
+function _.bind_room_hash(roomID, hash, areaID)
+    setRoomIDbyHash(roomID, hash)
+    _.note_room_hash(roomID, hash, areaID)
+end
+
+-- --------------------------------------------------------------------------
 -- Self-healing hash lookup
 -- --------------------------------------------------------------------------
 -- Mudlet keeps two mappings for room hashes: forward (getRoomHashByID, stored
@@ -219,7 +304,9 @@ function _.resolve_room_id_by_hash(vnum, areaHint)
 
     if type(getRoomHashByID) ~= "function" then return -1 end
 
-    -- Slow path: reverse-scan for a room whose stored hash matches vnum.
+    -- Slow path: consult the per-area hash index for a room whose stored hash
+    -- matches vnum.  The index costs one getAreaRooms() walk the first time an
+    -- area is queried and is O(1) thereafter.
     local function scan(areaID)
         if type(areaID) ~= "number" or areaID < 1 then return nil end
         -- Never O(N)-scan an enormous world: a rare miss is cheaper to accept
@@ -227,14 +314,29 @@ function _.resolve_room_id_by_hash(vnum, areaHint)
         if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
             return nil
         end
-        local rooms = getAreaRooms(areaID)
-        if type(rooms) ~= "table" then return nil end
-        for _, rid in ipairs(rooms) do
-            if getRoomHashByID(rid) == vnum then
-                return rid
+
+        -- A hit is only trusted once Mudlet confirms the room still stores the
+        -- hash and still lives in this area; anything else means the index went
+        -- stale (hash cleared, room deleted, room moved) so we rebuild once and
+        -- retry.  A verified miss is trusted directly — a binding made through
+        -- Mudlet's API would have been answered by the fast path above.
+        local function lookup(index)
+            if index == nil then return nil end
+            local rid = index[vnum]
+            if type(rid) ~= "number" or rid < 1 then return nil, false end
+            if getRoomHashByID(rid) == vnum and getRoomArea(rid) == areaID then
+                return rid, false
             end
+            index[vnum] = nil
+            return nil, true
         end
-        return nil
+
+        local found, stale = lookup(_.get_hash_index(areaID))
+        if found == nil and stale then
+            _.invalidate_hash_index(areaID)
+            found = lookup(_.get_hash_index(areaID))
+        end
+        return found
     end
 
     local found = scan(areaHint)
@@ -372,21 +474,28 @@ function _.find_real_room_to_adopt(areaID)
         end
     end
 
-    -- Phase 2: area-wide name + exit-set scan.
+    -- Phase 2: area-wide name + exit-set scan.  This is an O(area) walk with a
+    -- C++ round-trip per room, so it gets the same large-area guard as
+    -- resolve_room_id_by_hash — on a huge area a missed adoption is far cheaper
+    -- than freezing Mudlet on every step into unmapped territory.
+    if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
+        return nil
+    end
     local nameLower = string.lower(info.name)
     local rooms     = getAreaRooms(areaID)
     if type(rooms) ~= "table" then return nil end
     local bestID, bestScore, tied = nil, 1, false
     for _, rid in ipairs(rooms) do
-        if is_adoptable(rid) then
-            local rname = getRoomName(rid)
-            if type(rname) == "string" and string.lower(rname) == nameLower then
-                local s = score_exit_match(rid, info)
-                if s > bestScore then
-                    bestID, bestScore, tied = rid, s, false
-                elseif s == bestScore and bestID ~= nil then
-                    tied = true
-                end
+        -- Name first: it is one call and rejects nearly every room, whereas
+        -- is_adoptable costs getRoomHashByID plus the placeholder check.
+        local rname = getRoomName(rid)
+        if type(rname) == "string" and string.lower(rname) == nameLower
+            and is_adoptable(rid) then
+            local s = score_exit_match(rid, info)
+            if s > bestScore then
+                bestID, bestScore, tied = rid, s, false
+            elseif s == bestScore and bestID ~= nil then
+                tied = true
             end
         end
     end

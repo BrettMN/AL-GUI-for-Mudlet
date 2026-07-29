@@ -166,7 +166,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                         pcall(deleteRoom, targetID)
                         _.pos_cache_drop(posCache, dx, dy, dz, targetID)
                     end
-                    setRoomIDbyHash(realAtPos, targetVnum)
+                    _.bind_room_hash(realAtPos, targetVnum)
                     _.mark_autowalk_dirty()
                     if type(_.debug_echo) == "function" then
                         _.debug_echo("Merged placeholder " .. targetID
@@ -242,7 +242,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                         if type(cHash) == "string" and cHash ~= "" and cHash ~= targetVnum then
                             pcall(setRoomIDbyHash, candidateID, "")
                         end
-                        setRoomIDbyHash(candidateID, targetVnum)
+                        _.bind_room_hash(candidateID, targetVnum)
                         _.mark_autowalk_dirty()
                         _.debug_echo("Adopted existing room " .. candidateID
                             .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
@@ -264,7 +264,9 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 if type(_.adjust_area_room_count) == "function" then
                     _.adjust_area_room_count(areaID, 1)
                 end
-                setRoomIDbyHash(targetID, targetVnum)
+                -- areaID is passed explicitly: the placement block below is
+                -- what calls setRoomArea for this room.
+                _.bind_room_hash(targetID, targetVnum, areaID)
                 created = true
                 createdCount = createdCount + 1
                 setRoomName(targetID, targetVnum)
@@ -388,7 +390,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                                 pcall(setRoomIDbyHash, keep, "")
                                             end
                                             pcall(setRoomIDbyHash, dup, "")
-                                            setRoomIDbyHash(keep, dupHash)
+                                            _.bind_room_hash(keep, dupHash)
                                         else
                                             pcall(setRoomIDbyHash, dup, "")
                                         end
@@ -414,7 +416,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                             if type(keepHash) == "string" and keepHash ~= "" and keepHash ~= targetVnum then
                                 pcall(setRoomIDbyHash, keep, "")
                             end
-                            setRoomIDbyHash(keep, targetVnum)
+                            _.bind_room_hash(keep, targetVnum)
                         end
                         targetID = keep
                         _.mark_autowalk_dirty()
@@ -503,7 +505,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                         pcall(setRoomIDbyHash, keep, "")
                                     end
                                     pcall(setRoomIDbyHash, dup, "")
-                                    setRoomIDbyHash(keep, dupHash)
+                                    _.bind_room_hash(keep, dupHash)
                                 else
                                     pcall(setRoomIDbyHash, dup, "")
                                 end

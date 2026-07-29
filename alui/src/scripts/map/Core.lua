@@ -172,7 +172,8 @@ local function make_room()
     if type(_.adjust_area_room_count) == "function" then
         _.adjust_area_room_count(areaID, 1)
     end
-    setRoomIDbyHash(thisRoom, info.vnum)
+    -- areaID is passed explicitly: setRoomArea has not run yet.
+    _.bind_room_hash(thisRoom, info.vnum, areaID)
     setRoomName(thisRoom, info.name)
     setRoomArea(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
@@ -325,7 +326,7 @@ local function handle_move(isLastInBatch)
                             pcall(setRoomIDbyHash, placeholderID, "")
                         end
                     end
-                    setRoomIDbyHash(placeholderID, info.vnum)
+                    _.bind_room_hash(placeholderID, info.vnum)
                     _.mark_autowalk_dirty()
                     rnum    = placeholderID
                     adopted = true
@@ -342,7 +343,7 @@ local function handle_move(isLastInBatch)
                 if adoptAreaID and type(_.find_real_room_to_adopt) == "function" then
                     local adoptedID = _.find_real_room_to_adopt(adoptAreaID)
                     if adoptedID then
-                        setRoomIDbyHash(adoptedID, info.vnum)
+                        _.bind_room_hash(adoptedID, info.vnum)
                         _.mark_autowalk_dirty()
                         rnum    = adoptedID
                         adopted = true
@@ -645,7 +646,8 @@ function map.eventHandler(event, ...)
             shift_room(dir)
         end
     elseif event == "sysConnectionEvent" then
-        map._pos_cache = nil -- force posCache rebuild for the new session's area
+        map._pos_cache  = nil -- force posCache rebuild for the new session's area
+        map._hash_index = nil -- ditto for the per-area hash → roomID index
         config()
         if _.register_mapper_context_menu then
             _.register_mapper_context_menu()
