@@ -964,21 +964,27 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     -- 1. Strip self-loop exits before BFS so the reconcile doesn't follow them.
     local selfLoopsRemoved = _.strip_self_loop_exits(areaRooms)
 
+    -- One position cache for the whole command.  Steps 2-6 below all need
+    -- occupancy for this area, and each of them used to build its own — an
+    -- O(area) getRoomCoordinates walk apiece.  Every step mutates the cache in
+    -- place as it moves or deletes rooms (see the pos_cache_move / pos_cache_drop
+    -- calls in dedupe, reconcile, flatten, snap, translate and overlap), so one
+    -- build stays correct for all of them.  Declared out here because step 6 runs
+    -- after the pipeline closure returns.
+    local posCache
+
     local function run_normalize_pipeline()
         -- 2. De-duplicate rooms that share the same hash.
         --    This must run before reconcile because duplicate stubs cause phantom
         --    occupancy that blocks _.reconcile_connected_rooms from moving rooms.
-        local posCache = _.build_pos_cache(areaID)
+        posCache = _.build_pos_cache(areaID)
         local dedupeResult = map.dedupe_area_by_hash(areaID, posCache)
         -- Refresh room list after potential deletes
         areaRooms = getAreaRooms(areaID)
         if type(areaRooms) ~= "table" then areaRooms = {} end
 
         -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
-        --    Reuse the dedup cache rather than letting reconcile build its own:
-        --    merge_duplicate_room drops each loser from it as it goes, so it is
-        --    already current, and every seed below then shares one cache instead
-        --    of rebuilding O(area) per seed.
+        --    Threading posCache also stops each seed below from rebuilding it.
         local moved = 0
         if allRooms then
             echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
@@ -1005,12 +1011,11 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         end
 
         -- 4. Snap in-area up/down room pairs to adjacent z-levels.
-        local snapResult = _.snap_vertical_pair(areaID)
+        local snapResult = _.snap_vertical_pair(areaID, posCache)
 
         -- 5. Anchor translate: align sub-graphs to game coordinate frame using
         --    user_data.coord values present on captured rooms.
-        local freshPosCache = _.build_pos_cache(areaID)
-        local anchorResult  = _.apply_anchor_translation(areaID, freshPosCache)
+        local anchorResult = _.apply_anchor_translation(areaID, posCache)
 
         return dedupeResult, moved, snapResult, anchorResult
     end
@@ -1026,7 +1031,7 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     -- 6. Separate distinct rooms that landed on the same cell.  Only the
     --    room the normalize started from (if any) is treated as immovable
     --    here, matching the rest of the pipeline.
-    local overlapResult = _.resolve_room_overlaps(areaID, nil, nil, currentRoomID)
+    local overlapResult = _.resolve_room_overlaps(areaID, posCache, nil, currentRoomID)
 
     -- 7. Audit remaining anomalies in the (now-updated) area.
     local freshRooms = getAreaRooms(areaID)
@@ -1063,6 +1068,8 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         local areaRooms = getAreaRooms(id)
         if type(areaRooms) == "table" and #areaRooms > 0 then
             totalSelfLoops = totalSelfLoops + _.strip_self_loop_exits(areaRooms)
+            -- One position cache per area, threaded through every pass below
+            -- (see the matching comment in normalize_room_layout).
             local posCache     = _.build_pos_cache(id)
             local dedupeResult = map.dedupe_area_by_hash(id, posCache)
             totalDedupe = totalDedupe + (dedupeResult.removed or 0)
@@ -1074,10 +1081,6 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             if not userSuppliedMoves and type(_.scaled_reconcile_move_cap) == "function" then
                 areaMaxMoves = _.scaled_reconcile_move_cap(#areaRooms, maxPasses, maxMoves)
             end
-            -- One cache for every seed in this area (see normalize_room_layout):
-            -- dedup above kept it current, and rebuilding per seed is O(area)
-            -- times the seed count, which placeholder subgraphs push into the
-            -- hundreds.
             local globalVisited = {}
             for _j, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
@@ -1086,14 +1089,13 @@ function map.normalize_all_areas(maxPasses, maxMoves)
                     totalMoved = totalMoved + (subMoved or 0)
                 end
             end
-            local snapResult = _.snap_vertical_pair(id)
+            local snapResult = _.snap_vertical_pair(id, posCache)
             totalSnapped = totalSnapped + snapResult.snapped
-            local freshPosCache = _.build_pos_cache(id)
-            local anchorResult  = _.apply_anchor_translation(id, freshPosCache)
+            local anchorResult = _.apply_anchor_translation(id, posCache)
             totalTranslated = totalTranslated + (anchorResult.translated or 0)
             -- No single "current room" anchor across a bulk all-areas pass,
             -- so fall back to respecting real lock flags as before.
-            local overlapResult = _.resolve_room_overlaps(id, freshPosCache, nil, nil, true)
+            local overlapResult = _.resolve_room_overlaps(id, posCache, nil, nil, true)
             totalSeparated = totalSeparated + (overlapResult.separated or 0)
             areaCount    = areaCount + 1
         end

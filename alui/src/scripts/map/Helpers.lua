@@ -1431,7 +1431,13 @@ end
 -- Cross-area exits are ignored entirely.
 --
 -- Returns { snapped=N, blocked=N, shared_target_bug=N }.
-function _.snap_vertical_pair(areaID)
+--
+-- externalPosCache: optional cache for areaID.  Every move and merge below is
+-- mirrored into it, so a caller running several layout passes over one area can
+-- build the cache once and thread it through instead of paying an O(area)
+-- coordinate walk per pass.  Callers that maintain no cache of their own (e.g.
+-- map recalculate, which tracks occupancy in its own BFS table) pass nothing.
+function _.snap_vertical_pair(areaID, externalPosCache)
     if type(areaID) ~= "number" or areaID < 1 then
         return { snapped = 0, blocked = 0, shared_target_bug = 0 }
     end
@@ -1440,8 +1446,10 @@ function _.snap_vertical_pair(areaID)
         return { snapped = 0, blocked = 0, shared_target_bug = 0 }
     end
 
-    -- Build a position cache for fast occupancy lookups.
-    local posCache = _.build_pos_cache(areaID)
+    -- Position cache for fast occupancy lookups.
+    local posCache = (type(externalPosCache) == "table" and externalPosCache._areaID == areaID)
+        and externalPosCache
+        or _.build_pos_cache(areaID)
 
     -- Tally how many in-area rooms point `up` / `down` to each target ID.
     -- More than one in the same direction = shared_target_bug (violates uniqueness).
@@ -1910,7 +1918,7 @@ end
 --  - Merges loser's outbound special exits onto survivor (skip cmds survivor already has).
 --  - Copies user_data keys from loser to survivor only when key is missing on survivor.
 --  - Clears loser's hash binding so getRoomIDbyHash no longer returns the deleted id.
---  - Drops loser from posCache and deletes it.
+--  - Deletes the loser and, if Mudlet accepted the delete, drops it from posCache.
 -- `revIndex` is the reverse exit index produced by _.build_reverse_exit_index.
 -- Pass it whenever more than one merge is possible: it is mutated in place to
 -- stay accurate as exits are rewired, so one index serves a whole batch.  Nil
@@ -2046,9 +2054,17 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
         pcall(setRoomIDbyHash, loserID, "")
     end
 
-    -- 6. Drop loser from posCache
-    if posCache then
-        local lx, ly, lz = getRoomCoordinates(loserID)
+    -- 6. Delete the loser room, then drop it from posCache.  The coords have to
+    --    be read first (they are unreadable once the room is gone) but the cache
+    --    edit waits for the delete to be confirmed: callers now thread one cache
+    --    through a whole normalize instead of rebuilding between passes, so a
+    --    room dropped from the cache that Mudlet in fact kept would stay
+    --    invisible to every later pass rather than reappearing on the next build.
+    local lx, ly, lz = getRoomCoordinates(loserID)
+    local deleted    = _.delete_room(loserID)
+
+    -- 7. Drop loser from posCache
+    if posCache and deleted then
         _.pos_cache_drop(posCache, lx, ly, lz, loserID)
         -- Also remove from the _rooms list in the cache
         if type(posCache._rooms) == "table" then
@@ -2060,9 +2076,6 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
             end
         end
     end
-
-    -- 7. Delete the loser room
-    _.delete_room(loserID)
 
     -- 8. The loser is gone; its inbound list has been transferred to the
     --    survivor, and source_is_live above skips any entry still naming it.

@@ -124,17 +124,35 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       until now had no caller at all. Hundreds × 20 × O(N) becomes O(N) per area.
       The cache threaded through is the one already built for the dedup step, not a fresh
       one: `merge_duplicate_room` drops each loser from it and never moves a survivor, so it
-      is current by the time reconcile runs. (This does not close **PERF-4** — the anchor and
-      overlap steps still build their own.)
+      is current by the time reconcile runs (see **PERF-4**, which extends the same cache to
+      the rest of the pipeline).
       `_.flatten_cardinal_connected_rooms` had to take the cache too. It runs *between* seeds
       and calls `setRoomCoordinates` with no cache bookkeeping; that was invisible while every
       seed rebuilt, but with a shared cache it would leave later seeds reading pre-flatten
       z-values. It mirrors the move only when both coords are non-nil, since `pos_cache_key`
       builds keys by concatenation and would raise on a nil z.
 
-- [ ] **PERF-4 — One `map normalize` builds the pos cache 4+ times**
+- [x] **PERF-4 — One `map normalize` builds the pos cache 4+ times**
       `Layout.lua:956`, `Layout.lua:993`, `Layout.lua:1010` (passes `nil`, so
       `resolve_room_overlaps` builds its own), `Helpers.lua:1196` (inside `snap_vertical_pair`).
+      **Done.** `normalize_room_layout` and `normalize_all_areas` now build one cache per area
+      and thread it through all of steps 2-6 — dedup, reconcile, flatten, snap, anchor
+      translate, overlap resolve. One `map normalize` is one O(area) coordinate walk instead
+      of four-plus; `map normalize all` is one per area instead of four per area.
+      Only `_.snap_vertical_pair` needed a new parameter; `dedupe_area_by_hash`,
+      `apply_anchor_translation` and `resolve_room_overlaps` already accepted one and were
+      simply being handed `nil` or a redundant fresh build. `map recalculate` still lets
+      `snap_vertical_pair` build its own, because recalculate tracks occupancy in its own BFS
+      `occupied` table and has no posCache to share.
+      In `normalize_room_layout` the cache is declared outside `run_normalize_pipeline` and
+      assigned inside it, because step 6 runs after the closure returns and
+      `with_single_locked_anchor`'s `xpcall` only carries four return values.
+      **One correctness change was required.** `merge_duplicate_room` dropped the loser from
+      the cache *before* calling `_.delete_room`, which is a `pcall` that can report failure.
+      While every pass rebuilt, a room dropped from the cache but not actually deleted
+      reappeared on the next build; with one shared cache it would stay invisible to every
+      later pass. The delete now happens first (coords read before it, since they are
+      unreadable afterwards) and the cache edit is conditional on the delete being accepted.
 
 - [ ] **PERF-5 — Position cache is bypassed for every empty cell**
       `Layout.lua:133`, `Layout.lua:221`, `Layout.lua:323`, `Helpers.lua:941`, `Helpers.lua:978`
@@ -253,3 +271,7 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       `verticalDirs` (`Core.lua:25`) is declared and never used; `local newRooms`
       (`Core.lua:543`) is assigned and never read; the `_large_area` sentinel field is written
       but never read (see PERF-5).
+      Also the file-local `build_pos_cache` in `Layout.lua` (~line 552): a second, differently
+      shaped cache builder (key → single roomID, no `_areaID`/`_rooms`) with no callers — every
+      call site uses `_.build_pos_cache` from `Helpers.lua`. Its `pos_key` helper *is* still
+      used by `map.recalculate_room_layout`, so only the builder goes.
