@@ -17,6 +17,8 @@ Mudlet UI package built with [Muddler](https://github.com/demonnic/muddler) — 
 | Item config | JSON files per folder (mirrors Mudlet UI options) |
 | Testing | `busted` for unit tests; manual install/uninstall cycle for integration |
 
+run C:\Programs\Muddler\bin\muddle.bat in the `alui` folder to build the package. Output lands in `build/`.
+
 ---
 
 ## Project Structure

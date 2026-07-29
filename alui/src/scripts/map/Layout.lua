@@ -613,6 +613,9 @@ end
 -- stays local and doesn't traverse thousands of rooms on large maps.
 -- externalVisited: optional shared table so callers can track visited rooms
 -- across multiple subgraph seeds (used by 'map normalize all').
+-- externalPosCache: optional position cache for the anchor's area, shared the
+-- same way.  It is mutated in place as rooms move, so a seed loop should thread
+-- one through every seed rather than paying an O(area) build per seed.
 function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, externalVisited, externalPosCache)
     maxPasses = maxPasses or map.configs.reconcile_max_passes
     maxMoves  = maxMoves or map.configs.reconcile_max_moves
@@ -624,17 +627,19 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
     local ax, ay, az = getRoomCoordinates(anchorID)
     if ax == nil then return end
 
-    -- If the caller supplied a cache for this area, reuse it across passes
-    -- (and feed our own mutations back into it for downstream callers).
-    -- Otherwise build a fresh one and rebuild between passes only when
-    -- forced — passes converge in-place so we can keep mutating the cache.
-    local sharedCache = (externalPosCache and externalPosCache._areaID == areaID) and externalPosCache or nil
+    -- If the caller supplied a cache for this area, reuse it (and feed our own
+    -- mutations back into it for downstream callers).  Otherwise build one
+    -- here.  Either way it is built once for the whole call: every move below
+    -- is mirrored into the cache via pos_cache_move, so the passes converge
+    -- in-place and a per-pass rebuild would be maxPasses (default 20) O(area)
+    -- walks that all produce the cache we are already holding.
+    local posCache = (externalPosCache and externalPosCache._areaID == areaID)
+        and externalPosCache
+        or _.build_pos_cache(areaID)
 
     local moved = 0
     for _pass = 1, maxPasses do
         local passMove = 0
-
-        local posCache = sharedCache or _.build_pos_cache(areaID)
 
         -- BFS from anchor
         local queue    = { { id = anchorID, depth = 0 } }
@@ -723,10 +728,16 @@ end
 
 -- Flatten rooms that are connected only by cardinal horizontal exits and have
 -- z-coordinates out of step with the anchor room.
-function _.flatten_cardinal_connected_rooms(anchorID)
+-- externalPosCache: optional cache for this area.  Callers that run this
+-- between reconcile seeds must pass the same cache they gave reconcile, or the
+-- setRoomCoordinates calls below leave it claiming rooms sit on their old z.
+function _.flatten_cardinal_connected_rooms(anchorID, externalPosCache)
     if type(anchorID) ~= "number" or anchorID < 1 then return end
     local areaID = getRoomArea(anchorID)
     if not areaID then return end
+
+    local posCache = (externalPosCache and externalPosCache._areaID == areaID)
+        and externalPosCache or nil
 
     local _cx, _cy, az = getRoomCoordinates(anchorID)
     if az == nil then return end
@@ -766,6 +777,12 @@ function _.flatten_cardinal_connected_rooms(anchorID)
                         -- the connected cluster lives at a different z level.
                         if tz ~= cz and not safe_is_room_locked(targetID) then
                             setRoomCoordinates(targetID, tx, ty, cz)
+                            -- Only mirror a fully-coordinated move: pos_cache
+                            -- keys by concatenation, so a nil cz (current room
+                            -- has no coords) would raise inside pc_key.
+                            if posCache and tx ~= nil and cz ~= nil then
+                                _.pos_cache_move(posCache, tx, ty, tz, tx, ty, cz, targetID)
+                            end
                         end
                         table.insert(queue, targetID)
                     end
@@ -958,6 +975,10 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         if type(areaRooms) ~= "table" then areaRooms = {} end
 
         -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
+        --    Reuse the dedup cache rather than letting reconcile build its own:
+        --    merge_duplicate_room drops each loser from it as it goes, so it is
+        --    already current, and every seed below then shares one cache instead
+        --    of rebuilding O(area) per seed.
         local moved = 0
         if allRooms then
             echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
@@ -965,8 +986,8 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
             local seedCount     = 0
             for _i, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
-                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited)
-                    _.flatten_cardinal_connected_rooms(seedID)
+                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, globalVisited, posCache)
+                    _.flatten_cardinal_connected_rooms(seedID, posCache)
                     moved = moved + (subMoved or 0)
                     seedCount = seedCount + 1
                 end
@@ -979,8 +1000,8 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
                 return nil, nil, nil
             end
             echo("Normalising '" .. areaName_display .. "'...\n")
-            moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves)
-            _.flatten_cardinal_connected_rooms(seedID)
+            moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, nil, posCache)
+            _.flatten_cardinal_connected_rooms(seedID, posCache)
         end
 
         -- 4. Snap in-area up/down room pairs to adjacent z-levels.
@@ -1053,11 +1074,15 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             if not userSuppliedMoves and type(_.scaled_reconcile_move_cap) == "function" then
                 areaMaxMoves = _.scaled_reconcile_move_cap(#areaRooms, maxPasses, maxMoves)
             end
+            -- One cache for every seed in this area (see normalize_room_layout):
+            -- dedup above kept it current, and rebuilding per seed is O(area)
+            -- times the seed count, which placeholder subgraphs push into the
+            -- hundreds.
             local globalVisited = {}
             for _j, seedID in ipairs(areaRooms) do
                 if not globalVisited[seedID] then
-                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, areaMaxMoves, nil, globalVisited)
-                    _.flatten_cardinal_connected_rooms(seedID)
+                    local subMoved = _.reconcile_connected_rooms(seedID, maxPasses, areaMaxMoves, nil, globalVisited, posCache)
+                    _.flatten_cardinal_connected_rooms(seedID, posCache)
                     totalMoved = totalMoved + (subMoved or 0)
                 end
             end

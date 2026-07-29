@@ -110,7 +110,7 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       `build_reverse_exit_index` moved from a file-local to `_.build_reverse_exit_index`
       because `snap_vertical_pair` is defined above it.
 
-- [ ] **PERF-3 — Position cache rebuilt per reconcile pass and per subgraph seed**
+- [x] **PERF-3 — Position cache rebuilt per reconcile pass and per subgraph seed**
       `Layout.lua:642`, `Layout.lua:968-975`, `Layout.lua:1059-1065`
       `local posCache = sharedCache or _.build_pos_cache(areaID)` sits *inside* the
       `for _pass = 1, maxPasses` loop, and `normalize_room_layout` never passes
@@ -118,8 +118,19 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       `map normalize all` / `normalize_all_areas` then call it once per unvisited seed;
       placeholder rooms create many small disconnected subgraphs, so seeds can number in the
       hundreds → hundreds × 20 × O(N) for one command.
-      *Fix:* hoist the build out of the pass loop and thread one cache through the seed loop.
-      The cache is already mutated in place correctly.
+      **Done.** The build is hoisted above the pass loop in `_.reconcile_connected_rooms`, so
+      a call is one build regardless of `maxPasses`, and both seed loops
+      (`normalize_room_layout`, `normalize_all_areas`) now thread `externalPosCache` — which
+      until now had no caller at all. Hundreds × 20 × O(N) becomes O(N) per area.
+      The cache threaded through is the one already built for the dedup step, not a fresh
+      one: `merge_duplicate_room` drops each loser from it and never moves a survivor, so it
+      is current by the time reconcile runs. (This does not close **PERF-4** — the anchor and
+      overlap steps still build their own.)
+      `_.flatten_cardinal_connected_rooms` had to take the cache too. It runs *between* seeds
+      and calls `setRoomCoordinates` with no cache bookkeeping; that was invisible while every
+      seed rebuilt, but with a shared cache it would leave later seeds reading pre-flatten
+      z-values. It mirrors the move only when both coords are non-nil, since `pos_cache_key`
+      builds keys by concatenation and would raise on a nil z.
 
 - [ ] **PERF-4 — One `map normalize` builds the pos cache 4+ times**
       `Layout.lua:956`, `Layout.lua:993`, `Layout.lua:1010` (passes `nil`, so
