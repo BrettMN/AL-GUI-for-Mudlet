@@ -441,8 +441,7 @@ function map.clean_placeholders(areaNameArg, silent)
         if not shouldDelete and not reverseExits[rid] then
             shouldDelete = true
         end
-        if shouldDelete then
-            deleteRoom(rid)
+        if shouldDelete and _.delete_room(rid) then
             deletedCount = deletedCount + 1
         end
     end

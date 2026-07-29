@@ -165,17 +165,13 @@ local function make_room()
         coords[3] = coords[3] - 1
     end
     local thisRoom = createRoomID()
-    addRoom(thisRoom)
+    _.add_room(thisRoom)
     _.mark_autowalk_dirty()
-    -- Keep the lightweight room-count estimate in sync so is_large_area() stays
-    -- accurate without a full getAreaRooms() call on every movement.
-    if type(_.adjust_area_room_count) == "function" then
-        _.adjust_area_room_count(areaID, 1)
-    end
-    -- areaID is passed explicitly: setRoomArea has not run yet.
+    -- The index updates take areaID explicitly because the room does not have
+    -- an area yet: set_room_area is the next line down.
     _.bind_room_hash(thisRoom, info.vnum, areaID)
     _.set_room_name(thisRoom, info.name, areaID)
-    setRoomArea(thisRoom, areaID)
+    _.set_room_area(thisRoom, areaID)
     setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
     -- Loud warning when we end up creating a brand-new room near the
     -- area origin without a directional shift — this almost always means
@@ -375,7 +371,7 @@ local function handle_move(isLastInBatch)
                 if canAutoMoveArea then
                     _.debug_echo("Moving room " ..
                         rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
-                    setRoomArea(rnum, correctAreaID)
+                    _.set_room_area(rnum, correctAreaID)
                     currentAreaID = correctAreaID
                     areaMatchesGMCP = true
                 else
@@ -646,8 +642,12 @@ function map.eventHandler(event, ...)
             shift_room(dir)
         end
     elseif event == "sysConnectionEvent" then
-        map._pos_cache  = nil -- force posCache rebuild for the new session's area
-        map._area_index = nil -- ditto for the per-area hash/name index
+        map._pos_cache       = nil -- force posCache rebuild for the new session's area
+        map._area_index      = nil -- ditto for the per-area hash/name index
+        -- The map file may have been reloaded or edited between sessions, so
+        -- the incremental room counts can no longer be trusted; drop them and
+        -- let the next query re-count from getAreaRooms.
+        map._area_room_counts = nil
         config()
         if _.register_mapper_context_menu then
             _.register_mapper_context_menu()

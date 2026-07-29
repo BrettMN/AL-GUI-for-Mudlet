@@ -788,18 +788,69 @@ function _.invalidate_area_room_count(areaID)
     end
 end
 
--- Record an exact count observed from a getAreaRooms() walk.  The incremental
--- estimate only ever drifts upward (adjust_area_room_count is called with +1 on
--- creation but nothing decrements it on deleteRoom), which matters now that
--- large_area_threshold sits at 5000 rather than 50000 — a few thousand rooms of
--- create/delete churn is enough to latch a mid-size area as "large" and
--- silently disable its pos cache and stretch pass.  Callers that already paid
--- for the walk correct the estimate here for free.
+-- Record an exact count observed from a getAreaRooms() walk.  Callers that
+-- already paid for the walk correct the estimate here for free, which is what
+-- heals any drift introduced outside the wrappers below.
 function _.record_area_room_count(areaID, count)
     if type(areaID) ~= "number" or areaID < 1 then return end
     if type(count) ~= "number" then return end
     map._area_room_counts = map._area_room_counts or {}
     map._area_room_counts[areaID] = count
+end
+
+-- --------------------------------------------------------------------------
+-- Room lifecycle wrappers
+-- --------------------------------------------------------------------------
+-- The room-count estimate above is only as good as the events fed into it.  It
+-- used to see +1 on creation and nothing else: no decrement on any of the six
+-- deleteRoom sites, and no transfer when setRoomArea moved a room between
+-- areas.  The estimate therefore drifted upward for as long as a session ran,
+-- and since it decides is_large_area / is_indexable_area, a mid-size area could
+-- latch as "large" after enough dedup churn and silently lose its pos cache,
+-- its stretch pass, its hash repair and Phase 2 adoption.
+--
+-- Routing both mutations through these wrappers makes the count exact with
+-- respect to everything this script does.  Anything that edits the map behind
+-- our back (Mudlet's own mapper, a map file reload) is covered by the reset on
+-- sysConnectionEvent and by record_area_room_count above.
+
+-- addRoom + room-count bookkeeping.  Mudlet versions differ on whether a fresh
+-- room starts with no area or lands in the default one, so we count it into
+-- whatever getRoomArea reports: an invalid area no-ops here and the room is
+-- counted by the set_room_area below instead, while a real default area is
+-- counted here and set_room_area's early-out keeps it from counting twice.
+function _.add_room(roomID)
+    addRoom(roomID)
+    _.adjust_area_room_count(getRoomArea(roomID), 1)
+end
+
+-- setRoomArea + room-count bookkeeping: a move debits the old area and credits
+-- the new one, and assigning an area to a room that had none credits only.
+function _.set_room_area(roomID, areaID)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    local oldArea = getRoomArea(roomID)
+    setRoomArea(roomID, areaID)
+    if oldArea == areaID then return end
+    if type(oldArea) == "number" and oldArea > 0 then
+        _.adjust_area_room_count(oldArea, -1)
+    end
+    if type(areaID) == "number" and areaID > 0 then
+        _.adjust_area_room_count(areaID, 1)
+    end
+end
+
+-- deleteRoom + room-count bookkeeping.  The area has to be read before the room
+-- goes away.  Returns true when Mudlet accepted the delete, so callers can keep
+-- their own tallies and cache drops in step with what actually happened.
+function _.delete_room(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then return false end
+    if type(deleteRoom) ~= "function" then return false end
+    local areaID = getRoomArea(roomID)
+    local ok = pcall(deleteRoom, roomID)
+    if ok and type(areaID) == "number" and areaID > 0 then
+        _.adjust_area_room_count(areaID, -1)
+    end
+    return ok
 end
 
 -- Returns true when the area exceeds the configured large_area_threshold.
@@ -1167,7 +1218,7 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
     if _.is_room_immobile(roomID) then
         local currentArea = getRoomArea(roomID)
         if currentArea ~= areaID then
-            setRoomArea(roomID, areaID)
+            _.set_room_area(roomID, areaID)
         end
         return
     end
@@ -1191,7 +1242,7 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
         end
     end
     local currentArea = getRoomArea(roomID)
-    if currentArea ~= areaID then setRoomArea(roomID, areaID) end
+    if currentArea ~= areaID then _.set_room_area(roomID, areaID) end
     local ox, oy, oz = getRoomCoordinates(roomID)
     if ox ~= coords[1] or oy ~= coords[2] or oz ~= coords[3] then
         setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
@@ -1956,7 +2007,7 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
     end
 
     -- 7. Delete the loser room
-    pcall(deleteRoom, loserID)
+    _.delete_room(loserID)
 end
 
 -- De-duplicate all rooms in areaID that share the same hash.
@@ -2383,6 +2434,13 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
                 deleted = pcall(deleteAreaName, areaName) and true or false
             end
         end
+        -- The area ID is gone and Mudlet may hand it out again for a new area.
+        -- Drop everything keyed by it so the next area cannot inherit a stale
+        -- room count or a stale hash/name index.
+        if deleted then
+            _.invalidate_area_room_count(areaID)
+            _.invalidate_area_index(areaID)
+        end
         return deleted
     end
 
@@ -2393,7 +2451,7 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
             if type(otherRooms) == "table" and #otherRooms > 0 then
                 for _, rid in ipairs(otherRooms) do
                     if getRoomArea(rid) ~= targetAreaID then
-                        setRoomArea(rid, targetAreaID)
+                        _.set_room_area(rid, targetAreaID)
                         movedThisArea = movedThisArea + 1
                     end
                 end

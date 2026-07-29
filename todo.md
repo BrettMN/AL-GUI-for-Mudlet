@@ -160,11 +160,8 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       The `map normalize` size warning keeps the 5000 knob (per-command work, not amortised)
       and its text was retuned, since "hundreds of thousands of rooms" no longer describes
       the trigger.
-      *Follow-up:* this makes **BUG-3** materially worse — the room-count estimate only ever
-      drifts upward, and crossing 5000 is 10x more likely than crossing 50000. Partly
-      mitigated: `_.record_area_room_count` now corrects the estimate for free from the
-      `getAreaRooms` walk that `build_area_index` and `build_pos_cache` already do. That does
-      not unlatch an area already misjudged as large, so BUG-3 should be the next item.
+      *Depended on **BUG-3**, now fixed:* the room-count estimate that both thresholds read
+      only ever drifted upward, and crossing 5000 is 10x more likely than crossing 50000.
 
 - [ ] **PERF-11 — Duplicate event handlers on script reload**
       `Commands.lua:1466-1468`
@@ -194,11 +191,27 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       `use_translation`, and `lang_dirs`, none of which are defined in `Data.lua`. Setting
       `use_translation = true` indexes nil and errors mid-walk.
 
-- [ ] **BUG-3 — Area room-count cache drifts upward permanently**
+- [x] **BUG-3 — Area room-count cache drifts upward permanently**
       `_.adjust_area_room_count` is only ever called with `+1` (`Core.lua:173`,
       `Layout.lua:265`) despite many `deleteRoom` sites, and `_.invalidate_area_room_count`
       (`Helpers.lua:603`) is never called at all. `is_large_area` can latch true after heavy
       dedup churn, silently disabling the pos cache and hash repair.
+      **Done.** Three lifecycle wrappers in `Helpers.lua` now own the count, and the raw
+      Mudlet calls appear nowhere else in `map/`:
+      `_.add_room` (2 sites), `_.set_room_area` (6 sites, debits the old area and credits the
+      new one so area *moves* balance), `_.delete_room` (all 6 `deleteRoom` sites, reads the
+      area before the room goes away and returns whether Mudlet accepted the delete so
+      callers keep their tallies and `pos_cache_drop`s in step).
+      The two standalone `+1` calls are gone; creation is counted by `_.add_room` or
+      `_.set_room_area`, whichever first sees the room in a valid area, and
+      `_.set_room_area`'s `oldArea == areaID` early-out stops it double-counting when Mudlet
+      drops new rooms into a default area.
+      `_.invalidate_area_room_count` gained its first real caller in
+      `maybe_delete_empty_area`, alongside `_.invalidate_area_index`, so a recycled area ID
+      cannot inherit a dead area's count or index. External edits are covered by the
+      `sysConnectionEvent` reset and by `_.record_area_room_count`, which corrects the
+      estimate for free from the `getAreaRooms` walks `build_area_index` and
+      `build_pos_cache` already do.
 
 - [ ] **BUG-4 — `map normalize area <name>` is non-deterministic**
       `Layout.lua:889-894` takes the first substring match from `pairs(getAreaTable())`;

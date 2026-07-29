@@ -162,8 +162,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 if realAtPos then
                     local dx, dy, dz = getRoomCoordinates(targetID)
                     pcall(setRoomIDbyHash, targetID, "")
-                    if type(deleteRoom) == "function" then
-                        pcall(deleteRoom, targetID)
+                    if _.delete_room(targetID) then
                         _.pos_cache_drop(posCache, dx, dy, dz, targetID)
                     end
                     _.bind_room_hash(realAtPos, targetVnum)
@@ -259,13 +258,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
 
             if targetID < 1 then
                 targetID = createRoomID()
-                addRoom(targetID)
-                -- Keep the lightweight room-count estimate current.
-                if type(_.adjust_area_room_count) == "function" then
-                    _.adjust_area_room_count(areaID, 1)
-                end
-                -- areaID is passed explicitly: the placement block below is
-                -- what calls setRoomArea for this room.
+                _.add_room(targetID)
+                -- The index updates take areaID explicitly because the room
+                -- does not have an area yet: the placement block below is what
+                -- calls set_room_area for it.
                 _.bind_room_hash(targetID, targetVnum, areaID)
                 created = true
                 createdCount = createdCount + 1
@@ -293,7 +289,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     _.move_room_to_expected_position(targetID, targetVnum, areaID,
                         { tx, ty, tz }, shift, skipStretch, posCache)
                 else
-                    setRoomArea(targetID, areaID)
+                    _.set_room_area(targetID, areaID)
                 end
             end
 
@@ -396,8 +392,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                         end
                                     end
                                 end
-                                if type(deleteRoom) == "function" then
-                                    pcall(deleteRoom, dup)
+                                if _.delete_room(dup) then
                                     _.pos_cache_drop(posCache, fx, fy, fz, dup)
                                 end
                                 if type(_.debug_echo) == "function" then
@@ -526,9 +521,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                                 end
                             end
                         end
-                        if type(deleteRoom) == "function" then
-                            pcall(deleteRoom, dup)
-                        end
+                        _.delete_room(dup)
                         table.remove(list, i)
                         if type(_.debug_echo) == "function" then
                             _.debug_echo("Final dedup: deleted duplicate room "
@@ -1277,8 +1270,7 @@ function map.recalculate_room_layout()
                 if not shouldDelete and not reverseVisited[rid] then
                     shouldDelete = true
                 end
-                if shouldDelete then
-                    deleteRoom(rid)
+                if shouldDelete and _.delete_room(rid) then
                     deletedPlaceholderCount = deletedPlaceholderCount + 1
                 end
             end
