@@ -1767,27 +1767,68 @@ function _.audit_layout_anomalies(roomIDs, areaID)
     local inScope = {}
     for _i, rid in ipairs(roomIDs) do inScope[rid] = true end
 
-    -- Tally per-target exit counts within the area to detect shared-target bugs.
-    local targetCount = {}  -- targetID → count of (in-scope) sources that exit to it
-    for _i, rid in ipairs(roomIDs) do
+    -- Every exit target's area and coordinates are read once while tallying and
+    -- again while classifying, and a room that is the target of several exits is
+    -- read once per exit.  Memoise both client calls; `false` stands in for a nil
+    -- answer so an unknown room is not re-queried.
+    local areaOf = {}
+    local function area_of(rid)
+        local a = areaOf[rid]
+        if a == nil then
+            a = getRoomArea(rid)
+            if a == nil then a = false end
+            areaOf[rid] = a
+        end
+        if a == false then return nil end
+        return a
+    end
+
+    local coordX, coordY, coordZ = {}, {}, {}
+    local function coords_of(rid)
+        local x = coordX[rid]
+        if x == nil then
+            local rx, ry, rz = getRoomCoordinates(rid)
+            if rx == nil then
+                coordX[rid] = false
+                return nil
+            end
+            coordX[rid], coordY[rid], coordZ[rid] = rx, ry, rz
+            return rx, ry, rz
+        end
+        if x == false then return nil end
+        return x, coordY[rid], coordZ[rid]
+    end
+
+    -- Single exits pass.  The classification loop below needs every one of these
+    -- tables complete before it can judge any room, so the exit tables are kept
+    -- and re-walked instead of asking the client for them a second and third
+    -- time.  Collected here:
+    --   exitsOf     — each room's exit table, indexed to match roomIDs
+    --   targetCount — "dir→targetID" → in-scope sources exiting that way (shared-target bug)
+    --   hasIncoming — in-scope rooms that some in-scope room exits to (unreachable)
+    --   duplicate hash bindings
+    local exitsOf     = {}
+    local targetCount = {}
+    local hasIncoming = {}
+    local canHash     = type(getRoomHashByID) == "function"
+    local hashSeen    = {}
+    for i, rid in ipairs(roomIDs) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
+            exitsOf[i] = exits
             for dir, targetID in pairs(exits) do
                 if type(targetID) == "string" then targetID = tonumber(targetID) end
-                if type(targetID) == "number" and targetID > 0 and targetID ~= rid then
-                    if not areaID or getRoomArea(targetID) == areaID then
+                if type(targetID) == "number" then
+                    if inScope[targetID] then hasIncoming[targetID] = true end
+                    if targetID > 0 and targetID ~= rid
+                        and (not areaID or area_of(targetID) == areaID) then
                         local k = tostring(dir) .. "→" .. tostring(targetID)
                         targetCount[k] = (targetCount[k] or 0) + 1
                     end
                 end
             end
         end
-    end
-
-    -- Check for duplicate hash bindings.
-    if type(getRoomHashByID) == "function" then
-        local hashSeen = {}
-        for _i, rid in ipairs(roomIDs) do
+        if canHash then
             local h = getRoomHashByID(rid)
             if type(h) == "string" and h ~= "" then
                 if hashSeen[h] then
@@ -1799,33 +1840,19 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         end
     end
 
-    -- Rooms that have incoming exits from at least one in-scope room.
-    local hasIncoming = {}
-    for _i, rid in ipairs(roomIDs) do
-        local exits = getRoomExits(rid)
-        if type(exits) == "table" then
-            for _i, tgt in pairs(exits) do
-                if type(tgt) == "string" then tgt = tonumber(tgt) end
-                if type(tgt) == "number" and inScope[tgt] then
-                    hasIncoming[tgt] = true
-                end
-            end
-        end
-    end
-
     -- Rooms sharing an identical (x,y,z) cell (distinct rooms overlapping).
     local coordCount = {}
 
-    for _i, rid in ipairs(roomIDs) do
-        local rx, ry, rz = getRoomCoordinates(rid)
+    for i, rid in ipairs(roomIDs) do
+        local rx, ry, rz = coords_of(rid)
         if rx ~= nil then
             local ck = rx .. "," .. ry .. "," .. rz
             coordCount[ck] = (coordCount[ck] or 0) + 1
         end
-        local exits = getRoomExits(rid)
+        local exits = exitsOf[i]
         local hasAnyExit = false
 
-        if type(exits) == "table" then
+        if exits then
             for dir, targetID in pairs(exits) do
                 if type(targetID) == "string" then targetID = tonumber(targetID) end
                 if type(targetID) == "number" and targetID > 0 then
@@ -1835,7 +1862,8 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                     if targetID == rid then
                         counts.self_loops = counts.self_loops + 1
                     else
-                        local targetAreaID = getRoomArea(targetID)
+                        local targetAreaID
+                        if areaID then targetAreaID = area_of(targetID) end
 
                         -- Cross-area
                         if areaID and type(targetAreaID) == "number" and targetAreaID ~= areaID then
@@ -1850,7 +1878,7 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                             -- Delta mismatch
                             local shift = _.get_shift_for_exit_key(dir)
                             if shift and rx ~= nil then
-                                local tx, ty, tz = getRoomCoordinates(targetID)
+                                local tx, ty, tz = coords_of(targetID)
                                 if tx ~= nil then
                                     local dx = tx - rx
                                     local dy = ty - ry

@@ -206,10 +206,28 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       diffing both implementations' probe sequences and return values over 400 randomized
       occupancy blobs plus the fully-blocked case.
 
-- [ ] **PERF-7 — `audit_layout_anomalies` calls `getRoomExits` three times per room**
+- [x] **PERF-7 — `audit_layout_anomalies` calls `getRoomExits` three times per room**
       `Helpers.lua:1396`, `Helpers.lua:1428`, `Helpers.lua:1449`
       Separate passes for the target tally, the incoming-exit set, and the main audit.
       Collapsible into one pass; runs at the end of every normalize/recalculate.
+      **Done.** One `getRoomExits` pass now builds `targetCount`, `hasIncoming` and the
+      duplicate-hash tally at once, keeping each room's exit table in `exitsOf` for the
+      classification loop to re-walk. Two passes remain because the classification of *any*
+      room needs those tables complete — a room's `unreachable` verdict depends on exits
+      declared by a room later in the list — but the second pass no longer touches the client.
+      `getRoomArea` and `getRoomCoordinates` are memoised for the same reason: both were read
+      once per exit for targets already read as sources.
+      Measured on a stubbed 1,370-room area (3.0 exits/room average): `getRoomExits` 4,110 →
+      1,370 calls, `getRoomArea` 4,534 → 768, `getRoomCoordinates` 2,998 → 1,423. Wall clock
+      is only 1.21x better *in the stub*, where those calls are plain Lua returns; in Mudlet
+      each is a C++ call and `getRoomExits` allocates a fresh table per call, so the real
+      saving tracks the call counts more closely than the stub's clock. Peak Lua heap did not
+      grow despite holding all exit tables at once (measured 694 KB vs 915 KB) — the old
+      version allocated the same tables three times over and left two thirds as garbage.
+      Verified by diffing all eight bucket counts against the previous implementation over 500
+      randomized maps (mixed named/numeric/special exit keys, string-typed targets, self
+      loops, dangling and zero targets, unplaced rooms, foreign-area rooms, shared hashes,
+      partial scope lists, duplicate list entries) plus hand-built edge cases: 0 mismatches.
 
 - [ ] **PERF-8 — `add_placeholder_exits` can issue ~44,000 `getRoomsByPosition` calls**
       `Commands.lua:1226-1252`, `Commands.lua:1348`
