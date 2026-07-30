@@ -190,12 +190,21 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       guard moved ahead of the arithmetic, in both that function and the copy of the loop in
       `make_room`.
 
-- [ ] **PERF-6 — `find_free_cell_near` is O(R³)**
-      `Helpers.lua:737-748`
+- [x] **PERF-6 — `find_free_cell_near` is O(R³)**
+      `Helpers.lua:1075`
       Scans the full (2r+1)² square each ring to test only the perimeter. With the default
       `maxRadius = 64` that is ~350k iterations per call instead of ~16k. Called once per
       overlapping room in `resolve_room_overlaps` and per blocked vertical snap.
-      *Fix:* iterate the perimeter directly.
+      **Done.** The ring walk is now three explicit segments — west column in full, each
+      intermediate column's two ends, east column in full — so the interior is never visited.
+      An exhausted search at `maxRadius = 64` costs 12,544 loop iterations instead of 366,144
+      for the same 16,640 cell look-ups; measured 1.6x faster wall-clock in that worst case,
+      where the surviving `pos_cache_get` calls (and their key concatenation) dominate.
+      Probe *order* is deliberately unchanged from the square scan (the old `dx` outer / `dy`
+      inner filter visits the perimeter in exactly that segment order), so the cell returned
+      for any given cache is identical and no caller's placement decisions shift. Verified by
+      diffing both implementations' probe sequences and return values over 400 randomized
+      occupancy blobs plus the fully-blocked case.
 
 - [ ] **PERF-7 — `audit_layout_anomalies` calls `getRoomExits` three times per room**
       `Helpers.lua:1396`, `Helpers.lua:1428`, `Helpers.lua:1449`

@@ -1072,19 +1072,34 @@ end
 -- supplied position cache, so callers must keep the cache current (relocate
 -- rooms via set_room_coordinates).  Returns nx,ny,nz or nil if the whole search
 -- radius is full.
+-- Only the perimeter of each ring is a candidate — the interior belongs to a
+-- ring already searched — so walk the perimeter directly instead of scanning the
+-- full (2r+1)² square and discarding the interior.  That is O(r) per ring and
+-- O(maxRadius²) overall, rather than O(r²) per ring and O(maxRadius³) overall:
+-- at the default maxRadius of 64 an exhausted search costs ~12.5k loop
+-- iterations instead of ~366k for the same ~16.6k cell look-ups.  Probe order is
+-- unchanged from the square-scan version (west column south-to-north, then each
+-- intermediate column's two ends, then the east column), so the cell chosen for
+-- a given cache is identical.
 function _.find_free_cell_near(cache, x, y, z, maxRadius)
     if cache == nil or x == nil then return nil end
     maxRadius = tonumber(maxRadius) or 64
     for r = 1, maxRadius do
-        for dx = -r, r do
-            for dy = -r, r do
-                if dx == -r or dx == r or dy == -r or dy == r then
-                    local nx, ny = x + dx, y + dy
-                    if _.pos_cache_get(cache, nx, ny, z) == nil then
-                        return nx, ny, z
-                    end
-                end
-            end
+        -- West column, in full.
+        for dy = -r, r do
+            local nx, ny = x - r, y + dy
+            if _.pos_cache_get(cache, nx, ny, z) == nil then return nx, ny, z end
+        end
+        -- Intermediate columns: south and north ends only.
+        for dx = -r + 1, r - 1 do
+            local nx = x + dx
+            if _.pos_cache_get(cache, nx, y - r, z) == nil then return nx, y - r, z end
+            if _.pos_cache_get(cache, nx, y + r, z) == nil then return nx, y + r, z end
+        end
+        -- East column, in full.
+        for dy = -r, r do
+            local nx, ny = x + r, y + dy
+            if _.pos_cache_get(cache, nx, ny, z) == nil then return nx, ny, z end
         end
     end
     return nil
