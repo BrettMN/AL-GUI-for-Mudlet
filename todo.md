@@ -268,12 +268,41 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       that collide with scaffold exits): 0 mismatches, and the `added` entries come out in the
       same order too.
 
-- [ ] **PERF-9 — GMCP queue is unbounded and drains in O(n²)**
+- [x] **PERF-9 — GMCP queue is unbounded and drains in O(n²)**
       `Core.lua:563`, `Core.lua:626`
       `table.remove(room_event_queue, 1)` shifts the whole array per item, and coalescing only
       compares against the tail entry — alternating vnums defeat it entirely while the drain
       rate is capped at 3 per timer tick.
-      *Fix:* use a head index (as `Helpers.lua:1867` already does) and cap queue length.
+      **Done.** The drain now advances a `queue_head` index and nils the slot instead of
+      shifting the array, with `queue_tail` replacing every `#room_event_queue` test; the pair
+      resets to `1, 0` whenever the queue empties, so the indices cannot climb forever in a
+      long session. `queue_max_length` (200) bounds the backlog.
+      **The coalescing was left alone.** Merging non-consecutive duplicates is not a free win:
+      alternating vnums are what a player pacing between two rooms actually produces, and
+      collapsing them would drop real moves that `make_room` reads back out of `prev_info` to
+      place the next room. Bounding the queue addresses the same growth without that.
+      **How the queue actually grows matters for the cap's semantics.** An event arriving with
+      the queue idle drains itself synchronously (`queue_processing` is false, so
+      `eventHandler` calls `process_room_queue` directly), which empties the queue and clears
+      the flag again — one-at-a-time delivery never gets past length 1. A backlog only builds
+      from events raised *while* a drain is in progress, and then nothing drains until the
+      `tempTimer(0)` fires. So at the cap the map is already behind the player, and the drop
+      is from the front: the tail of the stream is where the player is.
+      Dropping the front breaks the adjacency `make_room` infers from `map.prev_info`, so the
+      entry that becomes the new head is flagged `_gap` and drains with `prev_info = {}`
+      instead of the pre-gap room. That is the same state the mapper starts every session in,
+      rather than a false claim that two non-adjacent rooms are one move apart.
+      Verified by driving the real `map.eventHandler` (Core.lua loaded with Mudlet stubs;
+      numeric vnums make `handle_move` return at its first line) against a copy of the previous
+      queue over the same event/timer schedules: 1,006 cases (hand-built bursts, consecutive
+      dupes, alternating vnums, interleaved ticks, plus 1,000 randomized op sequences over
+      narrow and wide vnum alphabets) produce identical drain order *and* identical
+      `prev_info` pairing below the cap. The cap itself was exercised by injecting 5,000 events
+      re-entrantly from inside `handle_move`: 201 drains (the trigger plus the cap), survivors
+      `v4801`-`v5000` in order, exactly one `_gap` entry, and the indices reusable afterwards.
+      Drain cost for the mechanism alone, in Lua 5.1: 8,000 entries take 0.114s through
+      `table.remove(q, 1)` and under 0.001s through the head index; at the cap's 200 entries
+      both are below timer resolution, which is the point of pairing the two changes.
 
 - [x] **PERF-10 — `large_area_threshold = 50000` is far above its stated intent**
       `Data.lua:23`

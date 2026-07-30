@@ -9,11 +9,23 @@ local _ = map._
 -- --------------------------------------------------------------------------
 -- Queue state (local to this chunk, only needed by handle_move and eventHandler)
 -- --------------------------------------------------------------------------
+-- The queue is drained through a head index rather than table.remove(q, 1):
+-- removing the front entry shifts every remaining one, which turns a burst of
+-- n events into O(n^2) work exactly when the client is already behind.
 local room_event_queue    = {}
+local queue_head          = 1     -- next entry to drain
+local queue_tail          = 0     -- last entry queued; empty while tail < head
 local queue_processing    = false
 local queue_drain_timer   = nil
 local queue_timer_pending = false -- prevents scheduling a second drain timer
 local queue_max_per_tick  = 3     -- process a small batch each timer tick
+-- Hard cap on the backlog.  The coalescing in map.eventHandler only merges
+-- consecutive events for the same room, so a server alternating between two
+-- vnums — or simply emitting Room.Info faster than we drain — would otherwise
+-- grow this table without bound.  Reaching the cap means the map is already
+-- hopelessly behind the player, so the oldest entries are dropped in order to
+-- stay current with where the player actually is.
+local queue_max_length    = 200
 
 -- vertical directions used by check_doors (exposed here for event handler)
 local verticalDirs        = { u = true, up = true, d = true, down = true }
@@ -569,12 +581,22 @@ local function process_room_queue()
     -- Drain a small batch per timer tick. This keeps Mudlet responsive while
     -- reducing visible map lag when Room.Info events arrive in bursts.
     local drained = 0
-    while #room_event_queue > 0 and drained < queue_max_per_tick do
-        local snapshot = table.remove(room_event_queue, 1)
-        local ok, err  = pcall(function()
-            map.prev_info = map.room_info
+    while queue_head <= queue_tail and drained < queue_max_per_tick do
+        local snapshot               = room_event_queue[queue_head]
+        room_event_queue[queue_head] = nil
+        queue_head                   = queue_head + 1
+        if queue_head > queue_tail then
+            -- Drained empty: restart the indices so they cannot climb forever.
+            queue_head, queue_tail = 1, 0
+        end
+        local ok, err = pcall(function()
+            -- A gapped entry is the one that followed dropped events, so the
+            -- previous snapshot is no longer an adjacent room and make_room
+            -- must not infer a movement direction from it.  Empty prev_info is
+            -- the state every session already starts in.
+            map.prev_info = snapshot._gap and {} or map.room_info
             map.room_info = snapshot
-            local isLast  = (#room_event_queue == 0) or (drained == queue_max_per_tick - 1)
+            local isLast  = (queue_head > queue_tail) or (drained == queue_max_per_tick - 1)
             handle_move(isLast)
         end)
         if not ok then
@@ -588,7 +610,7 @@ local function process_room_queue()
         end
         drained = drained + 1
     end
-    if #room_event_queue > 0 then
+    if queue_head <= queue_tail then
         queue_timer_pending = true
         queue_drain_timer   = tempTimer(0, function() process_room_queue() end)
     else
@@ -632,11 +654,20 @@ function map.eventHandler(event, ...)
         }
         -- Coalesce duplicate queued updates for the same room so repeated
         -- Room.Info payloads do not create avoidable queue lag.
-        local qlen = #room_event_queue
-        if qlen > 0 and room_event_queue[qlen] and room_event_queue[qlen].vnum == snapshot.vnum then
-            room_event_queue[qlen] = snapshot
+        local tail = queue_tail >= queue_head and room_event_queue[queue_tail] or nil
+        if tail and tail.vnum == snapshot.vnum then
+            snapshot._gap                = tail._gap
+            room_event_queue[queue_tail] = snapshot
         else
-            table.insert(room_event_queue, snapshot)
+            queue_tail                   = queue_tail + 1
+            room_event_queue[queue_tail] = snapshot
+            -- Enforce the backlog cap by dropping from the front; the entry
+            -- that becomes the new head is marked as following a gap.
+            while queue_tail - queue_head >= queue_max_length do
+                room_event_queue[queue_head]      = nil
+                queue_head                        = queue_head + 1
+                room_event_queue[queue_head]._gap = true
+            end
         end
         if not queue_processing and not queue_timer_pending then
             queue_processing = true
