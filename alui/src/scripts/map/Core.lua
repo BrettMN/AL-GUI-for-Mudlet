@@ -6,12 +6,6 @@ map     = map or {}
 map._   = map._ or {}
 local _ = map._
 
--- Lua 5.1 does not have table.is_empty; Mudlet adds it but provide a fallback
--- so the script is not fragile if Mudlet's version is unavailable.
-local function is_empty_t(t)
-    return t == nil or next(t) == nil
-end
-
 -- --------------------------------------------------------------------------
 -- Queue state (local to this chunk, only needed by handle_move and eventHandler)
 -- --------------------------------------------------------------------------
@@ -69,6 +63,11 @@ local function make_room()
     local info   = map.room_info
     local coords = { 0, 0, 0 }
     local areaID = resolve_area_id_for_room_info(info)
+    -- make_room runs before handle_move's posCache block, so it looks the
+    -- long-lived cache up itself: occupancy probes below are answered from it
+    -- when we hold one for this area (nil just means the probes fall back to
+    -- getRoomsByPosition), and every coordinate write here is mirrored into it.
+    local posCache = areaID and _.live_pos_cache(areaID) or nil
     if not areaID then
         echo("Cannot create room: area could not be resolved.\n")
         return
@@ -128,7 +127,8 @@ local function make_room()
                 local probes = { { 0, 0, 1 }, { 0, 0, -1 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 } }
                 for _, probe in ipairs(probes) do
                     local testCoords = { coords[1] + probe[1], coords[2] + probe[2], coords[3] + probe[3] }
-                    if is_empty_t(getRoomsByPosition(areaID, testCoords[1], testCoords[2], testCoords[3])) then
+                    if _.rooms_at_position(posCache, areaID,
+                            testCoords[1], testCoords[2], testCoords[3]) == nil then
                         shift = { -probe[1], -probe[2], -probe[3] }
                         break
                     end
@@ -139,18 +139,26 @@ local function make_room()
             end
             -- Map stretching (skip while grid mode is active)
             if not _.should_skip_stretch_for_area(areaID) then
-                local overlap = getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-                if not is_empty_t(overlap) then
+                local overlap = _.rooms_at_position(posCache, areaID,
+                    coords[1], coords[2], coords[3])
+                if overlap ~= nil then
                     local rooms = getAreaRooms(areaID)
                     local rcoords
                     for _, id in ipairs(rooms) do
                         rcoords = { getRoomCoordinates(id) }
-                        for n = 1, 3 do
-                            if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
-                                rcoords[n] = rcoords[n] - shift[n]
+                        -- Skip rooms that have no coordinates yet; the
+                        -- arithmetic below would fault on the nil.
+                        if rcoords[1] ~= nil then
+                            for n = 1, 3 do
+                                if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
+                                    rcoords[n] = rcoords[n] - shift[n]
+                                end
                             end
+                            -- Through the wrapper: this shifts the whole area,
+                            -- so an unmirrored write would invalidate every
+                            -- cell in the cache at once.
+                            _.set_room_coordinates(id, rcoords[1], rcoords[2], rcoords[3], posCache)
                         end
-                        setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
                     end
                 end
             end
@@ -172,7 +180,7 @@ local function make_room()
     _.bind_room_hash(thisRoom, info.vnum, areaID)
     _.set_room_name(thisRoom, info.name, areaID)
     _.set_room_area(thisRoom, areaID)
-    setRoomCoordinates(thisRoom, coords[1], coords[2], coords[3])
+    _.set_room_coordinates(thisRoom, coords[1], coords[2], coords[3], posCache)
     -- Loud warning when we end up creating a brand-new room near the
     -- area origin without a directional shift — this almost always means
     -- the prior locked/anchor room lost its hash binding somewhere and we
@@ -241,7 +249,8 @@ local function shift_room(dir)
         x                = x + x1
         y                = y + y1
         z                = z + z1
-        setRoomCoordinates(ID, x, y, z)
+        -- No cache in scope here; the wrapper finds the long-lived one itself.
+        _.set_room_coordinates(ID, x, y, z)
         -- Pin the room so subsequent layout passes (stretch, reconcile,
         -- recalculate, dedup) cannot drag it back to its old position.
         _.set_room_locked(ID, true)
@@ -384,12 +393,19 @@ local function handle_move(isLastInBatch)
 
             -- Reuse the area position cache across GMCP events to avoid
             -- rebuilding it (getAreaRooms + N getRoomCoordinates) on every
-            -- Room.Info.  The cache is mutated in-place by pos_cache_add/drop
-            -- so it stays consistent.  Invalidate when the area changes or on
-            -- reconnect (sysConnectionEvent sets map._pos_cache = nil).
+            -- Room.Info.  It is mutated in place rather than rebuilt: the
+            -- lifecycle wrappers (_.set_room_coordinates, _.set_room_area,
+            -- _.delete_room) mirror every move, area change and delete into it,
+            -- including the ones made by paths that never receive it (map
+            -- normalize, map recalculate, make_room's stretch).  That is what
+            -- lets _.rooms_at_position trust a miss as "cell is empty" instead
+            -- of paying an O(area) getRoomsByPosition to confirm it.  Rebuilt
+            -- when the area changes and on reconnect (sysConnectionEvent sets
+            -- map._pos_cache = nil); a room moved by Mudlet's own map editor is
+            -- the one thing it cannot see.
             -- For large areas the full build would freeze Mudlet for minutes;
-            -- use a sentinel (no coord mapping) so sub-functions fall back to
-            -- direct getRoomsByPosition() calls instead.
+            -- use a sentinel (no coord mapping) which rooms_at_position treats
+            -- as "no data" and answers from getRoomsByPosition instead.
             local posCache = nil
             if type(currentAreaID) == "number" and currentAreaID > 0
                 and type(_.build_pos_cache) == "function" then
@@ -436,7 +452,7 @@ local function handle_move(isLastInBatch)
                         local expectedZ = currEL and (pz + 1) or (pz - 1)
                         local rx, ry, rz = getRoomCoordinates(rnum)
                         if rz ~= expectedZ then
-                            setRoomCoordinates(rnum, rx, ry, expectedZ)
+                            _.set_room_coordinates(rnum, rx, ry, expectedZ, posCache)
                         end
                     end
                 end
@@ -483,10 +499,7 @@ local function handle_move(isLastInBatch)
                         _.debug_echo(string.format(
                             "handle_move: self-heal room %d z %d→%d (all horizontal neighbours at z+%d)\n",
                             rnum, rz, newZ, sharedDz))
-                        setRoomCoordinates(rnum, rx, ry, newZ)
-                        if posCache then
-                            _.pos_cache_move(posCache, rx, ry, rz, rx, ry, newZ, rnum)
-                        end
+                        _.set_room_coordinates(rnum, rx, ry, newZ, posCache)
                     end
                 end
             end

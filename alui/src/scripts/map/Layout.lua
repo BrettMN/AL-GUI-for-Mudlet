@@ -68,8 +68,10 @@ function _.create_neighbors_for_current_room(roomID, posCache)
 
     -- Build the position cache here if the caller didn't supply one.  Sharing
     -- it with handle_move/reconcile avoids repeated O(area) walks per event.
-    -- For large areas skip the O(N) full build; sub-functions will fall back
-    -- to direct getRoomsByPosition() calls on cache misses.
+    -- For large areas skip the O(N) full build and use the _large_area
+    -- sentinel: _.rooms_at_position treats that as "no data" and falls back to
+    -- getRoomsByPosition, while for a real cache an empty cell is answered from
+    -- the cache itself.
     if posCache == nil or posCache._areaID ~= areaID then
         if type(_.is_large_area) == "function" and _.is_large_area(areaID) then
             posCache = { _areaID = areaID, _rooms = {}, _large_area = true }
@@ -127,12 +129,9 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 -- must share the current room's z-plane (cz). forcedZ is a
                 -- normalisation hint for whole-component passes, not for
                 -- individual room placement (see Data.lua forced_z_by_terrain_name).
-                local near = _.pos_cache_get(posCache, tx, ty, tz)
-                -- Large-area sentinel: cache has no coord mapping, so fall back
-                -- to Mudlet's native positional look-up.
-                if near == nil and type(getRoomsByPosition) == "function" then
-                    near = getRoomsByPosition(areaID, tx, ty, tz)
-                end
+                -- Answered from posCache, except on a large-area sentinel where
+                -- it falls back to Mudlet's native positional look-up.
+                local near = _.rooms_at_position(posCache, areaID, tx, ty, tz)
                 local realAtPos = nil
                 local function is_live_real(rid)
                     if type(rid) ~= "number" or rid < 1 then return false end
@@ -215,11 +214,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                     local tz = cz + shift[3]
                     -- Do NOT override tz with forcedZ: candidate search must look
                     -- at the actual adjacent position on the current z-plane.
-                    local near = _.pos_cache_get(posCache, tx, ty, tz)
-                    -- Large-area sentinel: fall back to native positional look-up.
-                    if near == nil and type(getRoomsByPosition) == "function" then
-                        near = getRoomsByPosition(areaID, tx, ty, tz)
-                    end
+                    local near = _.rooms_at_position(posCache, areaID, tx, ty, tz)
                     if type(near) == "table" then
                         for _, rid in ipairs(near) do
                             if is_live(rid) then
@@ -297,9 +292,8 @@ function _.create_neighbors_for_current_room(roomID, posCache)
             if shift then
                 local x2, y2, z2 = getRoomCoordinates(targetID)
                 if x2 == nil then
-                    setRoomCoordinates(targetID, cx + shift[1], cy + shift[2], cz + shift[3])
-                    _.pos_cache_add(posCache,
-                        cx + shift[1], cy + shift[2], cz + shift[3], targetID)
+                    _.set_room_coordinates(targetID,
+                        cx + shift[1], cy + shift[2], cz + shift[3], posCache)
                 end
             end
 
@@ -316,11 +310,7 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                 if fx ~= nil then
                     -- Record this position so the backstop only scans touched spots.
                     touchedPositions[_.pos_cache_key(fx, fy, fz)] = true
-                    local hits = _.pos_cache_get(posCache, fx, fy, fz)
-                    -- Large-area sentinel: fall back to native positional look-up.
-                    if hits == nil and type(getRoomsByPosition) == "function" then
-                        hits = getRoomsByPosition(areaID, fx, fy, fz)
-                    end
+                    local hits = _.rooms_at_position(posCache, areaID, fx, fy, fz)
                     local liveIDs = {}
                     local function consider(rid)
                         if type(rid) == "number" and rid > 0 then
@@ -522,7 +512,16 @@ function _.create_neighbors_for_current_room(roomID, posCache)
                             end
                         end
                         _.delete_room(dup)
-                        table.remove(list, i)
+                        -- Remove by value, not by index: `list` is the cache's
+                        -- own occupant array for this cell, and _.delete_room
+                        -- drops the room from the long-lived cache — which, on
+                        -- the normal handle_move path, is this very cache.  An
+                        -- index-based remove would then delete whichever live
+                        -- room shifted into slot i.  `i` is not advanced either
+                        -- way, since one entry has left the list.
+                        for j = #list, 1, -1 do
+                            if list[j] == dup then table.remove(list, j) end
+                        end
                         if type(_.debug_echo) == "function" then
                             _.debug_echo("Final dedup: deleted duplicate room "
                                 .. dup .. " (kept " .. keep .. ")\n")
@@ -630,7 +629,7 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
     -- If the caller supplied a cache for this area, reuse it (and feed our own
     -- mutations back into it for downstream callers).  Otherwise build one
     -- here.  Either way it is built once for the whole call: every move below
-    -- is mirrored into the cache via pos_cache_move, so the passes converge
+    -- is mirrored into the cache by set_room_coordinates, so the passes converge
     -- in-place and a per-pass rebuild would be maxPasses (default 20) O(area)
     -- walks that all produce the cache we are already holding.
     local posCache = (externalPosCache and externalPosCache._areaID == areaID)
@@ -700,9 +699,8 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                                             -- terrain-labelled rooms to z=0 even when the whole cluster
                                             -- lives at a different z (e.g. forest grid at z=33).
                                             if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
-                                                setRoomCoordinates(targetID, expectedX, expectedY, expectedZ)
-                                                _.pos_cache_move(posCache, tx, ty, tz,
-                                                    expectedX, expectedY, expectedZ, targetID)
+                                                _.set_room_coordinates(targetID,
+                                                    expectedX, expectedY, expectedZ, posCache)
                                                 passMove = passMove + 1
                                                 moved    = moved + 1
                                                 if moved >= maxMoves then return moved end
@@ -776,13 +774,10 @@ function _.flatten_cardinal_connected_rooms(anchorID, externalPosCache)
                         -- using it here snaps terrain-labelled rooms to z=0 even when
                         -- the connected cluster lives at a different z level.
                         if tz ~= cz and not safe_is_room_locked(targetID) then
-                            setRoomCoordinates(targetID, tx, ty, cz)
-                            -- Only mirror a fully-coordinated move: pos_cache
-                            -- keys by concatenation, so a nil cz (current room
-                            -- has no coords) would raise inside pc_key.
-                            if posCache and tx ~= nil and cz ~= nil then
-                                _.pos_cache_move(posCache, tx, ty, tz, tx, ty, cz, targetID)
-                            end
+                            -- set_room_coordinates mirrors only a fully
+                            -- coordinated move, so a nil cz (current room has no
+                            -- coords) cannot reach pc_key's concatenation.
+                            _.set_room_coordinates(targetID, tx, ty, cz, posCache)
                         end
                         table.insert(queue, targetID)
                     end
@@ -967,10 +962,10 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
     -- One position cache for the whole command.  Steps 2-6 below all need
     -- occupancy for this area, and each of them used to build its own — an
     -- O(area) getRoomCoordinates walk apiece.  Every step mutates the cache in
-    -- place as it moves or deletes rooms (see the pos_cache_move / pos_cache_drop
-    -- calls in dedupe, reconcile, flatten, snap, translate and overlap), so one
-    -- build stays correct for all of them.  Declared out here because step 6 runs
-    -- after the pipeline closure returns.
+    -- place as it moves or deletes rooms (set_room_coordinates mirrors moves;
+    -- delete sites drop via pos_cache_drop), so one build stays correct for all
+    -- of them.  Declared out here because step 6 runs after the pipeline closure
+    -- returns.
     local posCache
 
     local function run_normalize_pipeline()
@@ -1240,7 +1235,10 @@ function map.recalculate_room_layout()
                             tx, ty, tz = cx, cy, cz
                             posKey = pos_key(tx, ty, tz)
                         elseif cx ~= tx or cy ~= ty or cz ~= tz then
-                            setRoomCoordinates(targetID, tx, ty, tz)
+                            -- No cache of our own here (occupancy lives in the
+                            -- `occupied` table above), but the write still has to
+                            -- reach the long-lived one Core.lua holds.
+                            _.set_room_coordinates(targetID, tx, ty, tz)
                             movedCount = movedCount + 1
                         end
 

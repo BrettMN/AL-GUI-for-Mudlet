@@ -837,18 +837,34 @@ function _.set_room_area(roomID, areaID)
     if type(areaID) == "number" and areaID > 0 then
         _.adjust_area_room_count(areaID, 1)
     end
+    -- Position-cache bookkeeping: the room keeps its coordinates but changes
+    -- which area's cache owns them, so it has to stop occupying its cell in the
+    -- old area's cache and start occupying it in the new one.
+    local x, y, z = getRoomCoordinates(roomID)
+    if x ~= nil then
+        local from = _.live_pos_cache(oldArea)
+        if from then _.pos_cache_remove(from, x, y, z, roomID) end
+        local to = _.live_pos_cache(areaID)
+        if to then _.pos_cache_add(to, x, y, z, roomID) end
+    end
 end
 
--- deleteRoom + room-count bookkeeping.  The area has to be read before the room
--- goes away.  Returns true when Mudlet accepted the delete, so callers can keep
--- their own tallies and cache drops in step with what actually happened.
+-- deleteRoom + room-count bookkeeping.  The area and coordinates have to be
+-- read before the room goes away.  Returns true when Mudlet accepted the
+-- delete, so callers can keep their own tallies and cache drops in step with
+-- what actually happened.
 function _.delete_room(roomID)
     if type(roomID) ~= "number" or roomID < 1 then return false end
     if type(deleteRoom) ~= "function" then return false end
     local areaID = getRoomArea(roomID)
+    local x, y, z = getRoomCoordinates(roomID)
     local ok = pcall(deleteRoom, roomID)
     if ok and type(areaID) == "number" and areaID > 0 then
         _.adjust_area_room_count(areaID, -1)
+        -- Drop it from the long-lived cache here so no delete site can leave a
+        -- phantom occupant behind in it; callers still drop from their own.
+        local live = _.live_pos_cache(areaID)
+        if live and x ~= nil then _.pos_cache_remove(live, x, y, z, roomID) end
     end
     return ok
 end
@@ -935,6 +951,52 @@ function _.pos_cache_get(cache, x, y, z)
     return cache[pc_key(x, y, z)]
 end
 
+-- True when `cache` is the cache for areaID, so a mutation in that area has to
+-- be mirrored into it.  Large-area sentinels match too: they hold no full coord
+-- map, but recording the cells we touch is what lets the per-event dedup
+-- backstop in create_neighbors_for_current_room work on a large area.
+function _.pos_cache_matches_area(cache, areaID)
+    return type(cache) == "table" and cache._areaID == areaID
+end
+
+-- True when a nil look-up in `cache` can be trusted to mean "that cell is
+-- empty" rather than "this cache has no coordinate data for the area".
+function _.pos_cache_is_authoritative(cache, areaID)
+    return _.pos_cache_matches_area(cache, areaID) and not cache._large_area
+end
+
+-- The long-lived cache Core.lua keeps for the player's current area across GMCP
+-- events, when it describes areaID.  Mutations reach this cache through the
+-- lifecycle wrappers rather than through call sites, so paths that never see it
+-- (map normalize, map recalculate, make_room's stretch, area merges) cannot
+-- leave it stale.
+function _.live_pos_cache(areaID)
+    if _.pos_cache_matches_area(map._pos_cache, areaID) then return map._pos_cache end
+    return nil
+end
+
+-- Occupancy of one cell: answered from the cache when the cache can answer,
+-- and from Mudlet otherwise.  Returns a non-empty array of roomIDs, or nil when
+-- the cell is empty.
+--
+-- Call sites used to spell this `pos_cache_get(...) or getRoomsByPosition(...)`,
+-- which cannot tell "empty cell" from "no data" — pos_cache_get returns nil for
+-- both.  While exploring, most probed cells are empty, so that fallback fired
+-- on nearly every exit of every step and each firing is an O(area) scan inside
+-- Mudlet: the cache was built and then bypassed.  The large-area sentinel is
+-- what actually means "no data", so key the fallback off that and let a real
+-- cache answer negatives itself.
+function _.rooms_at_position(cache, areaID, x, y, z)
+    if x == nil or y == nil or z == nil then return nil end
+    if _.pos_cache_is_authoritative(cache, areaID) then
+        return cache[pc_key(x, y, z)]
+    end
+    if type(getRoomsByPosition) ~= "function" then return nil end
+    local hits = getRoomsByPosition(areaID, x, y, z)
+    if type(hits) ~= "table" or next(hits) == nil then return nil end
+    return hits
+end
+
 function _.pos_cache_add(cache, x, y, z, id)
     if cache == nil or x == nil or id == nil then return end
     local k = pc_key(x, y, z)
@@ -961,12 +1023,6 @@ function _.pos_cache_remove(cache, x, y, z, id)
     if #list == 0 then cache[k] = nil end
 end
 
-function _.pos_cache_move(cache, oldX, oldY, oldZ, newX, newY, newZ, id)
-    if cache == nil or id == nil then return end
-    if oldX ~= nil then _.pos_cache_remove(cache, oldX, oldY, oldZ, id) end
-    if newX ~= nil then _.pos_cache_add(cache, newX, newY, newZ, id) end
-end
-
 -- Drop a room from the cache entirely (used after deleteRoom).  Caller must
 -- pass the room's last-known coords — we cannot look them up post-delete.
 function _.pos_cache_drop(cache, x, y, z, id)
@@ -974,11 +1030,48 @@ function _.pos_cache_drop(cache, x, y, z, id)
     if x ~= nil and id ~= nil then _.pos_cache_remove(cache, x, y, z, id) end
 end
 
+-- setRoomCoordinates + position-cache bookkeeping.
+--
+-- Every coordinate write has to be mirrored into every cache that describes the
+-- room's area, because a nil look-up is now authoritative for "empty cell"
+-- (see rooms_at_position).  An unmirrored move makes a cache claim both that
+-- the room is still on its old cell and that its new cell is free, and the
+-- second half of that is how rooms end up stacked.
+--
+-- posCache is the caller's own cache, if it has one; the long-lived Core cache
+-- is looked up here so callers that never receive it still cannot leave it
+-- stale.  Coordinates are passed straight through to Mudlet, but only a fully
+-- coordinated position is mirrored: pos_cache keys are built by concatenation,
+-- so a nil component would raise inside pc_key.
+local function mirror_move(cache, id, ox, oy, oz, x, y, z)
+    if ox ~= nil and oy ~= nil and oz ~= nil then
+        _.pos_cache_remove(cache, ox, oy, oz, id)
+    end
+    if x ~= nil and y ~= nil and z ~= nil then
+        _.pos_cache_add(cache, x, y, z, id)
+    end
+end
+
+function _.set_room_coordinates(roomID, x, y, z, posCache)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    local areaID     = getRoomArea(roomID)
+    local ox, oy, oz = getRoomCoordinates(roomID)
+    setRoomCoordinates(roomID, x, y, z)
+
+    if _.pos_cache_matches_area(posCache, areaID) then
+        mirror_move(posCache, roomID, ox, oy, oz, x, y, z)
+    end
+    local live = _.live_pos_cache(areaID)
+    if live ~= nil and live ~= posCache then
+        mirror_move(live, roomID, ox, oy, oz, x, y, z)
+    end
+end
+
 -- Find the nearest unoccupied cell to (x,y,z) on the same z-plane, searched in
 -- expanding Chebyshev rings out to maxRadius.  "Unoccupied" is judged from the
--- supplied position cache, so callers must keep the cache current (via
--- pos_cache_move) as they relocate rooms.  Returns nx,ny,nz or nil if the whole
--- search radius is full.
+-- supplied position cache, so callers must keep the cache current (relocate
+-- rooms via set_room_coordinates).  Returns nx,ny,nz or nil if the whole search
+-- radius is full.
 function _.find_free_cell_near(cache, x, y, z, maxRadius)
     if cache == nil or x == nil then return nil end
     maxRadius = tonumber(maxRadius) or 64
@@ -1124,8 +1217,7 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, resp
                         if fx == nil then
                             result.unresolved = result.unresolved + 1
                         else
-                            setRoomCoordinates(rid, fx, fy, fz)
-                            _.pos_cache_move(cache, x, y, z, fx, fy, fz, rid)
+                            _.set_room_coordinates(rid, fx, fy, fz, cache)
                             result.separated = result.separated + 1
                         end
                     end
@@ -1186,26 +1278,28 @@ function _.is_room_immobile(rid)
 end
 
 function _.stretch_area_for_new_room(areaID, coords, shift, posCache)
-    local overlap = _.pos_cache_get(posCache, coords[1], coords[2], coords[3])
-        or getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-    if table.is_empty(overlap) then return end
+    local overlap = _.rooms_at_position(posCache, areaID, coords[1], coords[2], coords[3])
+    if overlap == nil then return end
     local rooms = (posCache and posCache._rooms) or getAreaRooms(areaID)
     local rcoords
     for i, id in ipairs(rooms) do
         if not _.is_room_immobile(id) then
             rcoords = { getRoomCoordinates(id) }
-            local ox, oy, oz = rcoords[1], rcoords[2], rcoords[3]
-            local moved = false
-            for n = 1, 3 do
-                if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
-                    rcoords[n] = rcoords[n] - shift[n]
-                    moved = true
+            -- Nothing to shift for a room with no coordinates — and the check
+            -- has to come before the arithmetic below, not after it.  posCache
+            -- ._rooms is a snapshot, so it can still name a room that was
+            -- deleted (or never placed) since the cache was built.
+            if rcoords[1] ~= nil then
+                local moved = false
+                for n = 1, 3 do
+                    if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
+                        rcoords[n] = rcoords[n] - shift[n]
+                        moved = true
+                    end
                 end
-            end
-            if moved and ox ~= nil then
-                setRoomCoordinates(id, rcoords[1], rcoords[2], rcoords[3])
-                _.pos_cache_move(posCache, ox, oy, oz,
-                    rcoords[1], rcoords[2], rcoords[3], id)
+                if moved then
+                    _.set_room_coordinates(id, rcoords[1], rcoords[2], rcoords[3], posCache)
+                end
             end
         end
     end
@@ -1223,9 +1317,8 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
         return
     end
     if not skipStretch then
-        local overlap = _.pos_cache_get(posCache, coords[1], coords[2], coords[3])
-            or getRoomsByPosition(areaID, coords[1], coords[2], coords[3])
-        if not table.is_empty(overlap) then
+        local overlap = _.rooms_at_position(posCache, areaID, coords[1], coords[2], coords[3])
+        if overlap ~= nil then
             local hasCollision = false
             for _, overlapID in pairs(overlap) do
                 if overlapID ~= roomID then
@@ -1245,9 +1338,7 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
     if currentArea ~= areaID then _.set_room_area(roomID, areaID) end
     local ox, oy, oz = getRoomCoordinates(roomID)
     if ox ~= coords[1] or oy ~= coords[2] or oz ~= coords[3] then
-        setRoomCoordinates(roomID, coords[1], coords[2], coords[3])
-        _.pos_cache_move(posCache, ox, oy, oz,
-            coords[1], coords[2], coords[3], roomID)
+        _.set_room_coordinates(roomID, coords[1], coords[2], coords[3], posCache)
     end
 end
 
@@ -1596,8 +1687,7 @@ function _.snap_vertical_pair(areaID, externalPosCache)
                             blocked = blocked + 1
                             return
                         end
-                        setRoomCoordinates(oid, fx, fy, fz)
-                        _.pos_cache_move(posCache, ox, oy, oz, fx, fy, fz, oid)
+                        _.set_room_coordinates(oid, fx, fy, fz, posCache)
                     end
                 end
             end
@@ -1610,8 +1700,7 @@ function _.snap_vertical_pair(areaID, externalPosCache)
             end
         end
 
-        setRoomCoordinates(targetID, cx, cy, wantZ)
-        _.pos_cache_move(posCache, cx, cy, cz, cx, cy, wantZ, targetID)
+        _.set_room_coordinates(targetID, cx, cy, wantZ, posCache)
         snapped = snapped + 1
     end
 
@@ -2239,10 +2328,7 @@ function _.translate_subgraph(component, dx, dy, posCache)
     for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
         if rx ~= nil then
-            setRoomCoordinates(rid, rx + dx, ry + dy, rz)
-            if posCache then
-                _.pos_cache_move(posCache, rx, ry, rz, rx + dx, ry + dy, rz, rid)
-            end
+            _.set_room_coordinates(rid, rx + dx, ry + dy, rz, posCache)
         end
     end
     return true

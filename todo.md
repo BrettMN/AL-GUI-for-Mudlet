@@ -154,14 +154,41 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       later pass. The delete now happens first (coords read before it, since they are
       unreadable afterwards) and the cache edit is conditional on the delete being accepted.
 
-- [ ] **PERF-5 — Position cache is bypassed for every empty cell**
+- [x] **PERF-5 — Position cache is bypassed for every empty cell**
       `Layout.lua:133`, `Layout.lua:221`, `Layout.lua:323`, `Helpers.lua:941`, `Helpers.lua:978`
       `pos_cache_get` returns `nil` both for "large-area sentinel, no data" *and* for "cell is
       genuinely empty". While exploring, most probed cells are empty, so the
       `getRoomsByPosition` fallback fires constantly and the C++ call is paid anyway — on top
       of having built the cache.
-      *Fix:* key the fallback off `posCache._large_area` (already set at `Layout.lua:75` and
-      `Core.lua:406`, currently never read) instead of `near == nil`.
+      **Done.** `_.rooms_at_position(cache, areaID, x, y, z)` replaces the
+      `pos_cache_get(...) or getRoomsByPosition(...)` idiom at all five sites (plus the two
+      raw probes in `make_room`). It falls back only when the cache genuinely holds no data —
+      `_large_area` sentinel, wrong area, or no cache — so an empty cell in a real cache is
+      answered from the cache. Measured on a stubbed map: one first visit to a 4-exit room
+      cost 8 `getRoomsByPosition` calls before and 0 after, each of which is an O(area) scan
+      inside Mudlet.
+      **Trusting a miss meant closing every hole that could leave a cache stale-empty**, since
+      "cell is free" is now believed without checking. Coordinate writes go through a new
+      `_.set_room_coordinates` wrapper (all 15 `setRoomCoordinates` sites) that mirrors the
+      move into both the caller's cache and the long-lived `map._pos_cache`, and
+      `_.set_room_area` / `_.delete_room` now maintain `map._pos_cache` too. That last part
+      matters most: `map._pos_cache` lives for as long as the player stays in one area, but
+      `make_room`'s area-wide stretch, `map normalize`, `map recalculate` and
+      `map fix-selected-layout` all move rooms through caches of their own and used to leave
+      it describing a map that no longer existed. `_.pos_cache_move` lost its last caller and
+      was removed. What remains uncoverable is a room moved in Mudlet's own map editor.
+      Sentinels are still *written* to (`pos_cache_matches_area`, not
+      `pos_cache_is_authoritative`, gates mirroring), because the per-event dedup backstop in
+      `create_neighbors_for_current_room` reads the sentinel's partial data directly.
+      **Two things had to change to survive `_.delete_room` touching the cache.** The final
+      dedup backstop (`Layout.lua:514`) iterates the cache's own occupant array while deleting
+      from it and removed the entry with `table.remove(list, i)`; now that `_.delete_room`
+      drops the room by value first, an index-based remove would take out whichever live room
+      shifted into slot `i`. It removes by value instead. And `stretch_area_for_new_room`
+      tested `ox ~= nil` only *after* doing arithmetic on the coordinates, so a room in
+      `posCache._rooms` that had been deleted (or was never placed) faulted on the nil — the
+      guard moved ahead of the arithmetic, in both that function and the copy of the loop in
+      `make_room`.
 
 - [ ] **PERF-6 — `find_free_cell_near` is O(R³)**
       `Helpers.lua:737-748`
@@ -226,10 +253,17 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
 
 ## Smaller bugs
 
-- [ ] **BUG-1 — `table.is_empty` used without the fallback `Core.lua` bothered to write**
+- [x] **BUG-1 — `table.is_empty` used without the fallback `Core.lua` bothered to write**
       `Helpers.lua:943`, `Helpers.lua:980` call it directly in the movement hot path, while
       `Core.lua:11` defines `is_empty_t` on the grounds that `table.is_empty` may be
       unavailable. One of the two is wrong.
+      **Done as a side effect of PERF-5.** Both calls tested the result of the
+      `pos_cache_get(...) or getRoomsByPosition(...)` idiom; `_.rooms_at_position` now returns
+      `nil` for an empty cell instead of an empty table, so the call sites are plain `== nil`
+      checks. The two `is_empty_t` uses in `make_room` went the same way, so neither helper
+      has any caller left in `map/` and `is_empty_t` was deleted. (Running the pre-change
+      `Helpers.lua` outside Mudlet does fail on `attempt to call field 'is_empty'`, so the
+      `Core.lua` side was the correct one.)
 
 - [ ] **BUG-2 — Undefined speedwalk config keys**
       `Commands.lua:933`, `Commands.lua:1047-1049` read `map.configs.speedwalk_random`,
@@ -269,8 +303,8 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
 
 - [ ] **BUG-6 — Dead code**
       `verticalDirs` (`Core.lua:25`) is declared and never used; `local newRooms`
-      (`Core.lua:543`) is assigned and never read; the `_large_area` sentinel field is written
-      but never read (see PERF-5).
+      (`Core.lua:543`) is assigned and never read. *(The `_large_area` sentinel is no longer
+      dead — PERF-5 made it the thing that decides whether a cache miss is trustworthy.)*
       Also the file-local `build_pos_cache` in `Layout.lua` (~line 552): a second, differently
       shaped cache builder (key → single roomID, no `_areaID`/`_rooms`) with no callers — every
       call site uses `_.build_pos_cache` from `Helpers.lua`. Its `pos_key` helper *is* still
