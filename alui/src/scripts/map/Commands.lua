@@ -1521,9 +1521,20 @@ map.register_mapper_context_menu = register_mapper_context_menu
 -- --------------------------------------------------------------------------
 
 register_mapper_context_menu()
-registerAnonymousEventHandler("gmcp.Room.Info", "map.eventHandler")
-registerAnonymousEventHandler("shiftRoom", "map.eventHandler")
-registerAnonymousEventHandler("sysConnectionEvent", "map.eventHandler")
+
+-- Guarded like the menu handlers below: Mudlet re-evaluates this chunk on every
+-- profile load and script edit, and anonymous handlers registered by an earlier
+-- evaluation stay alive, so an unguarded call stacks another copy of the whole
+-- pipeline per reload.  `map` survives the reload (`map = map or {}` in
+-- Data.lua), so the flag does too, and the surviving handlers resolve the
+-- "map.eventHandler" name at dispatch time — they pick up the reloaded
+-- function, which is why skipping re-registration loses nothing.
+if not map.room_event_handlers_registered then
+    registerAnonymousEventHandler("gmcp.Room.Info", "map.eventHandler")
+    registerAnonymousEventHandler("shiftRoom", "map.eventHandler")
+    registerAnonymousEventHandler("sysConnectionEvent", "map.eventHandler")
+    map.room_event_handlers_registered = true
+end
 
 if not map.mapper_travel_menu_handler_registered then
     registerAnonymousEventHandler("aluiMapperTravel", "map.travel_to_selected_room")

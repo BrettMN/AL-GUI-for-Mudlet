@@ -322,13 +322,26 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       *Depended on **BUG-3**, now fixed:* the room-count estimate that both thresholds read
       only ever drifted upward, and crossing 5000 is 10x more likely than crossing 50000.
 
-- [ ] **PERF-11 — Duplicate event handlers on script reload**
+- [x] **PERF-11 — Duplicate event handlers on script reload**
       `Commands.lua:1466-1468`
       The `gmcp.Room.Info` / `shiftRoom` / `sysConnectionEvent` registrations have no
       `map.*_registered` guard, unlike the three registrations ten lines below them. Mudlet
       re-evaluates script chunks on profile load and on every script edit, so each reload
       stacks another handler — after N reloads every `Room.Info` runs the whole pipeline N
       times. Looks like an oversight rather than a deliberate choice.
+      **Done.** The three now sit behind `map.room_event_handlers_registered`, the same idiom
+      the menu handlers below them already use. The flag survives the reload for the same
+      reason the bug exists at all: `Data.lua` opens with `map = map or {}`, so the table the
+      flag lives on is the one thing chunk re-evaluation does *not* reset.
+      Skipping re-registration costs nothing because these are registered by *name*, not by
+      function value — the surviving handler resolves `map.eventHandler` at dispatch time and
+      so picks up whatever the reload redefined. That is what makes the guard preferable to
+      kill-and-re-register: no dependence on holding handler IDs across the reload, and no
+      window where the mapper is unhooked.
+      Not folded into the `sysConnectionEvent` reset in `Core.lua:688`, which clears
+      `map._pos_cache` / `_area_index` / `_area_room_counts`: those are caches whose staleness
+      is the problem, whereas clearing this flag while the handlers are still live is exactly
+      the state that would re-stack them on the next edit.
 
 - [ ] **PERF-12 — 4 Hz selection polling timer**
       `Commands.lua:1171`
