@@ -1182,19 +1182,62 @@ end
 -- neighbours, then remove them immediately after so the map data is not
 -- polluted.
 --
--- We scan only a padded bounding box via getRoomsByPosition (one call per
--- candidate cell) instead of iterating the entire area, to avoid freezing
--- on large maps.
+-- We scan only a padded bounding box instead of iterating the entire area, to
+-- avoid freezing on large maps.
 local PLACEHOLDER_PAD = 5 -- extra tiles of padding around the path bounding box
 
-local function room_at(areaID, x, y, z)
-    if type(getRoomsByPosition) ~= "function" then return nil end
-    local hit = getRoomsByPosition(areaID, x, y, z)
-    if type(hit) == "number" and hit > 0 then return hit end
-    if type(hit) == "table" then
-        for _i, rid in ipairs(hit) do
-            if type(rid) == "number" and rid > 0 then return rid end
+local function first_room_in(hit)
+    if type(hit) == "number" then
+        if hit > 0 then return hit end
+        return nil
+    end
+    if type(hit) ~= "table" then return nil end
+    for _i, rid in ipairs(hit) do
+        if type(rid) == "number" and rid > 0 then return rid end
+    end
+    return nil
+end
+
+-- Cell occupancy for one add_placeholder_exits scan: returns probe(x, y, z),
+-- or nil when the map cannot be enumerated at all.
+--
+-- Every cell in the box used to be its own getRoomsByPosition call, and each of
+-- those scans the area inside Mudlet.  At the 4,000-cell volume cap, plus ten
+-- neighbour probes per placeholder found, one slow-path autowalk could issue
+-- ~44,000 of them, and maybe_reevaluate_autowalk re-runs the slow path after
+-- every step that creates a room.  A single walk of the area's rooms answers
+-- every probe instead: free when the long-lived position cache already
+-- describes this area, one O(area) coordinate walk otherwise.
+--
+-- The index is built one cell wider than the box on each axis because the scan
+-- probes each placeholder's neighbours, which for a placeholder on the boundary
+-- lie just outside it.
+local function build_cell_probe(areaID, minX, maxX, minY, maxY, minZ, maxZ)
+    local key = _.pos_cache_key
+
+    local live = _.live_pos_cache(areaID)
+    if _.pos_cache_is_authoritative(live, areaID) then
+        return function(x, y, z) return first_room_in(live[key(x, y, z)]) end
+    end
+
+    local rooms = type(getAreaRooms) == "function" and getAreaRooms(areaID) or nil
+    if type(rooms) == "table" then
+        local occ = {}
+        for _i, id in ipairs(rooms) do
+            local x, y, z = getRoomCoordinates(id)
+            if x ~= nil and y ~= nil and z ~= nil
+                and x >= minX - 1 and x <= maxX + 1
+                and y >= minY - 1 and y <= maxY + 1
+                and z >= minZ - 1 and z <= maxZ + 1 then
+                local k = key(x, y, z)
+                if occ[k] == nil then occ[k] = id end
+            end
         end
+        return function(x, y, z) return occ[key(x, y, z)] end
+    end
+
+    if type(getRoomsByPosition) == "function" then
+        return function(x, y, z) return first_room_in(getRoomsByPosition(areaID, x, y, z)) end
     end
     return nil
 end
@@ -1202,9 +1245,7 @@ end
 local function add_placeholder_exits(areaID, currentRoomID, targetRoomID)
     local unvisitedID = _.terrain_types["unvisited"] and _.terrain_types["unvisited"].id or 46
     local added       = {}
-    if type(setExit) ~= "function" or type(getRoomsByPosition) ~= "function" then
-        return added
-    end
+    if type(setExit) ~= "function" then return added end
 
     local cx, cy, cz = getRoomCoordinates(currentRoomID)
     local tx, ty, tz = getRoomCoordinates(targetRoomID)
@@ -1222,27 +1263,45 @@ local function add_placeholder_exits(areaID, currentRoomID, targetRoomID)
     local volume = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1)
     if volume > 4000 then return added end
 
+    local room_at = build_cell_probe(areaID, minX, maxX, minY, maxY, minZ, maxZ)
+    if room_at == nil then return added end
+
+    -- Each room's exits are read once and then kept current as we add to them,
+    -- so the "does this exit already exist" test still sees exits added earlier
+    -- in this same scan (including the reverse exit a neighbouring placeholder
+    -- just put on this room) without re-reading them from the client.  The read
+    -- sat inside the direction loop before: up to twenty getRoomExits calls per
+    -- placeholder, all but one of them redundant.
+    local exitsOf = {}
+    local function exits_of(roomID)
+        local ex = exitsOf[roomID]
+        if ex == nil then
+            ex = getRoomExits(roomID)
+            if type(ex) ~= "table" then ex = {} end
+            exitsOf[roomID] = ex
+        end
+        return ex
+    end
+
+    local function link(fromID, toID, dir)
+        local ex = exits_of(fromID)
+        if ex[dir] ~= nil then return end
+        setExit(fromID, toID, dir)
+        ex[dir] = toID
+        added[#added + 1] = { fromID, dir }
+    end
+
     for z = minZ, maxZ do
         for y = minY, maxY do
             for x = minX, maxX do
-                local rid = room_at(areaID, x, y, z)
+                local rid = room_at(x, y, z)
                 if rid and getRoomEnv(rid) == unvisitedID then
                     for dir, shift in pairs(_.move_vectors) do
-                        local neighbourID = room_at(areaID, x + shift[1], y + shift[2], z + shift[3])
+                        local neighbourID = room_at(x + shift[1], y + shift[2], z + shift[3])
                         if neighbourID then
-                            local ex = getRoomExits(rid)
-                            if type(ex) ~= "table" or ex[dir] == nil then
-                                setExit(rid, neighbourID, dir)
-                                added[#added + 1] = { rid, dir }
-                            end
+                            link(rid, neighbourID, dir)
                             local revDir = _.reverse_move_vectors[dir]
-                            if revDir then
-                                local nex = getRoomExits(neighbourID)
-                                if type(nex) ~= "table" or nex[revDir] == nil then
-                                    setExit(neighbourID, rid, revDir)
-                                    added[#added + 1] = { neighbourID, revDir }
-                                end
-                            end
+                            if revDir then link(neighbourID, rid, revDir) end
                         end
                     end
                 end

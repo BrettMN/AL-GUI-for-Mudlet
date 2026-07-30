@@ -229,13 +229,44 @@ Suggested first pass: SEC-1, PERF-1, PERF-2, PERF-3, PERF-11.
       loops, dangling and zero targets, unplaced rooms, foreign-area rooms, shared hashes,
       partial scope lists, duplicate list entries) plus hand-built edge cases: 0 mismatches.
 
-- [ ] **PERF-8 — `add_placeholder_exits` can issue ~44,000 `getRoomsByPosition` calls**
+- [x] **PERF-8 — `add_placeholder_exits` can issue ~44,000 `getRoomsByPosition` calls**
       `Commands.lua:1226-1252`, `Commands.lua:1348`
       Volume cap is 4,000 cells; each cell costs a `room_at` call and each placeholder found
       costs 10 more plus `getRoomExits`. Runs in `compute_autowalk_path`'s slow path, which
       `maybe_reevaluate_autowalk` re-triggers whenever `map.autowalk_dirty` is set — i.e.
       after every step that creates a room.
-      *Fix:* cache the placeholder-exit scaffold for the duration of one walk.
+      **Done, but not by caching the scaffold.** A per-walk scaffold cache cannot work: the
+      only thing that re-triggers the slow path is `map.autowalk_dirty`, and
+      `_.mark_autowalk_dirty` is called exactly when a room is created or moved — the trigger
+      condition *is* the invalidation condition, so every reuse would be of a stale scaffold.
+      Holding the injected exits across events instead of removing them per call would also
+      widen **SEC-4**'s window from one `getPath` to a whole walk.
+      Two changes make one call cheap enough that repeating it per step is fine.
+      **Cell probes now come from one occupancy source instead of one C++ call each.**
+      `build_cell_probe` returns a `probe(x, y, z)` closure backed by the long-lived
+      `map._pos_cache` when it is authoritative for the area (zero calls — the cache is
+      already there and PERF-5 made its misses trustworthy), otherwise by a box-scoped index
+      built from a single `getAreaRooms` walk, with the old per-cell `getRoomsByPosition` kept
+      only for the case where neither enumeration API exists. The index covers the box grown
+      by one cell on each axis, because the scan probes each placeholder's neighbours and a
+      placeholder on the boundary has neighbours just outside it.
+      **Exit tables are read once per room and updated in place as exits are added**, so the
+      "does this exit already exist" test still sees the reverse exit an adjacent placeholder
+      just put on this room. That read sat inside the direction loop before: up to twenty
+      `getRoomExits` per placeholder, all but one redundant.
+      Measured on a stubbed 4,800-room area with the box at 3,888 cells (just under the cap)
+      and every cell holding a placeholder — the shape the 44,000 figure describes:
+      `getRoomsByPosition` 32,718 → 0, `getRoomExits` 52,706 → 3,072, for one added
+      `getAreaRooms` + 4,800 `getRoomCoordinates` on the no-live-cache path. 6.6s → 0.05s in
+      the stub, whose `getRoomsByPosition` scans the area the way Mudlet's does.
+      The volume cap stays at 4,000 and the guard order is unchanged, so which walks get a
+      scaffold at all is exactly as before; only `getRoomsByPosition` is no longer required
+      up front, since it is now just one of three ways to answer a probe.
+      Verified by diffing the resulting exit graph and the `added` list against the previous
+      implementation over 400 randomized maps × 3 probe paths (mixed placeholder density,
+      1 and 3 z-levels, stacked rooms sharing a cell, foreign-area rooms, pre-existing exits
+      that collide with scaffold exits): 0 mismatches, and the `added` entries come out in the
+      same order too.
 
 - [ ] **PERF-9 — GMCP queue is unbounded and drains in O(n²)**
       `Core.lua:563`, `Core.lua:626`
