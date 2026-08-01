@@ -27,6 +27,156 @@ local queue_max_per_tick  = 3     -- process a small batch each timer tick
 -- stay current with where the player actually is.
 local queue_max_length    = 200
 
+-- --------------------------------------------------------------------------
+-- Deferred neighbour-wiring queue
+-- --------------------------------------------------------------------------
+-- The second, lower-priority queue.  handle_move used to wire every exit of the
+-- arriving room before it returned, which on a large area is the whole cost of
+-- a step (measured: create_neighbors_for_current_room accounted for 9157ms of
+-- handle_move's 9160ms over seven arrivals).  None of it can move off the main
+-- thread — Mudlet's map API is main-thread-only and its C functions are not
+-- safe to call from a coroutine — so the only lever is to stop doing it all at
+-- once.
+--
+-- One entry is one exit of one room, because that is the largest unit that
+-- still fits in a single tick: a setExit is ~100ms and a placeholder's
+-- setRoomArea ~390ms, against ~1.3s for a whole room.
+--
+-- Deferring also makes some of the work disappear.  An exit queued while the
+-- player stood in A is wired after they have already walked to B, by which
+-- point B exists as a real room, so the entry costs one setExit instead of
+-- creating a placeholder to stand in for it.
+local neighbor_queue           = {}
+local neighbor_head            = 1
+local neighbor_tail            = 0
+local neighbor_index           = {} -- "roomID\0dir" -> slot, for coalescing
+local neighbor_timer_pending   = false
+local process_neighbor_queue        -- forward declaration; defined below
+
+local function neighbor_backlog()
+    if neighbor_head > neighbor_tail then return 0 end
+    return neighbor_tail - neighbor_head + 1
+end
+_.neighbor_backlog = neighbor_backlog
+
+local function schedule_neighbor_drain(delay)
+    if neighbor_timer_pending then return end
+    if neighbor_head > neighbor_tail then return end
+    neighbor_timer_pending = true
+    tempTimer(delay or 0, function() process_neighbor_queue() end)
+end
+
+-- Queue every exit of `info` as its own unit of work for `roomID`.
+local function queue_neighbor_wiring(roomID, info)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    if type(info) ~= "table" or type(info.exits) ~= "table" then return end
+    for dir, targetVnum in pairs(info.exits) do
+        if type(targetVnum) == "string" then
+            -- Coalesce on room+direction.  Pacing back and forth along a
+            -- corridor re-announces the same exits every step, and without this
+            -- the queue would fill with restatements of work already pending.
+            -- The newest payload wins: it is the one GMCP most recently claimed.
+            local key  = roomID .. "\0" .. tostring(dir)
+            local slot = neighbor_index[key]
+            local held = slot and neighbor_queue[slot] or nil
+            if held then
+                held.targetVnum = targetVnum
+                held.vnum       = info.vnum
+            else
+                neighbor_tail                = neighbor_tail + 1
+                neighbor_queue[neighbor_tail] = {
+                    roomID     = roomID,
+                    vnum       = info.vnum,
+                    dir        = dir,
+                    targetVnum = targetVnum,
+                }
+                neighbor_index[key] = neighbor_tail
+            end
+        end
+    end
+    schedule_neighbor_drain()
+end
+
+-- Wire one queued exit.  Re-validates first: the entry may have sat in the
+-- queue while a dedup pass deleted the room, or while Mudlet handed its id out
+-- again, so acting on a stale id could write an exit onto an unrelated room.
+local function wire_one_exit(item)
+    local roomID = item.roomID
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return end
+    if type(item.vnum) == "string" and item.vnum ~= ""
+        and type(getRoomHashByID) == "function" then
+        local h = getRoomHashByID(roomID)
+        -- An empty hash is not a mismatch: plenty of legitimate rooms carry
+        -- none.  Only a hash that has become a *different* vnum means this id
+        -- no longer refers to the room the entry was queued for.
+        if type(h) == "string" and h ~= "" and h ~= item.vnum then return end
+    end
+    if type(_.create_neighbors_for_current_room) ~= "function" then return end
+    local posCache = type(_.live_pos_cache) == "function" and _.live_pos_cache(areaID) or nil
+    _.create_neighbors_for_current_room(roomID, posCache,
+        { exits = { [item.dir] = item.targetVnum } })
+end
+
+process_neighbor_queue = function()
+    neighbor_timer_pending = false
+    if neighbor_head > neighbor_tail then
+        neighbor_queue, neighbor_index = {}, {}
+        neighbor_head, neighbor_tail   = 1, 0
+        return
+    end
+
+    local backlog = neighbor_backlog()
+    local softCap = tonumber(map.configs.deferred_neighbor_soft_cap) or 2000
+    local perTick = tonumber(map.configs.deferred_neighbor_per_tick) or 1
+    if perTick < 1 then perTick = 1 end
+
+    -- Arrivals come first.  While room events are still queued the player is
+    -- ahead of the map, and wiring rooms they have already left would add to
+    -- the lag they can actually see.  Past the soft cap that deference stops,
+    -- because the backlog has to be bounded by something and dropping entries
+    -- is not an option: a missing forward exit is a hole in the graph that both
+    -- map normalize and map recalculate navigate by.
+    if queue_head <= queue_tail and backlog < softCap then
+        schedule_neighbor_drain(0.1)
+        return
+    end
+    if backlog >= softCap then
+        perTick = perTick + math.floor(backlog / softCap)
+    end
+
+    local done = 0
+    while neighbor_head <= neighbor_tail and done < perTick do
+        local item                    = neighbor_queue[neighbor_head]
+        neighbor_queue[neighbor_head] = nil
+        neighbor_head                 = neighbor_head + 1
+        if item then
+            neighbor_index[item.roomID .. "\0" .. tostring(item.dir)] = nil
+            -- Scope closed outside the pcall so an error still ends it.
+            _.prof_enter("wire_exit")
+            local ok, err = pcall(wire_one_exit, item)
+            _.prof_exit()
+            if not ok then
+                local msg = "Mapper deferred-wiring error: " .. tostring(err) .. "\n"
+                if type(cecho) == "function" then
+                    cecho("<red>" .. msg .. "<reset>")
+                else
+                    echo(msg)
+                end
+                if type(debugc) == "function" then debugc(msg) end
+            end
+        end
+        done = done + 1
+    end
+
+    if neighbor_head > neighbor_tail then
+        neighbor_queue, neighbor_index = {}, {}
+        neighbor_head, neighbor_tail   = 1, 0
+    else
+        schedule_neighbor_drain()
+    end
+end
+
 -- vertical directions used by check_doors (exposed here for event handler)
 local verticalDirs        = { u = true, up = true, d = true, down = true }
 
@@ -49,7 +199,7 @@ local function resolve_area_id_for_room_info(info)
     local areaID = type(areas) == "table" and areas[gmcpArea] or nil
 
     if not areaID and type(areas) == "table" then
-        for _, id in pairs(areas) do
+        for _name, id in pairs(areas) do
             local savedKey = getAreaUserData(id, "gmcp_area_key")
             if savedKey == gmcpArea then
                 areaID = id
@@ -137,7 +287,9 @@ local function make_room()
             -- Fallback 3: no directional clue — probe adjacent positions.
             if shift[1] == 0 and shift[2] == 0 and shift[3] == 0 then
                 local probes = { { 0, 0, 1 }, { 0, 0, -1 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 } }
-                for _, probe in ipairs(probes) do
+                -- Loop var must not be named `_`: that is the module table
+                -- (`local _ = map._`) and shadowing it breaks `_.` calls below.
+                for _i, probe in ipairs(probes) do
                     local testCoords = { coords[1] + probe[1], coords[2] + probe[2], coords[3] + probe[3] }
                     if _.rooms_at_position(posCache, areaID,
                             testCoords[1], testCoords[2], testCoords[3]) == nil then
@@ -156,7 +308,7 @@ local function make_room()
                 if overlap ~= nil then
                     local rooms = getAreaRooms(areaID)
                     local rcoords
-                    for _, id in ipairs(rooms) do
+                    for _i, id in ipairs(rooms) do
                         rcoords = { getRoomCoordinates(id) }
                         -- Skip rooms that have no coordinates yet; the
                         -- arithmetic below would fault on the nil.
@@ -225,9 +377,20 @@ local function make_room()
     for dir, id in pairs(info.exits) do
         if type(id) == "string" then
             local rid = getRoomIDbyHash(id)
-            _.ensure_exit_stub(thisRoom, dir)
-            if rid > 0 then
-                connectExitStub(thisRoom, rid, dir)
+            if type(rid) == "number" and rid > 0 then
+                -- Wire it directly.  Creating a stub and connecting it in the
+                -- same breath costs a connectExitStub, measured at ~138ms on a
+                -- large area against ~101ms for the setExit that does the same
+                -- job.  Only a stub left over from an earlier visit needs the
+                -- connect form, since setExit would leave that stub behind.
+                if type(_.room_has_exit_stub) == "function"
+                    and _.room_has_exit_stub(thisRoom, dir) then
+                    connectExitStub(thisRoom, rid, dir)
+                else
+                    setExit(thisRoom, rid, dir)
+                end
+            else
+                _.ensure_exit_stub(thisRoom, dir)
             end
         end
     end
@@ -542,6 +705,64 @@ local function handle_move(isLastInBatch)
                 end
             end
 
+            -- Wire the exit we just walked, from the previous room's side.
+            --
+            -- create_neighbors_for_current_room only ever writes exits of the
+            -- room the player is *in*.  The exit from the room they just left to
+            -- this one used to exist already, because standing in that room had
+            -- created a placeholder here and wired to it, and arriving adopted
+            -- the placeholder.  Where unexplored exits are stubs instead nothing
+            -- writes it, and the forward graph would then be missing every
+            -- connection actually travelled — which is exactly what
+            -- reconcile_connected_rooms and map recalculate BFS over to position
+            -- rooms, and what snap_vertical_pair needs to align an up/down pair.
+            --
+            -- The direction comes from the previous room's own GMCP exit list,
+            -- so it is that room's authoritative view: one-way passages stay
+            -- one-way, because the only exit written is one the server said that
+            -- room has.  Runs regardless of the stub setting — with placeholders
+            -- the exit already points here and the write is skipped, and where it
+            -- does not, the previous room was left pointing at a stale
+            -- placeholder and this repairs it.
+            do
+                local prev = map.prev_info
+                if type(prev) == "table" and type(prev.exits) == "table"
+                    and type(prev.vnum) == "string" and prev.vnum ~= ""
+                    and prev.vnum ~= info.vnum then
+                    local fromID = getRoomIDbyHash(prev.vnum)
+                    if type(fromID) == "number" and fromID > 0 and fromID ~= rnum then
+                        local existing = getRoomExits(fromID)
+                        for dir, targetVnum in pairs(prev.exits) do
+                            if targetVnum == info.vnum then
+                                local exitDir = _.normalize_exit_direction(dir)
+                                if not exitDir then
+                                    local d = type(dir) == "string" and string.lower(dir) or nil
+                                    if d == "in" or d == "out" then exitDir = d end
+                                end
+                                if exitDir then
+                                    local cur = type(existing) == "table" and existing[exitDir] or nil
+                                    if type(cur) == "string" then cur = tonumber(cur) end
+                                    if cur ~= rnum then
+                                        -- connectExitStub is the call that turns
+                                        -- an existing stub into a real exit;
+                                        -- setExit is for a direction with neither.
+                                        if type(_.room_has_exit_stub) == "function"
+                                            and _.room_has_exit_stub(fromID, exitDir) then
+                                            connectExitStub(fromID, rnum, exitDir)
+                                        else
+                                            setExit(fromID, rnum, exitDir)
+                                        end
+                                        if type(existing) == "table" then
+                                            existing[exitDir] = rnum
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
             local stubs = getExitStubs1(rnum)
             if map.configs.debug_mapper then
                 _.debug_echo("Exit stubs for current room: " .. yajl.to_string(stubs) .. "\n")
@@ -562,8 +783,19 @@ local function handle_move(isLastInBatch)
                 end
             end
 
-            local newRooms = type(_.create_neighbors_for_current_room) == "function"
-                and _.create_neighbors_for_current_room(rnum, posCache) or 0
+            -- Neighbour wiring is the whole cost of an arrival on a large area,
+            -- so it is queued rather than done here (see the deferred queue at
+            -- the top of this file).  Small areas keep wiring inline: every call
+            -- involved is sub-millisecond there, so deferring would only make
+            -- exits appear late for no gain.
+            local deferred = map.configs.defer_neighbor_wiring ~= false
+                and type(_.is_large_area) == "function"
+                and _.is_large_area(currentAreaID)
+            if deferred then
+                queue_neighbor_wiring(rnum, info)
+            elseif type(_.create_neighbors_for_current_room) == "function" then
+                _.create_neighbors_for_current_room(rnum, posCache)
+            end
             if isLastInBatch then
                 updateMap()
                 centerview(rnum)
@@ -589,6 +821,11 @@ local function process_room_queue()
             -- Drained empty: restart the indices so they cannot climb forever.
             queue_head, queue_tail = 1, 0
         end
+        -- Profiler scope for one drained room event.  It sits outside the pcall
+        -- so an error inside handle_move still closes it; no-op unless
+        -- `map profile on` is active.  This is the unit that matters for the
+        -- freeze: everything one arrival costs, including the drain bookkeeping.
+        _.prof_enter("handle_move")
         local ok, err = pcall(function()
             -- A gapped entry is the one that followed dropped events, so the
             -- previous snapshot is no longer an adjacent room and make_room
@@ -599,6 +836,7 @@ local function process_room_queue()
             local isLast  = (queue_head > queue_tail) or (drained == queue_max_per_tick - 1)
             handle_move(isLast)
         end)
+        _.prof_exit()
         if not ok then
             local msg = "Mapper queue error: " .. tostring(err) .. "\n"
             if type(cecho) == "function" then
@@ -688,6 +926,11 @@ function map.eventHandler(event, ...)
     elseif event == "sysConnectionEvent" then
         map._pos_cache       = nil -- force posCache rebuild for the new session's area
         map._area_index      = nil -- ditto for the per-area hash/name index
+        -- Pending wiring refers to room ids and vnums from the previous session.
+        -- The map file may have been reloaded or edited since, so draining them
+        -- now would write exits based on a map that no longer exists.
+        neighbor_queue, neighbor_index = {}, {}
+        neighbor_head, neighbor_tail   = 1, 0
         -- The map file may have been reloaded or edited between sessions, so
         -- the incremental room counts can no longer be trusted; drop them and
         -- let the next query re-count from getAreaRooms.

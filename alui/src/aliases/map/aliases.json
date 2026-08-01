@@ -98,5 +98,9 @@
     {
         "name": "map clean-placeholders",
         "regex": "^map\\s+clean-placeholders(?:\\s+(.+))?$"
+    },
+    {
+        "name": "map profile",
+        "regex": "^map\\s+profile(?:\\s+(.+))?$"
     }
 ]

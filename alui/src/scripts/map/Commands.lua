@@ -535,6 +535,11 @@ function map.show_help()
     echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")
     echo("  map remove poi\n")
     echo("    Remove the POI marker from the current room and restore its original terrain color.\n\n")
+    echo("  map profile [on|off|reset|report [N]|status]\n")
+    echo("    Measure where mapper time goes. 'on' instruments the hot path and counts every\n")
+    echo("    Mudlet map API call; walk around (especially into unmapped rooms), then 'report'.\n")
+    echo("    Ranks scopes by self time and lists the slowest individual room events with the\n")
+    echo("    API calls each one made. 'off' restores everything and keeps the collected data.\n\n")
 end
 
 -- --------------------------------------------------------------------------
@@ -924,7 +929,11 @@ continue_walk = function(new_room)
     end
     -- Re-evaluate route if the map has grown since the last step.
     if map.autowalk_dirty and maybe_reevaluate_autowalk then
+        -- No-op unless `map profile on`.  Any error here unwinds at the
+        -- continue_walk wrapper, which pops back to its own entry depth.
+        _.prof_enter("reevaluate_autowalk")
         maybe_reevaluate_autowalk()
+        _.prof_exit()
         if not map.walking then return end
     end
     local wait        = get_active_speedwalk_delay()
@@ -1353,10 +1362,21 @@ local function compute_autowalk_path(currentRoomID, targetRoomID)
     -- unvisited placeholder rooms) or the direct route runs through
     -- POI rooms and we need to lock them and re-route.
     -- ----------------------------------------------------------------
+    -- Everything below is the slow path.  Scoped separately from the fast path
+    -- above because the fast path is what most walks take, and averaging the
+    -- two together hides how expensive the slow one is.  All profiler calls
+    -- here are no-ops unless `map profile on`; the scope is closed before each
+    -- of the two remaining returns.
+    _.prof_enter("autowalk_slowpath")
+
     local areaID = getRoomArea(currentRoomID)
 
-    local addedExits = (type(areaID) == "number" and areaID > 0)
-        and add_placeholder_exits(areaID, currentRoomID, targetRoomID) or {}
+    local addedExits = {}
+    if type(areaID) == "number" and areaID > 0 then
+        _.prof_enter("placeholder_exits")
+        addedExits = add_placeholder_exits(areaID, currentRoomID, targetRoomID)
+        _.prof_exit()
+    end
 
     if not targetIsPoi
         and type(getAreaRooms) == "function"
@@ -1387,6 +1407,7 @@ local function compute_autowalk_path(currentRoomID, targetRoomID)
         end
         remove_placeholder_exits(addedExits)
 
+        _.prof_exit()
         return ok and walkPath ~= nil, walkPath, walkDirs
     end
 
@@ -1398,6 +1419,7 @@ local function compute_autowalk_path(currentRoomID, targetRoomID)
         walkPath, walkDirs = copy_speedwalk_globals()
     end
     remove_placeholder_exits(addedExits)
+    _.prof_exit()
     return ok and walkPath ~= nil, walkPath, walkDirs
 end
 

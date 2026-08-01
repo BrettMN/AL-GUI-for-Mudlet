@@ -11,6 +11,18 @@ map.configs.reconcile_max_passes = map.configs.reconcile_max_passes or 1
 map.configs.reconcile_max_moves = map.configs.reconcile_max_moves or 200
 map.configs.reconcile_deep_max_passes = map.configs.reconcile_deep_max_passes or 20
 map.configs.reconcile_deep_max_moves = map.configs.reconcile_deep_max_moves or 5000
+-- Multi-pass reconcile may displace a room that is *less* in agreement with its
+-- own exits than the room wanting its cell, instead of giving up on the move.
+-- Without it, a cell held by a room the BFS has no reason to move is held for
+-- good: repeated passes only ever relocate rooms an exit points at, so a squatter
+-- that nothing points at, or one whose own placement already looks locally fine,
+-- strands every room that legitimately belongs on that cell.  Set false to
+-- restore the old skip-on-occupied behaviour.
+map.configs.reconcile_evict = map.configs.reconcile_evict ~= false
+-- How far an evicted room may be parked from the cell it lost.  Small on
+-- purpose: it gets re-placed from its neighbours on the next pass, and a long
+-- throw is visible on the map until then.
+map.configs.reconcile_evict_radius = map.configs.reconcile_evict_radius or 8
 map.configs.area_display_names = map.configs.area_display_names or {}
 map.configs.area_ids_by_gmcp = map.configs.area_ids_by_gmcp or {}
 map.configs.auto_reconcile = false
@@ -24,6 +36,40 @@ map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
 -- cut over sooner; raise it to re-enable both for moderately large areas.
 map.configs.large_area_threshold = map.configs.large_area_threshold or 5000
 
+-- Deferred neighbour wiring.
+--
+-- On a large area a single arrival costs over a second, nearly all of it inside
+-- create_neighbors_for_current_room: ~100ms per setExit, ~390ms for each
+-- placeholder room's setRoomArea, ~19ms per occupancy probe.  Mudlet runs all of
+-- that on the main thread, so the client cannot repaint or accept input for the
+-- duration, and during auto travel arrivals outrun it and the backlog turns a
+-- stutter into a multi-minute lock-up.
+--
+-- Rather than doing every exit of an arriving room before returning, the exits
+-- are queued and wired one per timer tick, so the longest uninterruptible span
+-- drops from a whole room to a single exit.  Set false to wire inline as before.
+map.configs.defer_neighbor_wiring = map.configs.defer_neighbor_wiring ~= false
+-- Exits wired per drain tick.  One keeps the main thread free between units;
+-- the drain scales this up on its own once the backlog passes the soft cap.
+map.configs.deferred_neighbor_per_tick = map.configs.deferred_neighbor_per_tick or 1
+-- Backlog past which the drain stops yielding to arrivals and starts catching
+-- up in bigger batches.  Nothing is ever dropped: a dropped exit is a hole in
+-- the forward graph that map normalize and map recalculate both navigate by.
+map.configs.deferred_neighbor_soft_cap = map.configs.deferred_neighbor_soft_cap or 2000
+
+-- On a large area, mark an exit leading somewhere unvisited with Mudlet's own
+-- exit stub rather than creating a placeholder room to stand in for it.  A
+-- placeholder costs ~500ms there (setRoomArea alone ~396ms) and most are never
+-- walked; a stub carries the same "an exit leaves here" information for no
+-- measurable cost.  The exit to the real room is written when the player walks
+-- it, so the forward graph that map normalize and map recalculate navigate by
+-- stays complete for every connection actually travelled.
+--
+-- The trade-off: autowalk cannot route through unexplored space in those areas,
+-- because add_placeholder_exits needs real placeholder rooms to chain together.
+-- Set false to go back to creating placeholders everywhere.
+map.configs.stub_unexplored_exits = map.configs.stub_unexplored_exits ~= false
+
 -- Areas with at least this many rooms get no per-area hash/name index (see the
 -- "Per-area room index" section in Helpers.lua).  That index is built once and
 -- then reused across steps *and* across area changes, so it tolerates a far
@@ -35,6 +81,16 @@ map.configs.index_area_threshold = map.configs.index_area_threshold or 50000
 -- accessible across Lua chunks without polluting the global namespace.
 map._ = map._ or {}
 local _ = map._
+
+-- Profiler scope markers.  Defined here as no-ops because Profile.lua loads
+-- last, while the call sites that use them live in Core.lua and Commands.lua —
+-- those call sites run at event time, but they are written unconditionally, so
+-- the names have to exist from the first chunk onwards.  `map profile on` swaps
+-- in the recording implementations; `map profile off` puts these back.
+local function prof_noop() end
+
+_.prof_enter = prof_noop
+_.prof_exit  = prof_noop
 
 _.terrain_types = {
     -- used to make rooms of different terrain types have different colors

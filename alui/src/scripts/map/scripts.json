@@ -20,6 +20,10 @@
         "isActive": "yes"
     },
     {
+        "name": "Profile",
+        "isActive": "yes"
+    },
+    {
         "name": "Menu",
         "isActive": "yes"
     }

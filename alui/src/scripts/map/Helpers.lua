@@ -1105,6 +1105,44 @@ function _.find_free_cell_near(cache, x, y, z, maxRadius)
     return nil
 end
 
+-- How well a room agrees with its neighbours: the number of its exits whose
+-- target already sits at exactly the coordinate delta the exit implies.  A
+-- higher score means the room is better placed within its cluster.
+--
+-- (x, y, z) is the position to score the room *at*; pass nil to score it where
+-- it currently sits.  Scoring a hypothetical position is what lets a caller ask
+-- "would this room be better anchored here than the room already here?" before
+-- moving anything.
+--
+-- Note the asymmetry with the exits pointing *at* rid: those belong to the
+-- neighbours and are not counted.  A room with no exits of its own therefore
+-- always scores 0, which is what makes unvisited placeholders lose every
+-- contest for a cell.
+function _.exit_consistency_score(rid, x, y, z)
+    if type(rid) ~= "number" or rid < 1 then return 0 end
+    local exits = getRoomExits(rid)
+    if type(exits) ~= "table" then return 0 end
+    if x == nil then
+        x, y, z = getRoomCoordinates(rid)
+        if x == nil then return 0 end
+    end
+    local score = 0
+    for dir, tgt in pairs(exits) do
+        if type(tgt) == "string" then tgt = tonumber(tgt) end
+        if type(tgt) == "number" and tgt > 0 and tgt ~= rid then
+            local shift = _.get_shift_for_exit_key(dir)
+            if shift then
+                local tx, ty, tz = getRoomCoordinates(tgt)
+                if tx ~= nil and (tx - x) == shift[1]
+                    and (ty - y) == shift[2] and (tz - z) == shift[3] then
+                    score = score + 1
+                end
+            end
+        end
+    end
+    return score
+end
+
 -- Separate genuinely-distinct rooms that ended up sharing the same map cell.
 --
 -- The reconcile/anchor passes embed the room graph into a 3-D grid by walking
@@ -1150,30 +1188,9 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, resp
         return type(_.current_player_room_id) == "function" and rid == _.current_player_room_id()
     end
 
-    -- Number of exits whose actual coord delta already matches the expected
-    -- shift; a higher score means the room is better placed within its cluster
-    -- and should be the occupant that keeps the cell.
-    local function consistency_score(rid)
-        local exits = getRoomExits(rid)
-        if type(exits) ~= "table" then return 0 end
-        local rx, ry, rz = getRoomCoordinates(rid)
-        if rx == nil then return 0 end
-        local score = 0
-        for dir, tgt in pairs(exits) do
-            if type(tgt) == "string" then tgt = tonumber(tgt) end
-            if type(tgt) == "number" and tgt > 0 and tgt ~= rid then
-                local shift = _.get_shift_for_exit_key(dir)
-                if shift then
-                    local tx, ty, tz = getRoomCoordinates(tgt)
-                    if tx ~= nil and (tx - rx) == shift[1]
-                        and (ty - ry) == shift[2] and (tz - rz) == shift[3] then
-                        score = score + 1
-                    end
-                end
-            end
-        end
-        return score
-    end
+    -- The occupant that keeps a shared cell is the one that agrees with most of
+    -- its own neighbours where it stands.
+    local consistency_score = _.exit_consistency_score
 
     -- Pick the occupant that keeps the cell: the anchor first, then the most
     -- exit-consistent, then lowest id.
