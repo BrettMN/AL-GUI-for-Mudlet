@@ -1413,6 +1413,126 @@ function _.is_elevated_room_name(name)
     return false
 end
 
+-- --------------------------------------------------------------------------
+-- Absolute elevation
+-- --------------------------------------------------------------------------
+
+function _.is_sky_room_name(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local patterns = _.sky_name_patterns
+    if type(patterns) ~= "table" then return false end
+    local lower = string.lower(name)
+    for _i = 1, #patterns do
+        if lower:find(patterns[_i], 1, true) then return true end
+    end
+    return false
+end
+
+-- The sky level roomID sits at: 1 for the layer directly above the ground, 2
+-- for the one above that, and so on up to sky_max_level.  Returns nil when it
+-- cannot be established, which is the signal to leave the room where it is.
+--
+-- Deliberately reads no coordinates.  It searches outward through sky rooms and
+-- asks only whether each room it lands on is still sky, so the answer does not
+-- depend on where the cluster currently believes it is — which is the whole
+-- point, since a displaced sky layer is internally consistent about a z that is
+-- wrong.  Only one thing here is ground truth: a `down` exit leading somewhere
+-- that is not sky means the room above it is level 1.
+--
+-- The search carries an offset, the difference between roomID's level and the
+-- level of the room it is currently looking at.  A horizontal move leaves it
+-- alone (flying sideways does not change altitude), a `down` move adds one and
+-- an `up` move subtracts one.  Reaching any room that touches the surface then
+-- gives roomID's own level directly.  That covers all three ways a room learns
+-- its height: from its own descent, from a neighbour further along the layer,
+-- and from the room underneath it in the same column.
+function _.sky_altitude(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then return nil end
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return nil end
+
+    local maxLevel = tonumber(map.configs.sky_max_level) or 3
+    local budget   = tonumber(map.configs.sky_altitude_search) or 16
+
+    local queue   = { { id = roomID, offset = 0 } }
+    local seen    = { [roomID] = true }
+    local head    = 1
+    local visited = 0
+    while head <= #queue do
+        local entry   = queue[head]
+        local current = entry.id
+        head          = head + 1
+        visited       = visited + 1
+        if visited > budget then return nil end
+
+        local exits = getRoomExits(current)
+        if type(exits) == "table" then
+            local down = exits["down"]
+            if type(down) == "string" then down = tonumber(down) end
+            if type(down) == "number" and down > 0 and getRoomArea(down) == areaID
+                and not _.is_sky_room_name(getRoomName(down)) then
+                -- Surface contact: `current` is level 1, so roomID is that plus
+                -- however far the search has climbed to get here.
+                local level = 1 + entry.offset
+                if level >= 1 and level <= maxLevel then return level end
+                return nil
+            end
+
+            for dir, target in _.sorted_exit_pairs(exits) do
+                if type(target) == "string" then target = tonumber(target) end
+                if type(target) == "number" and target > 0 and not seen[target]
+                    and getRoomArea(target) == areaID
+                    and _.is_sky_room_name(getRoomName(target)) then
+                    local offset = nil
+                    local shift  = _.get_shift_for_exit_key(dir)
+                    if shift and _.is_horizontal_shift(shift) then
+                        offset = entry.offset
+                    elseif dir == "down" then
+                        offset = entry.offset + 1
+                    elseif dir == "up" then
+                        offset = entry.offset - 1
+                    end
+                    -- Anything that would put roomID outside the recognised
+                    -- stack is a dead end, not a level: stop following it.
+                    if offset and (1 + offset) >= 1 and (1 + offset) <= maxLevel then
+                        seen[target] = true
+                        queue[#queue + 1] = { id = target, offset = offset }
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- The z-plane roomID belongs on regardless of where its neighbours sit, or nil
+-- when nothing establishes one.  `info` is the live GMCP snapshot when there is
+-- one; its name and terrain are preferred over the stored copies because on a
+-- first visit the room does not carry them yet.
+function _.anchor_z_for_room(roomID, info)
+    if map.configs.anchor_elevation == false then return nil end
+    if type(roomID) ~= "number" or roomID < 1 then return nil end
+
+    local name = type(info) == "table" and type(info.name) == "string"
+        and info.name ~= "" and info.name or getRoomName(roomID)
+    if _.is_sky_room_name(name) then
+        return _.sky_altitude(roomID)
+    end
+
+    -- Surface terrain is already enumerated: forced_z_by_terrain_name is the
+    -- list of terrains that sit on the ground, and every one of them maps to 0.
+    local terrain = _.normalize_terrain_name(type(info) == "table" and info.terrain or nil)
+    if terrain == nil then
+        local stored = getRoomUserData(roomID, "terrain")
+        if type(stored) == "string" and stored ~= "" then terrain = stored end
+    end
+    if terrain ~= nil then
+        local z = _.forced_z_by_terrain_name[terrain]
+        if type(z) == "number" then return z end
+    end
+    return nil
+end
+
 -- Returns true when the room's name matches an elevated pattern OR when a
 -- previous map normalize pass stored the elevationAdjustment property on it.
 function _.classify_room_elevated(roomID)

@@ -70,6 +70,49 @@ map.configs.deferred_neighbor_soft_cap = map.configs.deferred_neighbor_soft_cap 
 -- Set false to go back to creating placeholders everywhere.
 map.configs.stub_unexplored_exits = map.configs.stub_unexplored_exits ~= false
 
+-- Move a room onto the cluster its exits say it adjoins, as soon as enough of
+-- those exits are known (see _.realign_displaced_room in Layout.lua).  Rooms
+-- created without a directional clue land on a probed free cell, and only the
+-- later discovery of their exits reveals where they actually belong.  This is
+-- the cheap local form of what 'map normalize' does globally: the check is
+-- reads only, and nothing is written unless a move is warranted.
+map.configs.realign_displaced_rooms = map.configs.realign_displaced_rooms ~= false
+-- Agreeing exits required before a room is moved.  One exit is not evidence:
+-- a single mis-wired exit would be enough to throw a correctly placed room
+-- across the map.  Two independent exits pointing at the same cell is.
+map.configs.realign_min_votes = map.configs.realign_min_votes or 2
+-- Largest group that may be translated in one go.  Rooms displaced together
+-- move together, and a group that grows past this has reached the main body of
+-- the map through some other seam — repositioning that is 'map normalize's
+-- job, and doing it mid-step would stall the client.
+map.configs.realign_max_component = map.configs.realign_max_component or 32
+
+-- Absolute elevation anchoring.
+--
+-- Every other z in this mapper is relative: a room's z is the previous room's z
+-- plus whatever the walked direction contributed.  Nothing says where the
+-- ground *is*, so a cluster seeded without a directional clue picks up an
+-- arbitrary z origin, grows internally consistent, and only reveals the error
+-- when it meets a cluster with a different origin — as a wall of exits whose
+-- delta is right in x and y and off by a constant in z.  Rooms first reached by
+-- descending from such a cluster inherit its error, which is how sky ends up
+-- intermingled with land on one plane.
+--
+-- An anchor is the fix: surface terrain means z 0, and a sky room means as many
+-- levels above 0 as it takes `down` moves to reach the surface.  Both are
+-- absolute and neither reads a neighbour's coordinates, so a room converges on
+-- the right plane no matter what its cluster believes.
+map.configs.anchor_elevation = map.configs.anchor_elevation ~= false
+-- Highest sky level recognised.  A `down` chain longer than this is not
+-- believed: it means the chain has left the sky stack (or the exits are wrong),
+-- and guessing a level from bad data is worse than leaving the room alone.
+map.configs.sky_max_level = map.configs.sky_max_level or 3
+-- How many sky rooms to search sideways for an altitude when the room's own
+-- `down` chain does not reach the surface.  Horizontal moves do not change
+-- altitude, so a sky room's neighbours are at its level — this is what anchors
+-- the interior of a sky layer, where only the edges have `down` exits.
+map.configs.sky_altitude_search = map.configs.sky_altitude_search or 16
+
 -- Areas with at least this many rooms get no per-area hash/name index (see the
 -- "Per-area room index" section in Helpers.lua).  That index is built once and
 -- then reused across steps *and* across area changes, so it tolerates a far
@@ -270,4 +313,16 @@ _.forced_z_by_terrain_name = {
     ["beach"] = 0,
     ["pond"] = 0,
     ["tundra"] = 0,
+}
+
+-- Room names that mean "this room is in the air above the surface".
+-- Matched case-insensitively as a substring, like _.is_elevated_room_name.
+--
+-- Deliberately NOT added to elevated_name_patterns: that list drives a *relative*
+-- +1/-1 nudge in make_room, applied on top of the shift the walked direction
+-- already contributed.  Going up from the ground into the sky supplies +1 from
+-- the `up` exit, so a second bump would land the room two levels above where it
+-- belongs.  Sky rooms get an absolute plane instead (see _.sky_altitude).
+_.sky_name_patterns = {
+    "the sky",
 }

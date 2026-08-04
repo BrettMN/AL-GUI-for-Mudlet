@@ -289,6 +289,9 @@ local function targets()
         { _, "create_neighbors_for_current_room", "create_neighbors" },
         { _, "reconcile_connected_rooms",     "reconcile" },
         { _, "flatten_cardinal_connected_rooms", "flatten" },
+        { _, "realign_displaced_room",        "realign" },
+        { _, "apply_elevation_anchor",        "elevation_anchor" },
+        { _, "sky_altitude",                  "sky_altitude" },
         { _, "apply_anchor_translation",      "anchor_translate" },
         -- Core / Commands entry points
         { map, "eventHandler",                "gmcp_event" },

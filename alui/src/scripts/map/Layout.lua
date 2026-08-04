@@ -960,6 +960,248 @@ function _.flatten_cardinal_connected_rooms(anchorID, externalPosCache)
 end
 
 -- --------------------------------------------------------------------------
+-- Placement: absolute elevation
+-- --------------------------------------------------------------------------
+
+-- Put roomID on the z-plane its own nature says it belongs on: 0 for surface
+-- terrain, 1..sky_max_level for a room in the air (see _.anchor_z_for_room).
+--
+-- This moves one room and never a group, which is the whole point of an anchor.
+-- realign has to carry a group because its evidence is relative — it learns
+-- "one east of that room", and that is only as good as where that room sits.
+-- An anchor reads no neighbour's coordinates at all, so every room reaches the
+-- right plane on its own, in any order, as the player visits it.  A whole
+-- displaced layer therefore repairs itself room by room rather than needing one
+-- enormous translation the client could not absorb in a single step.
+--
+-- Returns `moved, anchorZ`.  anchorZ is reported even when nothing moved, so a
+-- caller can tell "already on its plane" from "no plane is known" — the first
+-- must not be second-guessed by a heuristic, the second is exactly what
+-- heuristics are for.
+function _.apply_elevation_anchor(roomID, posCache, info, depth)
+    if type(_.anchor_z_for_room) ~= "function" then return false, nil end
+    if type(roomID) ~= "number" or roomID < 1 then return false, nil end
+
+    local anchorZ = _.anchor_z_for_room(roomID, info)
+    if type(anchorZ) ~= "number" then return false, nil end
+    if safe_is_room_locked(roomID) then return false, anchorZ end
+
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return false, anchorZ end
+    local rx, ry, rz = getRoomCoordinates(roomID)
+    if rx == nil or rz == anchorZ then return false, anchorZ end
+
+    -- Something may already hold this x/y on the correct plane, and when a whole
+    -- sky stack is a level low it is guaranteed: the room in the way is the next
+    -- one up the same column, which has an anchor of its own and one more plane
+    -- to climb.  Ask it to move first.  A stack is at most sky_max_level deep
+    -- and each step up is a strictly higher plane, so this bottoms out; a room
+    -- with no anchor, or one that cannot move either, still blocks and we yield.
+    local blockers  = {}
+    local occupants = _.rooms_at_position(posCache, areaID, rx, ry, anchorZ)
+    if type(occupants) == "table" then
+        -- Copied out first: the recursion below moves rooms, and on a cached
+        -- area `occupants` is the cache's own live list for that cell.
+        for i = 1, #occupants do
+            if occupants[i] ~= roomID then blockers[#blockers + 1] = occupants[i] end
+        end
+    end
+    if #blockers > 0 then
+        local nextDepth = (tonumber(depth) or 0) + 1
+        if nextDepth > (tonumber(map.configs.sky_max_level) or 3) then
+            return false, anchorZ
+        end
+        for i = 1, #blockers do
+            -- A true return means the blocker moved to a different plane, so it
+            -- has necessarily left this cell.
+            if not _.apply_elevation_anchor(blockers[i], posCache, nil, nextDepth) then
+                return false, anchorZ
+            end
+        end
+    end
+
+    _.set_room_coordinates(roomID, rx, ry, anchorZ, posCache)
+    _.debug_echo(string.format(
+        "elevation anchor: room %d z %d→%d\n", roomID, rz, anchorZ))
+    return true, anchorZ
+end
+
+-- --------------------------------------------------------------------------
+-- Placement: realign a displaced room onto the cluster it adjoins
+-- --------------------------------------------------------------------------
+
+-- A room can end up nowhere near the rooms it actually adjoins.  make_room
+-- places a new room by offsetting the previous one, and when the arrival gave it
+-- no directional clue — a gapped event queue, a portal, a special exit — it falls
+-- back to probing for any free cell nearby.  Whatever it picks is a guess, and
+-- the guess is only found out later, once the room's exits are learned and turn
+-- out to point at a cluster several cells away.
+--
+-- reconcile_connected_rooms already repairs this shape of error, but only from
+-- the far end: it walks outward from a trusted anchor and drags targets into
+-- place, which costs an O(area) pos-cache build and a multi-room BFS — far too
+-- much to run on every arrival, which is why auto_reconcile is off.  Here the
+-- displaced room is the one already in hand and its own exits carry the answer,
+-- so the judgement is entirely local and made of free reads: every exit landing
+-- on a room that has coordinates implies exactly one position for this room, and
+-- the position the most exits agree on wins.
+--
+-- The room does not travel alone.  Anything reachable through exits that are
+-- *already* consistent was displaced by the same delta, so it moves too; the
+-- translation is rigid, which leaves every internal delta untouched.  That is
+-- also what makes this stable rather than oscillating: after the move the
+-- winning position is where the room sits, so a second call finds nothing to do.
+--
+-- `info` is the live GMCP snapshot when the caller has one; it is only consulted
+-- for the room's name and terrain, which on a first visit the map does not carry
+-- yet.  Pass nil for an already-known room.
+--
+-- Returns the number of rooms moved (0 when it declines).
+function _.realign_displaced_room(roomID, posCache, info)
+    if map.configs.realign_displaced_rooms == false then return 0 end
+    if type(roomID) ~= "number" or roomID < 1 then return 0 end
+    if safe_is_room_locked(roomID) then return 0 end
+
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return 0 end
+    local rx, ry, rz = getRoomCoordinates(roomID)
+    if rx == nil then return 0 end
+    local exits = getRoomExits(roomID)
+    if type(exits) ~= "table" then return 0 end
+
+    -- The plane this room belongs on, if anything establishes one.  Candidates
+    -- off it are discarded, so the exit vote can move the room around within its
+    -- plane but never off it.  apply_elevation_anchor has already put the room
+    -- there; without this filter the room's own cluster — internally consistent
+    -- by construction, and therefore voting confidently for the old z — would
+    -- simply pull it back on the next arrival.
+    local anchorZ = type(_.anchor_z_for_room) == "function"
+        and _.anchor_z_for_room(roomID, info) or nil
+
+    -- One vote per exit that lands on a placed room in this area.  Canonical
+    -- exit order so that when two candidates tie, which one is "first" is the
+    -- same on every run (the tie is rejected below either way, but the debug
+    -- output should not vary).
+    local votes, best, bestVotes, bestKey = {}, nil, 0, nil
+    local voters = {}
+    for dir, targetID in _.sorted_exit_pairs(exits) do
+        if type(targetID) == "string" then targetID = tonumber(targetID) end
+        if type(targetID) == "number" and targetID > 0 and targetID ~= roomID
+            and getRoomArea(targetID) == areaID then
+            local shift = _.get_shift_for_exit_key(dir)
+            if shift then
+                local tx, ty, tz = getRoomCoordinates(targetID)
+                if tx ~= nil and (anchorZ == nil or (tz - shift[3]) == anchorZ) then
+                    local px, py, pz = tx - shift[1], ty - shift[2], tz - shift[3]
+                    local key  = pos_key(px, py, pz)
+                    local slot = votes[key]
+                    if slot then
+                        slot.n = slot.n + 1
+                    else
+                        slot = { n = 1, x = px, y = py, z = pz }
+                        votes[key] = slot
+                        voters[key] = {}
+                    end
+                    voters[key][targetID] = true
+                    if slot.n > bestVotes then
+                        best, bestVotes, bestKey = slot, slot.n, key
+                    end
+                end
+            end
+        end
+    end
+
+    local minVotes = tonumber(map.configs.realign_min_votes) or 2
+    if best == nil or bestVotes < minVotes then return 0 end
+    -- Already where the winner says it belongs: the common case, and the reason
+    -- this is safe to call on every arrival.
+    if bestKey == pos_key(rx, ry, rz) then return 0 end
+
+    -- The winner has to beat every other candidate outright, including wherever
+    -- the room currently sits.  A tie is two clusters disagreeing about where
+    -- this room goes, and picking one of them on a coin toss would just undo
+    -- itself the moment the loser gained an exit.
+    for key, slot in pairs(votes) do
+        if key ~= bestKey and slot.n >= bestVotes then return 0 end
+    end
+
+    local dx, dy, dz = best.x - rx, best.y - ry, best.z - rz
+    local maxComponent = tonumber(map.configs.realign_max_component) or 32
+
+    -- The rooms displaced along with this one: everything reachable through
+    -- exits that already sit at exactly the delta they imply.  Exits that do
+    -- *not* — which is every exit that voted for the winner — are the seam we
+    -- are closing, so the cluster on their far side is left where it is.
+    local component   = { roomID }
+    local inComponent = { [roomID] = true }
+    local head        = 1
+    while head <= #component do
+        local current    = component[head]
+        head             = head + 1
+        local cx, cy, cz = getRoomCoordinates(current)
+        local cex        = getRoomExits(current)
+        if cx ~= nil and type(cex) == "table" then
+            for dir, tid in _.sorted_exit_pairs(cex) do
+                if type(tid) == "string" then tid = tonumber(tid) end
+                if type(tid) == "number" and tid > 0 and not inComponent[tid]
+                    and getRoomArea(tid) == areaID then
+                    local shift = _.get_shift_for_exit_key(dir)
+                    if shift then
+                        local tx, ty, tz = getRoomCoordinates(tid)
+                        if tx ~= nil and (tx - cx) == shift[1]
+                            and (ty - cy) == shift[2] and (tz - cz) == shift[3] then
+                            -- A component that keeps growing has reached the
+                            -- main body of the map through some other seam, and
+                            -- translating that is map normalize's job, not ours.
+                            if #component >= maxComponent then return 0 end
+                            if safe_is_room_locked(tid) then return 0 end
+                            inComponent[tid] = true
+                            component[#component + 1] = tid
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- If a room that voted for the winner is itself being moved, the evidence is
+    -- self-referential: the group would carry its own reference point along with
+    -- it and land somewhere neither cluster asked for.
+    for tid in pairs(voters[bestKey]) do
+        if inComponent[tid] then return 0 end
+    end
+
+    -- Nothing may already occupy the cells the group is moving onto.  This is
+    -- the one question a large area's position cache cannot answer (it holds no
+    -- coordinate map there), so it falls through to getRoomsByPosition — the
+    -- only real cost in the whole function, and the reason the component is
+    -- capped.  It is paid solely when a move is otherwise going ahead.
+    for i = 1, #component do
+        local id         = component[i]
+        local cx, cy, cz = getRoomCoordinates(id)
+        local occupants  = _.rooms_at_position(posCache, areaID,
+            cx + dx, cy + dy, cz + dz)
+        if type(occupants) == "table" then
+            for j = 1, #occupants do
+                if not inComponent[occupants[j]] then return 0 end
+            end
+        end
+    end
+
+    for i = 1, #component do
+        local id         = component[i]
+        local cx, cy, cz = getRoomCoordinates(id)
+        _.set_room_coordinates(id, cx + dx, cy + dy, cz + dz, posCache)
+    end
+
+    _.debug_echo(string.format(
+        "realign: room %d (%d,%d,%d)→(%d,%d,%d) on %d agreeing exit(s); "
+        .. "%d room(s) moved with it\n",
+        roomID, rx, ry, rz, best.x, best.y, best.z, bestVotes, #component))
+    return #component
+end
+
+-- --------------------------------------------------------------------------
 -- Public layout commands
 -- --------------------------------------------------------------------------
 

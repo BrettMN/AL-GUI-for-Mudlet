@@ -116,6 +116,25 @@ local function wire_one_exit(item)
     local posCache = type(_.live_pos_cache) == "function" and _.live_pos_cache(areaID) or nil
     _.create_neighbors_for_current_room(roomID, posCache,
         { exits = { [item.dir] = item.targetVnum } })
+
+    -- On a large area an arriving room's exits are written here, tick by tick,
+    -- rather than during handle_move — so the exit that finally proves the room
+    -- is in the wrong place usually lands in this queue, not at the arrival.
+    -- Re-checking after each one is what makes the repair land on the visit that
+    -- discovered the evidence instead of the next one.  It is reads only until
+    -- a move is actually warranted, and idempotent once the room is in place.
+    --
+    -- The elevation anchor runs here too: a sky room's altitude comes from its
+    -- `down` chain, and on a large area that exit is written by this queue, so
+    -- the room often only becomes anchorable a tick or two after the arrival
+    -- that discovered it.  No info snapshot to pass — the room is on the map by
+    -- now, so its stored name and terrain are the right source.
+    if type(_.realign_displaced_room) == "function" then
+        _.realign_displaced_room(roomID, posCache)
+    end
+    if type(_.apply_elevation_anchor) == "function" then
+        _.apply_elevation_anchor(roomID, posCache)
+    end
 end
 
 process_neighbor_queue = function()
@@ -614,71 +633,6 @@ local function handle_move(isLastInBatch)
                 end
             end
 
-            -- Correct z-level for elevated/surface transitions on rooms that
-            -- were pre-created as placeholders at the wrong z.
-            local currEL = _.is_elevated_room_name(info.name)
-            local prevEL = _.is_elevated_room_name(map.prev_info.name or "")
-            if currEL ~= prevEL and type(map.prev_info.vnum) == "string"
-                and not _.is_room_locked(rnum) then
-                local prevID = getRoomIDbyHash(map.prev_info.vnum)
-                if prevID > 0 then
-                    local px, py, pz = getRoomCoordinates(prevID)
-                    if pz ~= nil then
-                        local expectedZ = currEL and (pz + 1) or (pz - 1)
-                        local rx, ry, rz = getRoomCoordinates(rnum)
-                        if rz ~= expectedZ then
-                            _.set_room_coordinates(rnum, rx, ry, expectedZ, posCache)
-                        end
-                    end
-                end
-            end
-
-            -- Self-heal: if this room is offset from every horizontal
-            -- neighbour by the same non-zero dz, snap this room onto their
-            -- shared z-plane.  This corrects rooms that were mis-placed by
-            -- the (now-fixed) forcedZ override, e.g. a "dense forest" room
-            -- at z=0 while its entire cluster lives at z=33.
-            -- Only runs when the room is not locked/pinned by the user.
-            if not _.is_room_locked(rnum) then
-                local rx, ry, rz = getRoomCoordinates(rnum)
-                if rx ~= nil and type(info.exits) == "table" then
-                    local sharedDz   = nil
-                    local consistent = true
-                    for dir, targetVnum in pairs(info.exits) do
-                        local shift = type(_.get_shift_for_exit_key) == "function"
-                            and _.get_shift_for_exit_key(dir) or nil
-                        if shift and _.is_horizontal_shift and _.is_horizontal_shift(shift) then
-                            local tid = type(targetVnum) == "string"
-                                and getRoomIDbyHash(targetVnum) or nil
-                            if type(tid) == "number" and tid > 0 then
-                                local ta = getRoomArea(tid)
-                                if type(ta) == "number" and ta == currentAreaID then
-                                    local _tx, _ty, tz2 = getRoomCoordinates(tid)
-                                    if tz2 ~= nil then
-                                        local dz = tz2 - rz
-                                        if dz ~= 0 then
-                                            if sharedDz == nil then
-                                                sharedDz = dz
-                                            elseif sharedDz ~= dz then
-                                                consistent = false
-                                                break
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    if consistent and sharedDz ~= nil and sharedDz ~= 0 then
-                        local newZ = rz + sharedDz
-                        _.debug_echo(string.format(
-                            "handle_move: self-heal room %d z %d→%d (all horizontal neighbours at z+%d)\n",
-                            rnum, rz, newZ, sharedDz))
-                        _.set_room_coordinates(rnum, rx, ry, newZ, posCache)
-                    end
-                end
-            end
-
             _.apply_current_room_environment(rnum, info.terrain)
             if getRoomChar(rnum) == "#" then
                 _.apply_room_environment(rnum, "Inside")
@@ -778,6 +732,129 @@ local function handle_move(isLastInBatch)
                         local id         = getRoomIDbyHash(targetVnum)
                         if type(id) == "number" and id > 0 and getRoomName(id) then
                             connectExitStub(rnum, id, dir)
+                        end
+                    end
+                end
+            end
+
+            -- Placement corrections, strongest evidence first.
+            --
+            -- With the exits above written, this room's own exits are the best
+            -- account there is of where it belongs — every one of them names an
+            -- exact cell — so realign gets first say.  If it was placed by a
+            -- probe rather than a direction, this is the moment that shows up.
+            -- Declining is reads only, so the common case (already in the right
+            -- place) costs nothing measurable even on a large area.
+            --
+            -- Order matters as much as precedence.  Both z heuristics below
+            -- move this room without moving whatever was displaced along with
+            -- it, and realign identifies that group by which exits are already
+            -- consistent — so a z nudge landing first severs the group and
+            -- strands its members where nothing will ever look for them again.
+            local realigned = 0
+            if type(_.realign_displaced_room) == "function" then
+                realigned = _.realign_displaced_room(rnum, posCache, info) or 0
+            end
+
+            -- Elevation is the only thing here that knows an absolute answer:
+            -- surface terrain means the ground plane, and a sky room means so
+            -- many levels above it, neither of which depends on where any
+            -- neighbour thinks it is.  So it is still right when a room's entire
+            -- cluster is a level out — the one case realign cannot break, since
+            -- a displaced cluster agrees with itself and votes confidently for
+            -- the wrong z.
+            --
+            -- It runs after realign, not before, for the same reason the z
+            -- heuristics do: it moves one room and leaves whatever was displaced
+            -- alongside it behind, and realign identifies that group by which
+            -- exits are still consistent.  Going first would cut the group loose
+            -- and strand it.  Realign cannot land on the wrong plane in the
+            -- meantime — it discards candidates off the anchored one — so by the
+            -- time this runs it is usually a no-op, and where it is not, realign
+            -- had no majority to act on anyway.
+            local anchored, anchorZ = false, nil
+            if type(_.apply_elevation_anchor) == "function" then
+                anchored, anchorZ = _.apply_elevation_anchor(rnum, posCache, info)
+            end
+
+            -- The two fallbacks, for rooms whose exits could not decide: they
+            -- correct z alone, from one neighbour or from a shared offset.  Both
+            -- are guesses, so a room with a known plane retires them outright —
+            -- including one that was already on it, where the guess has nothing
+            -- to add and everything to undo.
+            if realigned == 0 and not anchored and anchorZ == nil then
+                -- Correct z-level for elevated/surface transitions on rooms that
+                -- were pre-created as placeholders at the wrong z.
+                local currEL = _.is_elevated_room_name(info.name)
+                local prevEL = _.is_elevated_room_name(map.prev_info.name or "")
+                if currEL ~= prevEL and type(map.prev_info.vnum) == "string"
+                    and not _.is_room_locked(rnum) then
+                    local prevID = getRoomIDbyHash(map.prev_info.vnum)
+                    if prevID > 0 then
+                        local px, py, pz = getRoomCoordinates(prevID)
+                        if pz ~= nil then
+                            local expectedZ = currEL and (pz + 1) or (pz - 1)
+                            local rx, ry, rz = getRoomCoordinates(rnum)
+                            if rz ~= expectedZ then
+                                _.set_room_coordinates(rnum, rx, ry, expectedZ, posCache)
+                            end
+                        end
+                    end
+                end
+
+                -- Self-heal: if this room is offset from every horizontal
+                -- neighbour by the same non-zero dz, snap this room onto their
+                -- shared z-plane.  This corrects rooms that were mis-placed by
+                -- the (now-fixed) forcedZ override, e.g. a "dense forest" room
+                -- at z=0 while its entire cluster lives at z=33.
+                -- Only runs when the room is not locked/pinned by the user.
+                if not _.is_room_locked(rnum) then
+                    local rx, ry, rz = getRoomCoordinates(rnum)
+                    if rx ~= nil and type(info.exits) == "table" then
+                        local sharedDz   = nil
+                        local consistent = true
+                        for dir, targetVnum in pairs(info.exits) do
+                            local shift = type(_.get_shift_for_exit_key) == "function"
+                                and _.get_shift_for_exit_key(dir) or nil
+                            if shift and _.is_horizontal_shift and _.is_horizontal_shift(shift) then
+                                local tid = type(targetVnum) == "string"
+                                    and getRoomIDbyHash(targetVnum) or nil
+                                if type(tid) == "number" and tid > 0 then
+                                    local ta = getRoomArea(tid)
+                                    if type(ta) == "number" and ta == currentAreaID then
+                                        local _tx, _ty, tz2 = getRoomCoordinates(tid)
+                                        if tz2 ~= nil then
+                                            local dz = tz2 - rz
+                                            -- A neighbour already on this plane
+                                            -- is not an abstention, it is a vote
+                                            -- against moving: "every horizontal
+                                            -- neighbour" has to mean every one.
+                                            -- Skipping dz == 0 let a single
+                                            -- displaced neighbour drag a
+                                            -- correctly placed room off its own
+                                            -- plane, which is how a stray room
+                                            -- one level up pulls its whole
+                                            -- cluster apart one arrival at a time.
+                                            if dz == 0 then
+                                                consistent = false
+                                                break
+                                            elseif sharedDz == nil then
+                                                sharedDz = dz
+                                            elseif sharedDz ~= dz then
+                                                consistent = false
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if consistent and sharedDz ~= nil and sharedDz ~= 0 then
+                            local newZ = rz + sharedDz
+                            _.debug_echo(string.format(
+                                "handle_move: self-heal room %d z %d→%d (all horizontal neighbours at z+%d)\n",
+                                rnum, rz, newZ, sharedDz))
+                            _.set_room_coordinates(rnum, rx, ry, newZ, posCache)
                         end
                     end
                 end
