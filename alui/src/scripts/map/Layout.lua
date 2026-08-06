@@ -1205,90 +1205,168 @@ end
 -- Public layout commands
 -- --------------------------------------------------------------------------
 
--- Shared bucketed report emitted at the end of normalize and recalculate.
--- selfLoopsRemoved: integer from _.strip_self_loop_exits
--- movedCount:       rooms repositioned by BFS
--- snapResult:       table returned by _.snap_vertical_pair
--- audit:            table returned by _.audit_layout_anomalies
--- dedupeResult: table returned by map.dedupe_area_by_hash (may be nil)
--- anchorResult:  table returned by _.apply_anchor_translation (may be nil)
-local function emit_repair_report(selfLoopsRemoved, movedCount, snapResult, audit, dedupeResult, anchorResult, overlapResult)
+-- Run fn under the lock policy the repair commands use: only the room the
+-- command started from counts as pinned, so an old pin elsewhere in the area
+-- cannot stop a repair from spreading outward.  With no anchor room there is
+-- nothing to make an exception for and real locks apply as usual.
+local function with_anchor_policy(anchorRoomID, fn)
+    if anchorRoomID == nil then return fn() end
+    return with_single_locked_anchor(anchorRoomID, fn)
+end
+
+-- Everything both layout commands do once their coordinates exist.
+--
+-- The two differ in one thing only: how the coordinates are produced.  Normalize
+-- corrects the ones already on the map, recalculate throws them away and derives
+-- new ones by walking out from the room you are standing in.  What has to happen
+-- afterwards is the same work on the same finished positions — and it used to be
+-- written out twice, which is how recalculate came to be missing two stages it
+-- has as much use for as normalize does.
+--
+-- `result` is the accumulating report table the caller's own stages have already
+-- written their counts into; the stages here add theirs and it is handed to
+-- emit_layout_report.
+--
+-- opts.anchorRoomID    the room the command started from, or nil.  Stages that
+--                      reposition against the existing layout run under
+--                      with_anchor_policy; the elevation pass deliberately does
+--                      not.  It moves whole groups rigidly, so nothing shifts
+--                      relative to the anchor and that policy has nothing left to
+--                      protect, while a real `map lock` does have something to
+--                      say about which plane its room sits on.  Which policy
+--                      applied used to depend on where a closure happened to end.
+-- opts.respectRealLocks  passed to the overlap pass by bulk runs that have no
+--                      single anchor to pin instead.
+-- opts.audit           false to skip the anomaly audit, for callers that report
+--                      cross-area totals and would otherwise pay an O(area) walk
+--                      per area for numbers they never print.
+function _.finish_layout_repair(areaID, posCache, result, opts)
+    opts   = opts or {}
+    result = result or {}
+    local anchorRoomID = opts.anchorRoomID
+
+    with_anchor_policy(anchorRoomID, function()
+        -- Snap in-area up/down room pairs to adjacent z-levels.
+        result.snap = _.snap_vertical_pair(areaID, posCache)
+
+        -- Align sub-graphs to the game's coordinate frame using the
+        -- user_data.coord values stored during room capture.  x/y only, so it
+        -- cannot undo the elevation pass below.
+        result.anchor = _.apply_anchor_translation(areaID, posCache)
+    end)
+
+    -- Put groups of rooms on the z-plane their own terrain and names say they
+    -- belong on.  This is the only absolute statement about height in either
+    -- command: everything above derives z by adding a walked shift to the room
+    -- it came from, so without this an area keeps whatever plane it was first
+    -- mapped onto.
+    result.elevation = _.apply_elevation_planes(areaID, posCache)
+
+    -- Separate distinct rooms that ended up on the same cell.  Not wrapped: it
+    -- takes the anchor room directly and consults lock flags only when asked to.
+    result.overlap = _.resolve_room_overlaps(areaID, posCache, nil,
+        anchorRoomID, opts.respectRealLocks)
+
+    if opts.audit ~= false then
+        local freshRooms = getAreaRooms(areaID)
+        result.audit = _.audit_layout_anomalies(
+            type(freshRooms) == "table" and freshRooms or {}, areaID)
+    end
+    return result
+end
+
+local function plural(n, word)
+    if n == 1 then return word end
+    if word:sub(-2) == "ch" then return word .. "es" end
+    return word .. "s"
+end
+
+local function count(n, word, tail)
+    return n .. " " .. plural(n, word) .. (tail and (" " .. tail) or "")
+end
+
+-- Shared bucketed report emitted at the end of normalize and recalculate, in
+-- pipeline order.  `result` is the table _.finish_layout_repair fills in; a
+-- caller that never ran a stage simply leaves its field nil and the stage is
+-- not mentioned.  result.headline, when set, becomes the leading sentence and
+-- the rest is parenthesised after it.
+local function emit_layout_report(result)
     local parts = {}
-    if selfLoopsRemoved > 0 then
-        parts[#parts + 1] = selfLoopsRemoved
-            .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
+    local function add(s) parts[#parts + 1] = s end
+    local function tally(n, word, tail)
+        if (tonumber(n) or 0) > 0 then add(count(n, word, tail)) end
     end
-    if dedupeResult and dedupeResult.removed > 0 then
-        parts[#parts + 1] = dedupeResult.removed
-            .. " duplicate room" .. (dedupeResult.removed == 1 and "" or "s") .. " merged"
+
+    tally(result.self_loops, "self-loop exit", "removed")
+
+    local merge = result.area_merge
+    if merge and (merge.merged_areas or 0) > 0 then
+        add(count(merge.merged_areas, "duplicate area", "merged by area-vnum"))
+        local targetLabel = nil
+        if type(merge.target_area_name) == "string" and merge.target_area_name ~= "" then
+            targetLabel = "'" .. merge.target_area_name .. "'"
+        elseif type(merge.target_area_id) == "number" then
+            targetLabel = "area #" .. tostring(merge.target_area_id)
+        end
+        add(count(merge.moved_rooms, "room",
+            "moved into " .. (targetLabel or "the target area")))
+        tally(merge.removed_areas, "empty area", "removed")
     end
-    if dedupeResult and dedupeResult.skipped > 0 then
-        parts[#parts + 1] = dedupeResult.skipped
-            .. " duplicate group" .. (dedupeResult.skipped == 1 and "" or "s")
-            .. " skipped (all locked)"
+
+    if result.dedupe then
+        tally(result.dedupe.removed, "duplicate room", "merged")
+        tally(result.dedupe.skipped, "duplicate group", "skipped (all locked)")
     end
-    if movedCount > 0 then
-        parts[#parts + 1] = movedCount
-            .. " room" .. (movedCount == 1 and "" or "s") .. " repositioned"
+
+    tally(result.moved, "room", "repositioned")
+    if (tonumber(result.nudged) or 0) > 0 then
+        add(result.nudged .. " nudged to avoid overlap")
     end
-    if snapResult.snapped > 0 then
-        parts[#parts + 1] = snapResult.snapped
-            .. " vertical pair" .. (snapResult.snapped == 1 and "" or "s") .. " snapped"
+    tally(result.placeholders_removed, "placeholder", "removed")
+
+    if result.snap then
+        tally(result.snap.snapped, "vertical pair", "snapped")
+        tally(result.snap.blocked, "vertical snap", "blocked by occupant")
+        tally(result.snap.shared_target_bug, "shared-target bug",
+            "(in-area duplicate exit, data issue)")
     end
-    if snapResult.blocked > 0 then
-        parts[#parts + 1] = snapResult.blocked
-            .. " vertical snap" .. (snapResult.blocked == 1 and "" or "s") .. " blocked by occupant"
+
+    if result.anchor then
+        tally(result.anchor.translated, "sub-graph", "aligned to game coords")
+        tally(result.anchor.unanchored_subgraphs, "sub-graph", "unanchored (no coord data)")
+        tally(result.anchor.anchor_disagreements, "anchor disagreement",
+            "(picked lowest-id anchor)")
+        tally(result.anchor.skipped, "sub-graph", "not translated (locked room or collision)")
     end
-    if snapResult.shared_target_bug > 0 then
-        parts[#parts + 1] = snapResult.shared_target_bug
-            .. " shared-target bug" .. (snapResult.shared_target_bug == 1 and "" or "s")
-            .. " (in-area duplicate exit — data issue)"
+
+    if result.elevation then
+        if (result.elevation.rooms_shifted or 0) > 0 then
+            add(count(result.elevation.rooms_shifted, "room", "moved onto their elevation in "
+                .. count(result.elevation.shifted, "group")))
+        end
+        tally(result.elevation.anchored, "room", "elevated individually")
+        tally(result.elevation.blocked, "elevation group",
+            "blocked (locked room or occupied plane)")
     end
-    if anchorResult and anchorResult.translated > 0 then
-        parts[#parts + 1] = anchorResult.translated
-            .. " sub-graph" .. (anchorResult.translated == 1 and "" or "s")
-            .. " aligned to game coords"
+
+    if result.overlap then
+        tally(result.overlap.separated, "overlapping room", "separated")
     end
-    if anchorResult and anchorResult.unanchored_subgraphs > 0 then
-        parts[#parts + 1] = anchorResult.unanchored_subgraphs
-            .. " sub-graph" .. (anchorResult.unanchored_subgraphs == 1 and "" or "s")
-            .. " unanchored (no coord data)"
+
+    if result.audit then
+        tally(result.audit.duplicate_hash_rooms, "duplicate-hash room",
+            "remaining (re-enter to merge)")
+        tally(result.audit.overlapping_rooms, "overlapping room",
+            "remaining (no free cell / all locked)")
+        tally(result.audit.delta_mismatches, "delta mismatch",
+            "remaining (cyclic or unfixable)")
+        tally(result.audit.vertical_drift, "vertical drift", "remaining")
     end
-    if anchorResult and anchorResult.anchor_disagreements > 0 then
-        parts[#parts + 1] = anchorResult.anchor_disagreements
-            .. " anchor disagreement" .. (anchorResult.anchor_disagreements == 1 and "" or "s")
-            .. " (picked lowest-id anchor)"
-    end
-    if anchorResult and anchorResult.skipped > 0 then
-        parts[#parts + 1] = anchorResult.skipped
-            .. " sub-graph" .. (anchorResult.skipped == 1 and "" or "s")
-            .. " not translated (locked room or collision)"
-    end
-    if overlapResult and overlapResult.separated > 0 then
-        parts[#parts + 1] = overlapResult.separated
-            .. " overlapping room" .. (overlapResult.separated == 1 and "" or "s")
-            .. " separated"
-    end
-    if audit.duplicate_hash_rooms > 0 then
-        parts[#parts + 1] = audit.duplicate_hash_rooms
-            .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
-            .. " remaining (re-enter to merge)"
-    end
-    if audit.overlapping_rooms > 0 then
-        parts[#parts + 1] = audit.overlapping_rooms
-            .. " overlapping room" .. (audit.overlapping_rooms == 1 and "" or "s")
-            .. " remaining (no free cell / all locked)"
-    end
-    if audit.delta_mismatches > 0 then
-        parts[#parts + 1] = audit.delta_mismatches
-            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "es")
-            .. " remaining (cyclic or unfixable)"
-    end
-    if audit.vertical_drift > 0 then
-        parts[#parts + 1] = audit.vertical_drift
-            .. " vertical drift" .. (audit.vertical_drift == 1 and "" or "s") .. " remaining"
-    end
-    if #parts == 0 then
+
+    if result.headline then
+        echo(result.headline
+            .. (#parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or "") .. ".\n")
+    elseif #parts == 0 then
         echo("No changes needed.\n")
     else
         echo(table.concat(parts, ", ") .. ".\n")
@@ -1370,30 +1448,36 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         maxMoves = _.scaled_reconcile_move_cap(#areaRooms, maxPasses, maxMoves)
     end
 
-    -- 1. Strip self-loop exits before BFS so the reconcile doesn't follow them.
-    local selfLoopsRemoved = _.strip_self_loop_exits(areaRooms)
+    -- Strip self-loop exits before BFS so the reconcile doesn't follow them.
+    local result = { self_loops = _.strip_self_loop_exits(areaRooms) }
 
-    -- One position cache for the whole command.  Steps 2-6 below all need
-    -- occupancy for this area, and each of them used to build its own — an
-    -- O(area) getRoomCoordinates walk apiece.  Every step mutates the cache in
-    -- place as it moves or deletes rooms (set_room_coordinates mirrors moves;
-    -- delete sites drop via pos_cache_drop), so one build stays correct for all
-    -- of them.  Declared out here because step 6 runs after the pipeline closure
-    -- returns.
+    -- Only pin the room the command started from when it is actually in the
+    -- area being worked on; otherwise there is nothing to make an exception for
+    -- and real locks apply.  Shared by the middle below and the tail after it.
+    local anchorRoomID = (currentRoomID and getRoomArea(currentRoomID) == areaID)
+        and currentRoomID or nil
+
+    -- One position cache for the whole command.  Every stage needs occupancy for
+    -- this area, and each used to build its own — an O(area) getRoomCoordinates
+    -- walk apiece.  Every stage mutates the cache in place as it moves or deletes
+    -- rooms (set_room_coordinates mirrors moves; delete sites drop via
+    -- pos_cache_drop), so one build stays correct for all of them.  Declared out
+    -- here because the tail runs after the closure returns.
     local posCache
 
-    local function run_normalize_pipeline()
-        -- 2. De-duplicate rooms that share the same hash.
-        --    This must run before reconcile because duplicate stubs cause phantom
-        --    occupancy that blocks _.reconcile_connected_rooms from moving rooms.
+    -- Normalize's middle: correct the coordinates that are already on the map.
+    local function run_normalize_middle()
+        -- De-duplicate rooms that share the same hash.  This must run before
+        -- reconcile because duplicate stubs cause phantom occupancy that blocks
+        -- _.reconcile_connected_rooms from moving rooms.
         posCache = _.build_pos_cache(areaID)
-        local dedupeResult = map.dedupe_area_by_hash(areaID, posCache)
+        result.dedupe = map.dedupe_area_by_hash(areaID, posCache)
         -- Refresh room list after potential deletes
         areaRooms = getAreaRooms(areaID)
         if type(areaRooms) ~= "table" then areaRooms = {} end
 
-        -- 3. Reconcile: BFS-move rooms to match their exits' expected deltas.
-        --    Threading posCache also stops each seed below from rebuilding it.
+        -- Reconcile: BFS-move rooms to match their exits' expected deltas.
+        -- Threading posCache also stops each seed below from rebuilding it.
         local moved = 0
         if allRooms then
             echo("Normalising all subgraphs in '" .. areaName_display .. "'...\n")
@@ -1412,42 +1496,23 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
             local seedID = currentRoomID and currentRoomID or find_best_seed(areaID)
             if not seedID then
                 echo("Cannot normalise: no rooms with exits found in '" .. areaName_display .. "'.\n")
-                return nil, nil, nil
+                return false
             end
             echo("Normalising '" .. areaName_display .. "'...\n")
             moved = _.reconcile_connected_rooms(seedID, maxPasses, maxMoves, nil, nil, posCache)
             _.flatten_cardinal_connected_rooms(seedID, posCache)
         end
 
-        -- 4. Snap in-area up/down room pairs to adjacent z-levels.
-        local snapResult = _.snap_vertical_pair(areaID, posCache)
-
-        -- 5. Anchor translate: align sub-graphs to game coordinate frame using
-        --    user_data.coord values present on captured rooms.
-        local anchorResult = _.apply_anchor_translation(areaID, posCache)
-
-        return dedupeResult, moved, snapResult, anchorResult
+        result.moved = moved
+        return true
     end
 
-    local dedupeResult, moved, snapResult, anchorResult
-    if currentRoomID and getRoomArea(currentRoomID) == areaID then
-        dedupeResult, moved, snapResult, anchorResult = with_single_locked_anchor(currentRoomID, run_normalize_pipeline)
-    else
-        dedupeResult, moved, snapResult, anchorResult = run_normalize_pipeline()
-    end
-    if not dedupeResult then return end
+    if not with_anchor_policy(anchorRoomID, run_normalize_middle) then return end
 
-    -- 6. Separate distinct rooms that landed on the same cell.  Only the
-    --    room the normalize started from (if any) is treated as immovable
-    --    here, matching the rest of the pipeline.
-    local overlapResult = _.resolve_room_overlaps(areaID, posCache, nil, currentRoomID)
-
-    -- 7. Audit remaining anomalies in the (now-updated) area.
-    local freshRooms = getAreaRooms(areaID)
-    local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
+    _.finish_layout_repair(areaID, posCache, result, { anchorRoomID = anchorRoomID })
 
     updateMap()
-    emit_repair_report(selfLoopsRemoved, moved or 0, snapResult, audit, dedupeResult, anchorResult, overlapResult)
+    emit_layout_report(result)
 end
 
 function map.normalize_all_areas(maxPasses, maxMoves)
@@ -1466,6 +1531,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     local totalMoved      = 0
     local totalSnapped    = 0
     local totalTranslated = 0
+    local totalElevated   = 0
     local totalSeparated  = 0
     local areaCount       = 0
     local areaNames      = {}
@@ -1498,14 +1564,18 @@ function map.normalize_all_areas(maxPasses, maxMoves)
                     totalMoved = totalMoved + (subMoved or 0)
                 end
             end
-            local snapResult = _.snap_vertical_pair(id, posCache)
-            totalSnapped = totalSnapped + snapResult.snapped
-            local anchorResult = _.apply_anchor_translation(id, posCache)
-            totalTranslated = totalTranslated + (anchorResult.translated or 0)
-            -- No single "current room" anchor across a bulk all-areas pass,
-            -- so fall back to respecting real lock flags as before.
-            local overlapResult = _.resolve_room_overlaps(id, posCache, nil, nil, true)
-            totalSeparated = totalSeparated + (overlapResult.separated or 0)
+
+            -- Same tail as the single-area command.  No "current room" anchor
+            -- across a bulk pass, so real lock flags are respected as before;
+            -- the audit is skipped because only cross-area totals are printed
+            -- and it would be an O(area) walk per area for numbers never shown.
+            local r = _.finish_layout_repair(id, posCache, {},
+                { respectRealLocks = true, audit = false })
+            totalSnapped    = totalSnapped + (r.snap.snapped or 0)
+            totalTranslated = totalTranslated + (r.anchor.translated or 0)
+            totalElevated   = totalElevated
+                + (r.elevation.rooms_shifted or 0) + (r.elevation.anchored or 0)
+            totalSeparated  = totalSeparated + (r.overlap.separated or 0)
             areaCount    = areaCount + 1
         end
     end
@@ -1529,6 +1599,10 @@ function map.normalize_all_areas(maxPasses, maxMoves)
         parts[#parts + 1] = totalTranslated
             .. " sub-graph" .. (totalTranslated == 1 and "" or "s")
             .. " aligned to game coords"
+    end
+    if totalElevated > 0 then
+        parts[#parts + 1] = totalElevated
+            .. " room" .. (totalElevated == 1 and "" or "s") .. " moved onto their elevation"
     end
     if totalSeparated > 0 then
         parts[#parts + 1] = totalSeparated
@@ -1564,18 +1638,44 @@ function map.recalculate_room_layout()
         return
     end
 
+    local areaRooms = getAreaRooms(areaID)
+
+    -- Refuse rather than truncate.  The BFS below is single-pass and derives
+    -- every coordinate from the seed outward, so stopping part way does not
+    -- leave the area half-repaired — it leaves it half-rebuilt, with the rooms
+    -- it reached in the seed's frame and everything else still in the old one,
+    -- and the seam between them is a delta mismatch at every crossing.  That is
+    -- strictly worse than never having run, and the stages after the BFS then
+    -- run over the whole area and bake the split in.
+    local maxRooms = tonumber(map.configs.recalculate_max_rooms) or 200000
+    local roomCount = type(areaRooms) == "table" and #areaRooms or 0
+    if roomCount > maxRooms then
+        local areaLabel = _.get_area_name_by_id(areaID) or ("area #" .. tostring(areaID))
+        cecho(string.format(
+            "<yellow>Cannot recalculate: '%s' has %d rooms, above the %d this command "
+            .. "can rebuild in one pass. A partial rebuild would split the area across "
+            .. "two coordinate frames, which is worse than leaving it alone.\n"
+            .. "Use 'map normalize' here — it repairs incrementally and can be run "
+            .. "repeatedly — or split the area into smaller ones first.\n<reset>",
+            areaLabel, roomCount, maxRooms))
+        return
+    end
+
     -- Strip self-loop exits so BFS does not traverse them.
-    local areaRooms        = getAreaRooms(areaID)
-    local selfLoopsRemoved = type(areaRooms) == "table" and _.strip_self_loop_exits(areaRooms) or 0
+    local result    = {
+        self_loops = type(areaRooms) == "table" and _.strip_self_loop_exits(areaRooms) or 0,
+        area_merge = areaMergeResult,
+    }
 
     -- Only the room the recalculation starts from is pinned; any other room
     -- (locked or not) may be repositioned so the BFS can rebuild the whole
     -- area consistently outward from here. Mirrors map normalize's anchor
     -- behaviour (see with_single_locked_anchor above).
     local movedCount, nudgeCount, deletedPlaceholderCount = 0, 0, 0
-    local snapResult
 
-    local function run_recalculate_pipeline()
+    -- Recalculate's middle: throw the existing coordinates away and derive new
+    -- ones by walking out from the seed.
+    local function run_recalculate_middle()
     -- FIFO queue: each entry carries the position it was placed at. z comes
     -- purely from accumulated exit deltas (see the shift[3] below) — there is
     -- no name-based underground/elevated auto z-split. That heuristic used to
@@ -1591,12 +1691,16 @@ function map.recalculate_room_layout()
 
     -- Build a reverse lookup: roomID → { x, y, z } for the post-BFS placeholder cleanup.
     local roomPositions = { [seedID] = { x = sx, y = sy, z = sz } }
-    local MAX_BFS_ROOMS = 200000 -- safety cap; prevents indefinite freeze on huge areas
+    -- Backstop only.  The area-size check above is what actually keeps a rebuild
+    -- from truncating; this catches a queue that grows past the room count
+    -- anyway, which would mean the exit graph is feeding the BFS rooms it has
+    -- already placed and something is badly wrong with the data.
+    local MAX_BFS_ROOMS = maxRooms
 
     while qHead <= #queue do
         if qHead > MAX_BFS_ROOMS then
-            echo("[map recalculate] BFS capped at " .. MAX_BFS_ROOMS
-                .. " rooms — area may be too large for a single pass.\n")
+            echo("[map recalculate] BFS exceeded " .. MAX_BFS_ROOMS
+                .. " rooms and was stopped; the area layout is left partly rebuilt.\n")
             break
         end
         local entry = queue[qHead]
@@ -1716,76 +1820,27 @@ function map.recalculate_room_layout()
         end
     end
 
-    -- Snap in-area up/down pairs that BFS may not have aligned (e.g. rooms
-    -- unreachable from the seed, or sky rooms first reached via horizontal paths).
-    snapResult = _.snap_vertical_pair(areaID)
-    end -- run_recalculate_pipeline
+    end -- run_recalculate_middle
 
-    with_single_locked_anchor(seedID, run_recalculate_pipeline)
+    with_single_locked_anchor(seedID, run_recalculate_middle)
 
-    -- Audit remaining anomalies in the final state.
-    local freshRooms = getAreaRooms(areaID)
-    local audit = _.audit_layout_anomalies(type(freshRooms) == "table" and freshRooms or {}, areaID)
+    -- The repositioned count is the headline rather than one clause among many,
+    -- which is how this command has always announced itself; result.moved is
+    -- left unset so it is not also listed inside the parentheses.
+    result.nudged               = nudgeCount
+    result.placeholders_removed = deletedPlaceholderCount
+    result.headline             = "Topology recalculation repositioned "
+        .. count(movedCount, "room")
+
+    -- The BFS above writes coordinates through no cache of its own (occupancy
+    -- lives in its `occupied` table), so the tail builds one over the finished
+    -- positions.  The elevation pass inside it is what stops the rebuild from
+    -- inheriting whatever plane the seed happened to be sitting on: every other
+    -- z here is the seed's plus a walked shift, and one pass has no second
+    -- chance to notice that the starting point was wrong.
+    local posCache = _.build_pos_cache(areaID)
+    _.finish_layout_repair(areaID, posCache, result, { anchorRoomID = seedID })
 
     updateMap()
-    local msg = "Topology recalculation repositioned " .. movedCount ..
-        " room" .. (movedCount == 1 and "" or "s")
-    local details = {}
-    if selfLoopsRemoved > 0 then
-        details[#details + 1] = selfLoopsRemoved
-            .. " self-loop exit" .. (selfLoopsRemoved == 1 and "" or "s") .. " removed"
-    end
-    if areaMergeResult and areaMergeResult.merged_areas > 0 then
-        details[#details + 1] = areaMergeResult.merged_areas
-            .. " duplicate area" .. (areaMergeResult.merged_areas == 1 and "" or "s")
-            .. " merged by area-vnum"
-        local targetLabel = nil
-        if type(areaMergeResult.target_area_name) == "string" and areaMergeResult.target_area_name ~= "" then
-            targetLabel = "'" .. areaMergeResult.target_area_name .. "'"
-        elseif type(areaMergeResult.target_area_id) == "number" then
-            targetLabel = "area #" .. tostring(areaMergeResult.target_area_id)
-        end
-        details[#details + 1] = areaMergeResult.moved_rooms
-            .. " room" .. (areaMergeResult.moved_rooms == 1 and "" or "s")
-            .. " moved into " .. (targetLabel or "the target area")
-        if areaMergeResult.removed_areas and areaMergeResult.removed_areas > 0 then
-            details[#details + 1] = areaMergeResult.removed_areas
-                .. " empty area" .. (areaMergeResult.removed_areas == 1 and "" or "s")
-                .. " removed"
-        end
-    end
-    if nudgeCount > 0 then
-        details[#details + 1] = nudgeCount .. " nudged to avoid overlap"
-    end
-    if deletedPlaceholderCount > 0 then
-        details[#details + 1] = deletedPlaceholderCount
-            .. " placeholder" .. (deletedPlaceholderCount == 1 and "" or "s") .. " removed"
-    end
-    if snapResult.snapped > 0 then
-        details[#details + 1] = snapResult.snapped
-            .. " vertical pair" .. (snapResult.snapped == 1 and "" or "s") .. " snapped"
-    end
-    if snapResult.blocked > 0 then
-        details[#details + 1] = snapResult.blocked
-            .. " vertical snap" .. (snapResult.blocked == 1 and "" or "s") .. " blocked"
-    end
-    if snapResult.shared_target_bug > 0 then
-        details[#details + 1] = snapResult.shared_target_bug
-            .. " shared-target bug" .. (snapResult.shared_target_bug == 1 and "" or "s")
-            .. " (data issue)"
-    end
-    if audit.duplicate_hash_rooms > 0 then
-        details[#details + 1] = audit.duplicate_hash_rooms
-            .. " duplicate-hash room" .. (audit.duplicate_hash_rooms == 1 and "" or "s")
-            .. " (re-enter to merge)"
-    end
-    if audit.delta_mismatches > 0 then
-        details[#details + 1] = audit.delta_mismatches
-            .. " delta mismatch" .. (audit.delta_mismatches == 1 and "" or "es")
-            .. " remaining"
-    end
-    if #details > 0 then
-        msg = msg .. " (" .. table.concat(details, ", ") .. ")"
-    end
-    echo(msg .. ".\n")
+    emit_layout_report(result)
 end

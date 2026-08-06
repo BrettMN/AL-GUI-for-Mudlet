@@ -112,6 +112,21 @@ map.configs.sky_max_level = map.configs.sky_max_level or 3
 -- altitude, so a sky room's neighbours are at its level — this is what anchors
 -- the interior of a sky layer, where only the edges have `down` exits.
 map.configs.sky_altitude_search = map.configs.sky_altitude_search or 16
+-- When a whole group cannot be lifted onto its plane in one piece, the rooms in
+-- it may instead be offered to the single-room anchor — but only up to this many.
+-- That fallback exists for one narrow case: a stacked sky column whose top room
+-- is standing on the cell the one below it needs, which the single-room path
+-- resolves by climbing the column.  Applied to a group of any real size it does
+-- the opposite of a repair, moving the rooms that happen to know their own
+-- height and stranding every room that does not, one at a time, until the frame
+-- is shredded.  A blocked group bigger than this is left exactly as it is.
+map.configs.elevation_max_single_group = map.configs.elevation_max_single_group or 32
+-- Hard ceiling on `map recalculate`.  Its BFS is single-pass and rebuilds every
+-- coordinate from the seed outward, so a run that stops early does not leave the
+-- area half-repaired — it leaves it half-rebuilt, with the rebuilt part in one
+-- frame and the rest in another, which is far worse than not having run at all.
+-- Above this the command refuses rather than truncating.
+map.configs.recalculate_max_rooms = map.configs.recalculate_max_rooms or 200000
 
 -- Areas with at least this many rooms get no per-area hash/name index (see the
 -- "Per-area room index" section in Helpers.lua).  That index is built once and

@@ -1523,8 +1523,13 @@ function _.anchor_z_for_room(roomID, info)
     -- list of terrains that sit on the ground, and every one of them maps to 0.
     local terrain = _.normalize_terrain_name(type(info) == "table" and info.terrain or nil)
     if terrain == nil then
+        -- Normalised on the way back out as well as in: the whole-area pass
+        -- reads rooms stored by older versions of the mapper, which did not
+        -- always canonicalise before writing.
         local stored = getRoomUserData(roomID, "terrain")
-        if type(stored) == "string" and stored ~= "" then terrain = stored end
+        if type(stored) == "string" and stored ~= "" then
+            terrain = _.normalize_terrain_name(stored) or stored
+        end
     end
     if terrain ~= nil then
         local z = _.forced_z_by_terrain_name[terrain]
@@ -2472,12 +2477,21 @@ local function bfs_component(seedID, areaID, visited)
     return component
 end
 
--- Translate every room in `component` by (dx, dy), skipping immobile rooms.
+-- Translate every room in `component` by (dx, dy, dz), skipping immobile rooms.
 -- Returns true if the full translation was applied, false if any immobile
 -- room would need to move (in that case NO rooms are moved).
 -- posCache is updated for each move.
-function _.translate_subgraph(component, dx, dy, posCache)
-    if dx == 0 and dy == 0 then return true end
+--
+-- dz defaults to 0, so the x/y callers that predate it are unaffected.
+-- immobileFn overrides what counts as immobile, and exists for the elevation
+-- pass: pinning a room says where it sits relative to its neighbours, and a
+-- rigid translation does not disturb that — it moves the frame, not the room
+-- within it.  A caller that supplies one has taken over the decision entirely
+-- and is responsible for whatever it chooses to ignore.
+function _.translate_subgraph(component, dx, dy, posCache, dz, immobileFn)
+    dz = tonumber(dz) or 0
+    if dx == 0 and dy == 0 and dz == 0 then return true end
+    local immobile = type(immobileFn) == "function" and immobileFn or _.is_room_immobile
 
     -- Check that no immobile room needs to move AND preflight collision check.
     -- We allow collisions WITHIN this component (they'll move away together).
@@ -2487,13 +2501,13 @@ function _.translate_subgraph(component, dx, dy, posCache)
     for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
         if rx == nil then return false end  -- room has no coords, abort
-        local nx, ny = rx + dx, ry + dy
-        if _.is_room_immobile(rid) and (nx ~= rx or ny ~= ry) then
+        local nx, ny, nz = rx + dx, ry + dy, rz + dz
+        if immobile(rid) and (nx ~= rx or ny ~= ry or nz ~= rz) then
             return false  -- all-or-nothing: an immobile room blocks the whole translate
         end
         -- Preflight collision: is the destination occupied by a room NOT in this component?
         if posCache then
-            local occupants = _.pos_cache_get(posCache, nx, ny, rz)
+            local occupants = _.pos_cache_get(posCache, nx, ny, nz)
             if type(occupants) == "table" then
                 for _j, oid in ipairs(occupants) do
                     if not componentSet[oid] then
@@ -2508,7 +2522,7 @@ function _.translate_subgraph(component, dx, dy, posCache)
     for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
         if rx ~= nil then
-            _.set_room_coordinates(rid, rx + dx, ry + dy, rz, posCache)
+            _.set_room_coordinates(rid, rx + dx, ry + dy, rz + dz, posCache)
         end
     end
     return true
@@ -2578,6 +2592,149 @@ function _.apply_anchor_translation(areaID, posCache)
                             result.translated = result.translated + 1
                         else
                             result.skipped = result.skipped + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+-- Put whole groups of rooms on the z-plane their own nature says they belong
+-- on: 0 for surface terrain, 1..sky_max_level for rooms in the air.  See
+-- _.anchor_z_for_room for what establishes a plane and _.sky_altitude for how
+-- an altitude is read without trusting a single coordinate.
+--
+-- This is the command-time counterpart of _.apply_elevation_anchor, which moves
+-- one room at a time.  Per-arrival that is the right shape: the room the player
+-- just walked into is the only one anything new is known about, and a layer
+-- repairs itself as it is flown through.  A command can see the whole area at
+-- once and should do better in one specific way — it must not leave a room
+-- behind merely because nothing about that room says how high it is.  An
+-- unnamed cave mouth between two anchored rooms has no plane of its own, but it
+-- certainly belongs with its neighbours.
+--
+-- So every room in a component is given a correction dz: from its own anchor
+-- where it has one, otherwise borrowed from the nearest room that does (a
+-- multi-source BFS, seeded in id order so a room equidistant from two
+-- disagreeing anchors does not pick one by Mudlet's exit iteration order).
+-- Rooms sharing a correction then move as one rigid group, which preserves
+-- every offset inside it — the frame moves, not the rooms within the frame.
+-- In the ordinary case a whole component agrees on one correction and the pass
+-- is a single translation; two corrections mean the component spans a seam
+-- between frames, and each side goes to its own plane.
+--
+-- A group holding a locked room is left entirely alone: the user pinned it, and
+-- moving everything around it is not a repair.  A group blocked instead by a
+-- room that is staying put falls back to the single-room anchor, which knows
+-- how to climb a stacked column out of its own way.
+--
+-- Returns { shifted, rooms_shifted, anchored, blocked }.
+function _.apply_elevation_planes(areaID, posCache)
+    local result = { shifted = 0, rooms_shifted = 0, anchored = 0, blocked = 0 }
+    if map.configs.anchor_elevation == false then return result end
+    if type(_.anchor_z_for_room) ~= "function" then return result end
+    if type(areaID) ~= "number" or areaID < 1 then return result end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then return result end
+
+    -- Locks are vetted per group below, so the translation itself has nothing
+    -- left to refuse.  In particular the player's room is not special here: a
+    -- rigid lift moves the ground under the player along with everything else.
+    local function never_immobile() return false end
+
+    local visited = {}
+    for _i = 1, #rooms do
+        local seedID = rooms[_i]
+        if not visited[seedID] then
+            local component = bfs_component(seedID, areaID, visited)
+
+            -- What each room says about itself, and where the spread starts.
+            local correction = {}
+            local seeds      = {}
+            for j = 1, #component do
+                local rid = component[j]
+                local anchorZ = _.anchor_z_for_room(rid)
+                if type(anchorZ) == "number" then
+                    local _rx, _ry, rz = getRoomCoordinates(rid)
+                    if rz ~= nil then
+                        correction[rid] = anchorZ - rz
+                        seeds[#seeds + 1] = rid
+                    end
+                end
+            end
+
+            if #seeds > 0 then
+                table.sort(seeds)
+                local queue, head = {}, 1
+                for j = 1, #seeds do queue[j] = seeds[j] end
+                while head <= #queue do
+                    local current = queue[head]
+                    head = head + 1
+                    local dz    = correction[current]
+                    local exits = getRoomExits(current)
+                    if type(exits) == "table" then
+                        for _dir, targetID in _.sorted_exit_pairs(exits) do
+                            if type(targetID) == "string" then targetID = tonumber(targetID) end
+                            if type(targetID) == "number" and targetID > 0
+                                and correction[targetID] == nil
+                                and getRoomArea(targetID) == areaID
+                                and getRoomCoordinates(targetID) ~= nil then
+                                correction[targetID] = dz
+                                queue[#queue + 1] = targetID
+                            end
+                        end
+                    end
+                end
+
+                local groups = {}
+                for rid, dz in pairs(correction) do
+                    if dz ~= 0 then
+                        local g = groups[dz]
+                        if g == nil then g = {}; groups[dz] = g end
+                        g[#g + 1] = rid
+                    end
+                end
+
+                -- Largest lift first, and each group in id order, so a run over
+                -- the same map twice makes the same moves in the same sequence.
+                local corrections = {}
+                for dz in pairs(groups) do corrections[#corrections + 1] = dz end
+                table.sort(corrections, function(a, b) return a > b end)
+
+                for k = 1, #corrections do
+                    local dz    = corrections[k]
+                    local group = groups[dz]
+                    table.sort(group)
+
+                    local locked = false
+                    for j = 1, #group do
+                        if _.is_room_locked(group[j]) then locked = true; break end
+                    end
+
+                    if locked then
+                        result.blocked = result.blocked + 1
+                    elseif _.translate_subgraph(group, 0, 0, posCache, dz, never_immobile) then
+                        result.shifted       = result.shifted + 1
+                        result.rooms_shifted = result.rooms_shifted + #group
+                    else
+                        result.blocked = result.blocked + 1
+                        -- Offering the rooms to the single-room anchor is only
+                        -- sane for a group small enough that moving its members
+                        -- one at a time cannot tear a frame apart.  That path
+                        -- moves exactly the rooms that know their own height and
+                        -- leaves behind every room that does not, so on a large
+                        -- group it converts one blocked lift into thousands of
+                        -- stranded rooms.  See elevation_max_single_group.
+                        local singleCap = tonumber(map.configs.elevation_max_single_group) or 32
+                        if #group <= singleCap and type(_.apply_elevation_anchor) == "function" then
+                            for j = 1, #group do
+                                if _.apply_elevation_anchor(group[j], posCache) then
+                                    result.anchored = result.anchored + 1
+                                end
+                            end
                         end
                     end
                 end
