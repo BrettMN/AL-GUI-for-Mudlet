@@ -325,8 +325,10 @@ local function dragHorizontal(edge, event)
 
     local leftBorderPct = tonumber(layout.leftBorderPercent) or sideBorderPercent
     local rightBorderPct = tonumber(layout.rightBorderPercent) or sideBorderPercent
-    local leftBorderPx = (windowWidth * (leftBorderPct / 100)) + mainWindowPadding
-    local rightBorderPx = (windowWidth * (rightBorderPct / 100)) + mainWindowPadding
+    -- Continue from the size actually on screen (which setBackground may have
+    -- clamped) so the panel does not jump on the first drag pixel.
+    local leftBorderPx = tonumber(layout.leftBorderPx) or ((windowWidth * (leftBorderPct / 100)) + mainWindowPadding)
+    local rightBorderPx = tonumber(layout.rightBorderPx) or ((windowWidth * (rightBorderPct / 100)) + mainWindowPadding)
 
     local delta = event.globalX - (drag.lastGlobalX or event.globalX)
     if delta == 0 then
@@ -545,12 +547,16 @@ local function setBackground()
     local maxRightPx = math.max(minSidePx, width - leftBorderPx - minCenterPx)
     rightBorderPx = clamp(rightBorderPx, minSidePx, maxRightPx)
 
+    -- Only the pixel values are stored. Writing the clamped size back into
+    -- leftBorderPercent/rightBorderPercent would make shrinking the window
+    -- permanently shrink the panels: the clamped ratio becomes the new desired
+    -- ratio, so growing the window back never restores the original layout.
     layout.leftBorderPx = leftBorderPx
     layout.rightBorderPx = rightBorderPx
-    layout.leftBorderPercent = ((leftBorderPx - mainWindowPadding) / width) * 100
-    layout.rightBorderPercent = ((rightBorderPx - mainWindowPadding) / width) * 100
 
     local topBorderPx = (height * (topBorderPercent / 100)) + mainWindowPadding
+    layout.topBorderPx = topBorderPx
+    layout.mainWindowPadding = mainWindowPadding
     local centerWidthPx = math.max(1, width - leftBorderPx - rightBorderPx)
 
     local palette = getActiveThemePalette()

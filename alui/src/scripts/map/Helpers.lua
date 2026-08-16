@@ -2878,7 +2878,7 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
     if not targetNamed then
         local bestNamedID = nil
         local bestNamedRooms = -1
-        for _, id in ipairs(duplicateAreaIDs) do
+        for _idx, id in ipairs(duplicateAreaIDs) do
             local areaName = _.get_area_name_by_id(id)
             if is_meaningful_area_name(areaName) then
                 local roomCount = get_area_room_count(id)
@@ -2939,12 +2939,12 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
         return deleted
     end
 
-    for _, id in ipairs(duplicateAreaIDs) do
+    for _idx, id in ipairs(duplicateAreaIDs) do
         if id ~= targetAreaID then
             local otherRooms = getAreaRooms(id)
             local movedThisArea = 0
             if type(otherRooms) == "table" and #otherRooms > 0 then
-                for _, rid in ipairs(otherRooms) do
+                for _ridx, rid in ipairs(otherRooms) do
                     if getRoomArea(rid) ~= targetAreaID then
                         _.set_room_area(rid, targetAreaID)
                         movedThisArea = movedThisArea + 1

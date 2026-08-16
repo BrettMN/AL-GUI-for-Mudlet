@@ -1,7 +1,6 @@
 local profileName = getProfileName()
 
 local RESIZE_TIMER_DELAY = 0.1
-local RESIZE_MIN_INTERVAL = 0.05
 
 ALUI = ALUI or {}
 ALUI.GUI = ALUI.GUI or {}
@@ -36,23 +35,27 @@ local function runResizeOperations()
         return
     end
 
-    if GUI.setBorders then
-        GUI.setBorders()
-    end
+    -- setBackground() normalizes and clamps GUI.Layout for the new window size,
+    -- so it must run before setBorders() consumes those values. resizeBoxes()
+    -- repositions every box and its contents; setBoxes() is a constructor and
+    -- must not run here (it would rebuild every widget on each resize).
     if GUI.setBackground then
         GUI.setBackground()
     end
+    if GUI.setBorders then
+        GUI.setBorders()
+    end
     if GUI.resizeBoxes then
         GUI.resizeBoxes()
-    end
-    if GUI.setBoxes then
-        GUI.setBoxes()
     end
     if GUI.Logic and GUI.Logic.StyleUpdate then
         GUI.Logic.StyleUpdate()
     end
 end
 
+-- Trailing-edge debounce: every event reschedules the pending run, so the last
+-- event of a drag always gets one. A leading-edge throttle here can swallow that
+-- final event and leave the layout sized for an intermediate window size.
 local function resizeHandler()
     local RM = ALUI and ALUI.ResourceManager
     local GUI = ALUI and ALUI.GUI
@@ -60,11 +63,7 @@ local function resizeHandler()
         return
     end
 
-    local currentTime = getEpoch()
-    if currentTime - GUI.Timers.lastResizeTime < RESIZE_MIN_INTERVAL then
-        return
-    end
-    GUI.Timers.lastResizeTime = currentTime
+    GUI.Timers.lastResizeTime = getEpoch()
 
     if RM then
         RM.createTimer("resizeOperation", RESIZE_TIMER_DELAY, function()

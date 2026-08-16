@@ -41,6 +41,15 @@ local function setBorders()
     local rightBorder = (w * rightBorderPercent) + mainWindowPadding
     local topBorder = (h * topBorderPercent) + mainWindowPadding
 
+    -- setBackground() clamps the panels to their minimum widths and publishes the
+    -- sizes it actually applied. Prefer those so the borders always match what is
+    -- on screen; the percentage math above is only the pre-layout fallback.
+    if layout then
+        leftBorder = tonumber(layout.leftBorderPx) or leftBorder
+        rightBorder = tonumber(layout.rightBorderPx) or rightBorder
+        topBorder = tonumber(layout.topBorderPx) or topBorder
+    end
+
     setBorderLeft(leftBorder)
     setBorderTop(topBorder)
     setBorderBottom(mainWindowPadding)
