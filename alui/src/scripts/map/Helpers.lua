@@ -1292,6 +1292,122 @@ function _.set_room_locked(rid, locked)
     end
 end
 
+-- --------------------------------------------------------------------------
+-- Room provenance
+-- --------------------------------------------------------------------------
+-- The map keeps no record of how a room came to exist, and once a room has a
+-- name, a terrain and a full exit set there is nothing left to tell apart a
+-- room the player walked into from one some repair pass populated on their
+-- behalf.  That is exactly the question to answer when a room appears somewhere
+-- the player cannot go, so each path that gives a room an identity says so here
+-- and `map origin` reads it back.
+--
+-- Three keys, because they answer different questions:
+--   alui_origin   why the room exists.  First stamp wins — a placeholder later
+--                 adopted on arrival must keep saying it began as a placeholder.
+--   alui_visited  whether the player has ever actually been in it.  Rewritten
+--                 on every arrival, so it also dates the last visit.
+--   alui_history  the ordered list of everything that has since claimed the
+--                 room, capped, for the cases where the origin alone is not the
+--                 whole story (promoted from a duplicate, adopted by position).
+local ORIGIN_KEY      = "alui_origin"
+local VISITED_KEY     = "alui_visited"
+local HISTORY_KEY     = "alui_history"
+local HISTORY_MAX     = 8
+
+local function provenance_now()
+    return tostring(os.time())
+end
+
+local function room_user_data(roomID, key)
+    if type(roomID) ~= "number" or roomID < 1 then return nil end
+    if type(getRoomUserData) ~= "function" then return nil end
+    local value = getRoomUserData(roomID, key)
+    if type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+-- Append to alui_history, oldest entries dropped past HISTORY_MAX.  Entries are
+-- "event:detail@epoch", separated by ";" — a format that survives a round trip
+-- through Mudlet's user data without needing a serialiser.
+function _.note_room_event(roomID, event, detail)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    if type(setRoomUserData) ~= "function" then return end
+    local entry = tostring(event) .. ":" .. tostring(detail or "") .. "@" .. provenance_now()
+    local history = room_user_data(roomID, HISTORY_KEY)
+    if history then
+        local entries = {}
+        for piece in history:gmatch("[^;]+") do entries[#entries + 1] = piece end
+        entries[#entries + 1] = entry
+        while #entries > HISTORY_MAX do table.remove(entries, 1) end
+        entry = table.concat(entries, ";")
+    end
+    setRoomUserData(roomID, HISTORY_KEY, entry)
+end
+
+-- Record why a room exists.  Also appended to the history, so a room that was
+-- created once and re-claimed twice reads back in order.
+function _.stamp_room_origin(roomID, origin, detail)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    if type(setRoomUserData) ~= "function" then return end
+    _.note_room_event(roomID, origin, detail)
+    if room_user_data(roomID, ORIGIN_KEY) then return end
+    setRoomUserData(roomID, ORIGIN_KEY,
+        tostring(origin) .. "|" .. tostring(detail or "") .. "|" .. provenance_now())
+end
+
+-- The player is standing in this room right now.
+function _.stamp_room_visited(roomID)
+    if type(roomID) ~= "number" or roomID < 1 then return end
+    if type(setRoomUserData) ~= "function" then return end
+    setRoomUserData(roomID, VISITED_KEY, provenance_now())
+end
+
+-- A merge is about to delete dupID and let keepID stand for it.  The player
+-- really was in the room being deleted, so its visit carries over — otherwise
+-- every merge quietly converts a visited room into an unvisited one wearing its
+-- name, which is the exact confusion these stamps exist to prevent.
+function _.inherit_room_provenance(keepID, dupID)
+    if type(keepID) ~= "number" or type(dupID) ~= "number" then return end
+    if type(setRoomUserData) ~= "function" then return end
+    local dupVisited = room_user_data(dupID, VISITED_KEY)
+    if dupVisited then
+        local keepVisited = room_user_data(keepID, VISITED_KEY)
+        local dupAt  = tonumber(dupVisited) or 0
+        local keepAt = tonumber(keepVisited) or 0
+        if not keepVisited or dupAt > keepAt then
+            setRoomUserData(keepID, VISITED_KEY, dupVisited)
+        end
+    end
+    _.note_room_event(keepID, "promoted-from", tostring(dupID))
+end
+
+-- Returns { origin, detail, created, visited, history = { {event, detail, at}, ... } }.
+-- Fields are nil where the room predates the stamping, which is itself an
+-- answer: it means the room was already in the map before this ran.
+function _.read_room_provenance(roomID)
+    local out = { history = {} }
+    local origin = room_user_data(roomID, ORIGIN_KEY)
+    if origin then
+        out.origin, out.detail, out.created = origin:match("^(.-)|(.-)|(.*)$")
+        if out.origin == nil then out.origin = origin end
+        if out.detail == "" then out.detail = nil end
+    end
+    out.visited = room_user_data(roomID, VISITED_KEY)
+    local history = room_user_data(roomID, HISTORY_KEY)
+    if history then
+        for piece in history:gmatch("[^;]+") do
+            local event, detail, at = piece:match("^(.-):(.-)@(.*)$")
+            out.history[#out.history + 1] = {
+                event  = event or piece,
+                detail = (detail ~= "" and detail) or nil,
+                at     = at,
+            }
+        end
+    end
+    return out
+end
+
 -- Returns the Mudlet ID of the room the player is currently in, or nil.
 function _.current_player_room_id()
     if type(map.room_info) == "table" and type(map.room_info.vnum) == "string" then
@@ -1891,8 +2007,13 @@ end
 --   overlapping_rooms — distinct rooms occupying the same (x,y,z) cell (visual overlap)
 --   unreachable       — rooms in the area with no exits and no exit-stubs pointing at them
 --
+-- `collect` adds counts.details: the same anomalies as lists rather than only
+-- tallies, for a caller that means to name the rooms involved.  It is off by
+-- default because the end-of-run reports print totals for every area they touch
+-- and would otherwise build lists nothing ever reads; `map audit` asks for them.
+--
 -- NOTE: This function is intentionally read-only; it never calls setRoomCoordinates or setExit.
-function _.audit_layout_anomalies(roomIDs, areaID)
+function _.audit_layout_anomalies(roomIDs, areaID, collect)
     local counts = {
         self_loops         = 0,
         delta_mismatches   = 0,
@@ -1903,6 +2024,20 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         overlapping_rooms  = 0,
         unreachable        = 0,
     }
+    local details
+    if collect then
+        details = {
+            self_loops       = {},  -- { room, dir }
+            delta_mismatches = {},  -- { room, dir, target, dx, dy, dz, ex, ey, ez }
+            vertical_drift   = {},  -- same shape as delta_mismatches
+            cross_area       = {},  -- { room, dir, target, area }
+            shared_target    = {},  -- { dir, target, sources = { roomID, ... } }
+            duplicate_hash   = {},  -- { hash, rooms = { roomID, ... } }
+            overlapping      = {},  -- { x, y, z, rooms = { roomID, ... } }
+            unreachable      = {},  -- roomID
+        }
+        counts.details = details
+    end
     if type(roomIDs) ~= "table" or #roomIDs == 0 then return counts end
 
     -- Build a set of all roomIDs in scope for quick lookup.
@@ -1949,11 +2084,13 @@ function _.audit_layout_anomalies(roomIDs, areaID)
     --   targetCount — "dir→targetID" → in-scope sources exiting that way (shared-target bug)
     --   hasIncoming — in-scope rooms that some in-scope room exits to (unreachable)
     --   duplicate hash bindings
-    local exitsOf     = {}
-    local targetCount = {}
-    local hasIncoming = {}
-    local canHash     = type(getRoomHashByID) == "function"
-    local hashSeen    = {}
+    local exitsOf       = {}
+    local targetCount   = {}
+    local targetSources = details and {} or nil
+    local hashGroups    = details and {} or nil
+    local hasIncoming   = {}
+    local canHash       = type(getRoomHashByID) == "function"
+    local hashSeen      = {}
     for i, rid in ipairs(roomIDs) do
         local exits = getRoomExits(rid)
         if type(exits) == "table" then
@@ -1966,6 +2103,14 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                         and (not areaID or area_of(targetID) == areaID) then
                         local k = tostring(dir) .. "→" .. tostring(targetID)
                         targetCount[k] = (targetCount[k] or 0) + 1
+                        if details then
+                            local sources = targetSources[k]
+                            if not sources then
+                                sources = { dir = dir, target = targetID }
+                                targetSources[k] = sources
+                            end
+                            sources[#sources + 1] = rid
+                        end
                     end
                 end
             end
@@ -1975,6 +2120,14 @@ function _.audit_layout_anomalies(roomIDs, areaID)
             if type(h) == "string" and h ~= "" then
                 if hashSeen[h] then
                     counts.duplicate_hash_rooms = counts.duplicate_hash_rooms + 1
+                    if details then
+                        local group = hashGroups[h]
+                        if not group then
+                            group = { hashSeen[h] }
+                            hashGroups[h] = group
+                        end
+                        group[#group + 1] = rid
+                    end
                 else
                     hashSeen[h] = rid
                 end
@@ -1984,12 +2137,21 @@ function _.audit_layout_anomalies(roomIDs, areaID)
 
     -- Rooms sharing an identical (x,y,z) cell (distinct rooms overlapping).
     local coordCount = {}
+    local coordRooms = details and {} or nil
 
     for i, rid in ipairs(roomIDs) do
         local rx, ry, rz = coords_of(rid)
         if rx ~= nil then
             local ck = rx .. "," .. ry .. "," .. rz
             coordCount[ck] = (coordCount[ck] or 0) + 1
+            if details then
+                local cell = coordRooms[ck]
+                if not cell then
+                    cell = { x = rx, y = ry, z = rz }
+                    coordRooms[ck] = cell
+                end
+                cell[#cell + 1] = rid
+            end
         end
         local exits = exitsOf[i]
         local hasAnyExit = false
@@ -2003,6 +2165,10 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                     -- Self-loop
                     if targetID == rid then
                         counts.self_loops = counts.self_loops + 1
+                        if details then
+                            details.self_loops[#details.self_loops + 1] =
+                                { room = rid, dir = dir }
+                        end
                     else
                         local targetAreaID
                         if areaID then targetAreaID = area_of(targetID) end
@@ -2010,6 +2176,10 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                         -- Cross-area
                         if areaID and type(targetAreaID) == "number" and targetAreaID ~= areaID then
                             counts.cross_area = counts.cross_area + 1
+                            if details then
+                                details.cross_area[#details.cross_area + 1] =
+                                    { room = rid, dir = dir, target = targetID, area = targetAreaID }
+                            end
                         else
                             -- Shared-target bug
                             local k = tostring(dir) .. "→" .. tostring(targetID)
@@ -2028,10 +2198,20 @@ function _.audit_layout_anomalies(roomIDs, areaID)
                                     if dx ~= shift[1] or dy ~= shift[2] or dz ~= shift[3] then
                                         -- Distinguish vertical drift from general delta mismatch
                                         local nd = _.normalize_exit_direction(dir)
+                                        local bucket
                                         if (nd == "up" or nd == "down") and dx == 0 and dy == 0 then
                                             counts.vertical_drift = counts.vertical_drift + 1
+                                            bucket = details and details.vertical_drift
                                         else
                                             counts.delta_mismatches = counts.delta_mismatches + 1
+                                            bucket = details and details.delta_mismatches
+                                        end
+                                        if bucket then
+                                            bucket[#bucket + 1] = {
+                                                room = rid, dir = dir, target = targetID,
+                                                dx = dx, dy = dy, dz = dz,
+                                                ex = shift[1], ey = shift[2], ez = shift[3],
+                                            }
                                         end
                                     end
                                 end
@@ -2045,6 +2225,9 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         -- Unreachable: no exits and no in-scope room exits to this room.
         if not hasAnyExit and not hasIncoming[rid] then
             counts.unreachable = counts.unreachable + 1
+            if details then
+                details.unreachable[#details.unreachable + 1] = rid
+            end
         end
     end
 
@@ -2053,6 +2236,45 @@ function _.audit_layout_anomalies(roomIDs, areaID)
         if n > 1 then
             counts.overlapping_rooms = counts.overlapping_rooms + (n - 1)
         end
+    end
+
+    -- The grouped views.  Counts above are per-exit or per-extra-room, which is
+    -- what a one-line report wants; a reader looking for the cause wants the
+    -- group — the one target several rooms claim, the one cell they sit on.
+    -- Sorted because they are built by pairs() and a report that reorders
+    -- itself between two runs over an unchanged map is unreadable.
+    if details then
+        for _k, sources in pairs(targetSources) do
+            if #sources > 1 then
+                details.shared_target[#details.shared_target + 1] = {
+                    dir = sources.dir, target = sources.target, sources = sources,
+                }
+            end
+        end
+        table.sort(details.shared_target, function(a, b)
+            if a.target ~= b.target then return a.target < b.target end
+            return tostring(a.dir) < tostring(b.dir)
+        end)
+
+        for hash, group in pairs(hashGroups) do
+            table.sort(group)
+            details.duplicate_hash[#details.duplicate_hash + 1] =
+                { hash = hash, rooms = group }
+        end
+        table.sort(details.duplicate_hash, function(a, b)
+            return a.rooms[1] < b.rooms[1]
+        end)
+
+        for _k, cell in pairs(coordRooms) do
+            if #cell > 1 then
+                table.sort(cell)
+                details.overlapping[#details.overlapping + 1] =
+                    { x = cell.x, y = cell.y, z = cell.z, rooms = cell }
+            end
+        end
+        table.sort(details.overlapping, function(a, b)
+            return a.rooms[1] < b.rooms[1]
+        end)
     end
 
     return counts
@@ -2323,6 +2545,11 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
         end
     end
 
+    -- 4b. The survivor now stands for a room the player may have been in, and
+    --     step 4 only fills keys it was missing, so the visit is carried across
+    --     explicitly and the merge itself is recorded.
+    _.inherit_room_provenance(survivorID, loserID)
+
     -- 5. Clear hash on loser so the binding is released before deletion
     if type(setRoomIDbyHash) == "function" then
         pcall(setRoomIDbyHash, loserID, "")
@@ -2475,6 +2702,42 @@ local function bfs_component(seedID, areaID, visited)
         end
     end
     return component
+end
+
+-- Read-only counterpart of the "no anchors" branch in _.apply_anchor_translation:
+-- the connected sub-graphs holding no room with a user_data.coord, which is why
+-- that pass cannot tie them to the game's coordinate frame and leaves them in
+-- Mudlet-relative space.  Returned largest first as { size, rooms = { id, ... } },
+-- since the size is what says whether a sub-graph is a stranded wing of the area
+-- or a single stub nothing has been walked into yet.
+function _.find_unanchored_subgraphs(areaID)
+    local found = {}
+    if type(areaID) ~= "number" or areaID < 1 then return found end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then return found end
+
+    local anchors = _.collect_coord_anchors(areaID)
+    local visited = {}
+    for _i, seedID in ipairs(rooms) do
+        if not visited[seedID] then
+            local component = bfs_component(seedID, areaID, visited)
+            if #component > 0 then
+                local anchored = false
+                for _j, rid in ipairs(component) do
+                    if anchors[rid] then anchored = true; break end
+                end
+                if not anchored then
+                    table.sort(component)
+                    found[#found + 1] = { size = #component, rooms = component }
+                end
+            end
+        end
+    end
+    table.sort(found, function(a, b)
+        if a.size ~= b.size then return a.size > b.size end
+        return a.rooms[1] < b.rooms[1]
+    end)
+    return found
 end
 
 -- Translate every room in `component` by (dx, dy, dz), skipping immobile rooms.

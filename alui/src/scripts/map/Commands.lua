@@ -349,6 +349,35 @@ function map.test_recalculate_determinism(numRuns)
 end
 
 -- --------------------------------------------------------------------------
+-- Area argument
+-- --------------------------------------------------------------------------
+
+-- Resolve the area a command should work on: an explicit id, an area name
+-- (case-insensitive), or — with no argument — the one the player is standing in.
+-- Returns nil plus the message to show when none of those produce an area.
+local function resolve_area_arg(areaNameArg)
+    if type(areaNameArg) == "number" and areaNameArg > 0 then
+        return areaNameArg
+    end
+    if type(areaNameArg) == "string" and areaNameArg ~= "" then
+        local areas = getAreaTable()
+        if type(areas) == "table" then
+            for name, id in pairs(areas) do
+                if string.lower(name) == string.lower(areaNameArg) then
+                    return id
+                end
+            end
+        end
+        return nil, "Cannot find area: " .. areaNameArg .. "\n"
+    end
+    local _room, currentAreaID = _.get_current_area_context()
+    if not currentAreaID then
+        return nil, "Cannot determine current area. Move to a room first or specify an area name.\n"
+    end
+    return currentAreaID
+end
+
+-- --------------------------------------------------------------------------
 -- Placeholder cleanup
 -- --------------------------------------------------------------------------
 
@@ -365,29 +394,10 @@ function map.clean_placeholders(areaNameArg, silent)
         return
     end
 
-    local areaID
-    if type(areaNameArg) == "number" and areaNameArg > 0 then
-        areaID = areaNameArg
-    elseif type(areaNameArg) == "string" and areaNameArg ~= "" then
-        local areas = getAreaTable()
-        if type(areas) == "table" then
-            for name, id in pairs(areas) do
-                if string.lower(name) == string.lower(areaNameArg) then
-                    areaID = id; break
-                end
-            end
-        end
-        if not areaID then
-            echo("Cannot find area: " .. areaNameArg .. "\n")
-            return
-        end
-    else
-        local _, currentAreaID = _.get_current_area_context()
-        areaID = currentAreaID
-        if not areaID then
-            echo("Cannot determine current area. Move to a room first or specify an area name.\n")
-            return
-        end
+    local areaID, areaErr = resolve_area_arg(areaNameArg)
+    if not areaID then
+        echo(areaErr)
+        return
     end
 
     local rooms = getAreaRooms(areaID)
@@ -454,6 +464,301 @@ function map.clean_placeholders(areaNameArg, silent)
             .. " in area '" .. areaDisplayName .. "'.\n")
     end
     return deletedCount
+end
+
+-- --------------------------------------------------------------------------
+-- Room provenance
+-- --------------------------------------------------------------------------
+
+-- Room and area names are printed inside cecho strings, where a '<' would be
+-- eaten as the start of a colour tag.
+local function safe_echo_text(text)
+    if type(text) ~= "string" or text == "" then return "(unnamed)" end
+    return (text:gsub("[<>]", ""))
+end
+
+local function origin_when(stamp)
+    local at = tonumber(stamp)
+    if not at then return tostring(stamp or "?") end
+    return os.date("%Y-%m-%d %H:%M", at)
+end
+
+-- Why does this room exist, and was the player ever in it?  A room that was
+-- created for a neighbour's exit and never entered is indistinguishable from a
+-- walked one once it has a name and exits, so the map is stamped as it happens
+-- (see _.stamp_room_origin in Helpers.lua) and this reads it back.
+--
+-- Rooms that predate the stamping have nothing recorded, which is reported as
+-- such rather than guessed at.
+function map.show_room_origin(roomIDArg)
+    local roomID = tonumber(roomIDArg)
+    if not roomID then
+        roomID = _.get_selected_map_room and _.get_selected_map_room() or nil
+    end
+    if not roomID then
+        roomID = _.current_player_room_id and _.current_player_room_id() or nil
+    end
+    if type(roomID) ~= "number" or roomID < 1 then
+        echo("map origin: give a room id, select a room on the mapper, or stand in one.\n")
+        return
+    end
+    if type(getRoomArea) == "function" then
+        local area = getRoomArea(roomID)
+        if type(area) ~= "number" or area < 1 then
+            echo("map origin: room " .. roomID .. " does not exist.\n")
+            return
+        end
+    end
+
+    local name = type(getRoomName) == "function" and getRoomName(roomID) or nil
+    local hash = type(getRoomHashByID) == "function" and getRoomHashByID(roomID) or nil
+    local x, y, z = getRoomCoordinates(roomID)
+    local prov = _.read_room_provenance(roomID)
+
+    cecho(string.format("\n<white>=== room %d<reset> <grey>%s<reset>\n",
+        roomID, safe_echo_text(name)))
+    if x ~= nil then
+        cecho(string.format("<grey>  at (%d,%d,%d) in %s<reset>\n", x, y, z,
+            safe_echo_text(_.get_area_name_by_id(getRoomArea(roomID)) or "?")))
+    end
+    if type(hash) == "string" and hash ~= "" then
+        cecho("<grey>  hash " .. hash .. "<reset>\n")
+        -- A room still named after its own hash was never given a real name,
+        -- which is the plain-sight version of "never visited".
+        if name == hash then
+            cecho("<yellow>  name is the hash: never populated from a room description<reset>\n")
+        end
+    end
+
+    if prov.origin then
+        cecho(string.format("<cyan>  created<reset> %s%s <grey>%s<reset>\n",
+            prov.origin,
+            prov.detail and (" (" .. prov.detail .. ")") or "",
+            origin_when(prov.created)))
+    else
+        cecho("<yellow>  created: not recorded — the room predates origin stamping<reset>\n")
+    end
+
+    if prov.visited then
+        cecho("<green>  visited<reset> <grey>" .. origin_when(prov.visited) .. "<reset>\n")
+    elseif prov.origin then
+        cecho("<yellow>  never entered by the player<reset>\n")
+    else
+        cecho("<yellow>  visited: not recorded — walk into it once to confirm either way<reset>\n")
+    end
+
+    if #prov.history > 0 then
+        cecho("<cyan>  history<reset>\n")
+        for _i, entry in ipairs(prov.history) do
+            cecho(string.format("<grey>    %s %s%s<reset>\n",
+                origin_when(entry.at), entry.event,
+                entry.detail and (" (" .. entry.detail .. ")") or ""))
+        end
+    end
+    cecho("\n")
+    return prov
+end
+
+-- --------------------------------------------------------------------------
+-- Layout audit
+-- --------------------------------------------------------------------------
+
+local function audit_room_name(roomID)
+    return safe_echo_text(type(getRoomName) == "function" and getRoomName(roomID) or nil)
+end
+
+-- Room ids are printed often enough here that they are worth making clickable:
+-- every one of these findings is something you have to go and look at.  The
+-- link is optional — an older client without cechoLink still gets the id.
+local function audit_room_id(roomID)
+    local label = "<cyan>#" .. tostring(roomID) .. "<reset>"
+    if type(cechoLink) == "function" and type(centerview) == "function" then
+        cechoLink(label, "centerview(" .. tostring(roomID) .. ")",
+            "Center the map on room " .. tostring(roomID), true)
+    else
+        cecho(label)
+    end
+end
+
+local function audit_room_list(roomIDs, maxShown)
+    for i = 1, math.min(maxShown or #roomIDs, #roomIDs) do
+        if i > 1 then cecho("<grey>, <reset>") end
+        audit_room_id(roomIDs[i])
+    end
+    local hidden = #roomIDs - math.min(maxShown or #roomIDs, #roomIDs)
+    if hidden > 0 then
+        cecho(string.format("<grey> +%d more<reset>", hidden))
+    end
+end
+
+-- Read-only report of what is still wrong with an area's layout, naming the
+-- rooms involved.  The line normalize and recalculate print at the end says how
+-- many anomalies are left; this says which ones, because the categories no
+-- layout pass can repair on its own — exits pointing at the wrong room,
+-- sub-graphs the game never gave coordinates for — are only actionable once you
+-- know where to walk.  Nothing here writes to the map.
+--
+-- limitArg caps how many entries each category lists; the totals in the headers
+-- are always the real ones.
+function map.audit_layout(areaNameArg, limitArg)
+    local areaID, areaErr = resolve_area_arg(areaNameArg)
+    if not areaID then
+        echo(areaErr)
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then
+        echo("Nothing to audit: that area has no rooms.\n")
+        return
+    end
+
+    local limit = tonumber(limitArg) or tonumber(map.configs.audit_max_listed) or 15
+    if limit < 1 then limit = 1 end
+
+    local counts     = _.audit_layout_anomalies(rooms, areaID, true)
+    local details    = counts.details or {}
+    local unanchored = _.find_unanchored_subgraphs(areaID)
+    local areaName   = _.get_area_name_by_id(areaID) or ("area #" .. tostring(areaID))
+
+    cecho(string.format("\n<white>=== map audit: %s <grey>(%d room%s)<reset>\n",
+        safe_echo_text(areaName), #rooms, #rooms == 1 and "" or "s"))
+
+    local reported = 0
+    local function section(total, title, note)
+        if (total or 0) <= 0 then return false end
+        reported = reported + total
+        cecho(string.format("\n<cyan>%s<reset> <grey>(%d)<reset>\n", title, total))
+        if note then cecho("<grey>  " .. note .. "<reset>\n") end
+        return true
+    end
+    local function overflow(total)
+        if total > limit then
+            cecho(string.format("<grey>  ... and %d more<reset>\n", total - limit))
+        end
+    end
+
+    -- Exit data that is wrong in the map, not merely laid out badly.  No amount
+    -- of normalize or recalculate fixes these; the exits themselves have to go.
+    local shared = details.shared_target or {}
+    if section(#shared, "Shared-target exits",
+        "one direction from several rooms lands on the same room — "
+        .. "the duplicate exits are wrong, not the coordinates") then
+        for i = 1, math.min(limit, #shared) do
+            local entry = shared[i]
+            cecho("  <white>" .. safe_echo_text(tostring(entry.dir)) .. "<reset> from ")
+            audit_room_list(entry.sources, limit)
+            cecho(" <grey>-><reset> ")
+            audit_room_id(entry.target)
+            cecho(" <grey>" .. audit_room_name(entry.target) .. "<reset>\n")
+        end
+        overflow(#shared)
+    end
+
+    local dupes = details.duplicate_hash or {}
+    if section(#dupes, "Duplicate-hash rooms",
+        "several rooms claim the same game room — 'map normalize' merges them") then
+        for i = 1, math.min(limit, #dupes) do
+            cecho("  ")
+            audit_room_list(dupes[i].rooms, limit)
+            cecho(" <grey>" .. audit_room_name(dupes[i].rooms[1]) .. "<reset>\n")
+        end
+        overflow(#dupes)
+    end
+
+    local loops = details.self_loops or {}
+    if section(#loops, "Self-loop exits",
+        "an exit pointing back at its own room — stripped by normalize/recalculate") then
+        for i = 1, math.min(limit, #loops) do
+            cecho("  ")
+            audit_room_id(loops[i].room)
+            cecho(" <white>" .. safe_echo_text(tostring(loops[i].dir))
+                .. "<reset> <grey>-> itself<reset>\n")
+        end
+        overflow(#loops)
+    end
+
+    -- Geometry.  These are what the layout passes exist to fix, so what is left
+    -- here is what they could not.
+    local overlaps = details.overlapping or {}
+    if section(#overlaps, "Rooms sharing a cell",
+        "no free neighbouring cell, or every occupant is locked") then
+        for i = 1, math.min(limit, #overlaps) do
+            local cell = overlaps[i]
+            cecho(string.format("  <grey>(%d,%d,%d)<reset> ", cell.x, cell.y, cell.z))
+            audit_room_list(cell.rooms, limit)
+            cecho("\n")
+        end
+        overflow(#overlaps)
+    end
+
+    local mismatches = details.delta_mismatches or {}
+    if section(#mismatches, "Delta mismatches",
+        "the exit's direction disagrees with where the two rooms sit; a loop that "
+        .. "does not close cannot have every exit satisfied at once") then
+        for i = 1, math.min(limit, #mismatches) do
+            local entry = mismatches[i]
+            cecho("  ")
+            audit_room_id(entry.room)
+            cecho(" <white>" .. safe_echo_text(tostring(entry.dir)) .. "<reset> <grey>-><reset> ")
+            audit_room_id(entry.target)
+            cecho(string.format("<grey>  is (%d,%d,%d), should be (%d,%d,%d)<reset>\n",
+                entry.dx, entry.dy, entry.dz, entry.ex, entry.ey, entry.ez))
+        end
+        overflow(#mismatches)
+    end
+
+    local drift = details.vertical_drift or {}
+    if section(#drift, "Vertical drift",
+        "up/down pairs stacked on the right column but the wrong number of levels apart") then
+        for i = 1, math.min(limit, #drift) do
+            local entry = drift[i]
+            cecho("  ")
+            audit_room_id(entry.room)
+            cecho(" <white>" .. safe_echo_text(tostring(entry.dir)) .. "<reset> <grey>-><reset> ")
+            audit_room_id(entry.target)
+            cecho(string.format("<grey>  dz %d, should be %d<reset>\n", entry.dz, entry.ez))
+        end
+        overflow(#drift)
+    end
+
+    -- Connectivity.  A sub-graph with no coord anchor is not broken so much as
+    -- unvisited: walking its rooms is what gives the alignment pass something
+    -- to work with.
+    if section(#unanchored, "Unanchored sub-graphs",
+        "no room in them has game coordinates stored, so they float in "
+        .. "Mudlet-relative space — walk through them to capture coords") then
+        for i = 1, math.min(limit, #unanchored) do
+            local group = unanchored[i]
+            cecho(string.format("  <white>%d room%s<reset> from ",
+                group.size, group.size == 1 and "" or "s"))
+            audit_room_id(group.rooms[1])
+            cecho(" <grey>" .. audit_room_name(group.rooms[1]) .. "<reset>\n")
+        end
+        overflow(#unanchored)
+    end
+
+    local stranded = details.unreachable or {}
+    if section(#stranded, "Unreachable rooms",
+        "no exits of their own and nothing in the area exits to them") then
+        for i = 1, math.min(limit, #stranded) do
+            cecho("  ")
+            audit_room_id(stranded[i])
+            cecho(" <grey>" .. audit_room_name(stranded[i]) .. "<reset>\n")
+        end
+        overflow(#stranded)
+    end
+
+    if reported == 0 then
+        cecho("<green>No anomalies found.<reset>\n")
+    end
+    if (counts.cross_area or 0) > 0 then
+        cecho(string.format(
+            "<grey>%d exit%s out of the area (normal at borders, not counted above).<reset>\n",
+            counts.cross_area, counts.cross_area == 1 and "" or "s"))
+    end
+    cecho("<grey>Read-only: nothing was moved.<reset>\n\n")
+    return counts
 end
 
 -- --------------------------------------------------------------------------
@@ -538,6 +843,21 @@ function map.show_help()
     echo("  map set poi\n")
     echo("    Set the current room's symbol to '#' and apply the Inside background color.\n")
     echo("    Useful for marking points of interest (shops, quest givers, etc.) on the map.\n\n")
+    echo("  map origin [room id]\n")
+    echo("    Say why a room exists and whether the player has ever been in it: created on\n")
+    echo("    arrival, created because a neighbour reported an exit that way, adopted, or\n")
+    echo("    promoted from a duplicate during a merge — with the history since.\n")
+    echo("    Defaults to the selected mapper room, else the room you are standing in.\n")
+    echo("    Rooms already in the map before this build have nothing recorded and say so.\n\n")
+    echo("  map audit [area name] [N]\n")
+    echo("    Read-only report of what is still wrong with the current (or named) area, naming\n")
+    echo("    the rooms: shared-target exits, duplicate-hash rooms, self-loops, rooms sharing a\n")
+    echo("    cell, delta mismatches, vertical drift, unanchored sub-graphs and unreachable rooms.\n")
+    echo("    Same checks step 9 of normalize/recalculate counts, listed instead of tallied.\n")
+    echo("    Room ids are clickable and center the mapper on the room.\n")
+    echo("    N caps how many entries each category lists (default "
+        .. map.configs.audit_max_listed .. "); the totals shown are always the real ones.\n")
+    echo("    Nothing is moved, so it is safe to run at any time.\n\n")
     echo("  map clean-placeholders [area name]\n")
     echo("    Delete placeholder rooms whose map position overlaps a real room in the current (or named) area.\n")
     echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")

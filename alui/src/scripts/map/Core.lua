@@ -362,6 +362,8 @@ local function make_room()
     -- an area yet: set_room_area is the next line down.
     _.bind_room_hash(thisRoom, info.vnum, areaID)
     _.set_room_name(thisRoom, info.name, areaID)
+    _.stamp_room_origin(thisRoom, "arrival", info.vnum)
+    _.stamp_room_visited(thisRoom)
     _.set_room_area(thisRoom, areaID)
     _.set_room_coordinates(thisRoom, coords[1], coords[2], coords[3], posCache)
     -- Loud warning when we end up creating a brand-new room near the
@@ -526,6 +528,8 @@ local function handle_move(isLastInBatch)
                         end
                     end
                     _.bind_room_hash(placeholderID, info.vnum)
+                    _.note_room_event(placeholderID, "adopted-on-arrival",
+                        tostring(prevRoomID) .. ":" .. tostring(arrivalDir))
                     _.mark_autowalk_dirty()
                     rnum    = placeholderID
                     adopted = true
@@ -543,6 +547,7 @@ local function handle_move(isLastInBatch)
                     local adoptedID = _.find_real_room_to_adopt(adoptAreaID)
                     if adoptedID then
                         _.bind_room_hash(adoptedID, info.vnum)
+                        _.note_room_event(adoptedID, "adopted-by-exit-set", info.vnum)
                         _.mark_autowalk_dirty()
                         rnum    = adoptedID
                         adopted = true
@@ -626,6 +631,13 @@ local function handle_move(isLastInBatch)
                     setAreaUserData(currentAreaID, "gmcp_area_key", info.area)
                 end
             end
+
+            -- The player is here, whatever this room was created as.  Stamped
+            -- before the name is written, so a room that arrives already
+            -- carrying a real name it was never entered to earn still reads as
+            -- unvisited right up to the moment it is genuinely walked into.
+            _.stamp_room_origin(rnum, "arrival", info.vnum)
+            _.stamp_room_visited(rnum)
 
             if type(info.name) == "string" and info.name ~= "" then
                 if getRoomName(rnum) ~= info.name then

@@ -128,6 +128,11 @@ map.configs.elevation_max_single_group = map.configs.elevation_max_single_group 
 -- Above this the command refuses rather than truncating.
 map.configs.recalculate_max_rooms = map.configs.recalculate_max_rooms or 200000
 
+-- How many entries `map audit` lists per anomaly category.  The header always
+-- carries the real total; this only bounds the wall of text, since a broken area
+-- can hold hundreds of one kind and the first handful is what gets walked to.
+map.configs.audit_max_listed = map.configs.audit_max_listed or 15
+
 -- Areas with at least this many rooms get no per-area hash/name index (see the
 -- "Per-area room index" section in Helpers.lua).  That index is built once and
 -- then reused across steps *and* across area changes, so it tolerates a far

@@ -311,6 +311,8 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                             pcall(setRoomIDbyHash, candidateID, "")
                         end
                         _.bind_room_hash(candidateID, targetVnum)
+                        _.note_room_event(candidateID, "adopted-by-position",
+                            tostring(roomID) .. ":" .. tostring(dir))
                         _.mark_autowalk_dirty()
                         _.debug_echo("Adopted existing room " .. candidateID
                             .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
@@ -337,6 +339,10 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
             elseif targetID < 1 then
                 targetID = createRoomID()
                 _.add_room(targetID)
+                -- Created because the room the player is in reported an exit
+                -- this way, not because anyone went there.
+                _.stamp_room_origin(targetID, "neighbour-of",
+                    tostring(roomID) .. ":" .. tostring(dir))
                 -- The index updates take areaID explicitly because the room
                 -- does not have an area yet: the placement block below is what
                 -- calls set_room_area for it.
@@ -449,6 +455,9 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                                                 pcall(setRoomChar, keep, sym)
                                             end
                                         end
+                                        -- The survivor now wears a real room's name without
+                                        -- having been entered for it; say where that came from.
+                                        _.inherit_room_provenance(keep, dup)
                                     end
                                     -- Transfer hash binding to survivor if it has none.
                                     if type(getRoomHashByID) == "function" then
@@ -558,6 +567,7 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                                     pcall(setRoomChar, keep, sym)
                                 end
                             end
+                            _.inherit_room_provenance(keep, dup)
                         end
                         -- Transfer hash binding to survivor if it lacks one.
                         if type(getRoomHashByID) == "function" then

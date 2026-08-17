@@ -100,6 +100,14 @@
         "regex": "^map\\s+clean-placeholders(?:\\s+(.+))?$"
     },
     {
+        "name": "map audit",
+        "regex": "^map\\s+audit(?:\\s+(.+))?$"
+    },
+    {
+        "name": "map origin",
+        "regex": "^map\\s+origin(?:\\s+(\\d+))?$"
+    },
+    {
         "name": "map profile",
         "regex": "^map\\s+profile(?:\\s+(.+))?$"
     }
