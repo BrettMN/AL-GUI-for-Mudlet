@@ -292,7 +292,6 @@ local function targets()
         { _, "realign_displaced_room",        "realign" },
         { _, "apply_elevation_anchor",        "elevation_anchor" },
         { _, "sky_altitude",                  "sky_altitude" },
-        { _, "apply_anchor_translation",      "anchor_translate" },
         { _, "apply_elevation_planes",        "elevation_planes" },
         { _, "finish_layout_repair",          "layout_tail" },
         -- Core / Commands entry points

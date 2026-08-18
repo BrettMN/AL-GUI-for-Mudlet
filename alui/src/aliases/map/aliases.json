@@ -4,6 +4,14 @@
         "regex": "^map\\s+help$"
     },
     {
+        "name": "map seams",
+        "regex": "^map\\s+seams(?:\\s+(.+))?$"
+    },
+    {
+        "name": "map seam",
+        "regex": "^map\\s+seam$"
+    },
+    {
         "name": "map normalize all areas",
         "regex": "^map\\s+normalize\\s+all\\s+areas$"
     },

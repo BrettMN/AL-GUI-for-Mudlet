@@ -593,13 +593,65 @@ end
 
 -- Read-only report of what is still wrong with an area's layout, naming the
 -- rooms involved.  The line normalize and recalculate print at the end says how
--- many anomalies are left; this says which ones, because the categories no
--- layout pass can repair on its own — exits pointing at the wrong room,
--- sub-graphs the game never gave coordinates for — are only actionable once you
--- know where to walk.  Nothing here writes to the map.
+-- many anomalies are left; this says which ones, because the category no layout
+-- pass can repair on its own — exits pointing at the wrong room — is only
+-- actionable once you know where to walk.  Nothing here writes to the map.
 --
 -- limitArg caps how many entries each category lists; the totals in the headers
 -- are always the real ones.
+-- Close the seam at the current room by hand, for a chunk that was already
+-- joined to the map before seam closing existed — the automatic pass only fires
+-- on the arrival or the exit wiring that discovers a seam, and one already sat
+-- through is never rediscovered.
+function map.close_seam()
+    local roomID = _.current_player_room_id()
+    if not roomID or roomID < 1 then
+        echo("Cannot close a seam: current room is unknown.\n")
+        return
+    end
+    local areaID   = getRoomArea(roomID)
+    local posCache = type(_.live_pos_cache) == "function" and _.live_pos_cache(areaID) or nil
+    local moved    = _.close_component_seam(roomID, posCache, true) or 0
+    if moved > 0 then
+        updateMap()
+        echo("Seam closed: " .. moved .. " room" .. (moved == 1 and "" or "s")
+            .. " moved as one piece.\n")
+    else
+        if type(map._seam_reason) == "string" then
+            echo("Nothing moved: " .. map._seam_reason .. ".\n")
+        else
+            echo("Nothing moved: this room's exits all land where they should, "
+                .. "so it is not on a seam.\n")
+        end
+    end
+end
+
+-- Sweep a whole area for seams rather than just the one under your feet.
+function map.close_area_seams(areaNameArg)
+    local areaID, areaErr = resolve_area_arg(areaNameArg)
+    if not areaID then
+        echo(areaErr)
+        return
+    end
+    local areaName = _.get_area_name_by_id(areaID) or ("area #" .. tostring(areaID))
+    local result   = _.close_area_seams(areaID)
+    updateMap()
+    if result.closed == 0 then
+        if type(map._seam_reason) == "string" then
+            echo("No seams closed in '" .. areaName .. "'. Last one examined: "
+                .. map._seam_reason .. ".\n")
+        else
+            echo("No seams closed in '" .. areaName .. "': nothing is displaced.\n")
+        end
+        return
+    end
+    echo(string.format(
+        "Closed %d seam%s in '%s': %d room%s moved, over %d pass%s.\n",
+        result.closed, result.closed == 1 and "" or "s", areaName,
+        result.rooms_moved, result.rooms_moved == 1 and "" or "s",
+        result.passes, result.passes == 1 and "" or "es"))
+end
+
 function map.audit_layout(areaNameArg, limitArg)
     local areaID, areaErr = resolve_area_arg(areaNameArg)
     if not areaID then
@@ -618,7 +670,6 @@ function map.audit_layout(areaNameArg, limitArg)
 
     local counts     = _.audit_layout_anomalies(rooms, areaID, true)
     local details    = counts.details or {}
-    local unanchored = _.find_unanchored_subgraphs(areaID)
     local areaName   = _.get_area_name_by_id(areaID) or ("area #" .. tostring(areaID))
 
     cecho(string.format("\n<white>=== map audit: %s <grey>(%d room%s)<reset>\n",
@@ -722,22 +773,6 @@ function map.audit_layout(areaNameArg, limitArg)
         overflow(#drift)
     end
 
-    -- Connectivity.  A sub-graph with no coord anchor is not broken so much as
-    -- unvisited: walking its rooms is what gives the alignment pass something
-    -- to work with.
-    if section(#unanchored, "Unanchored sub-graphs",
-        "no room in them has game coordinates stored, so they float in "
-        .. "Mudlet-relative space — walk through them to capture coords") then
-        for i = 1, math.min(limit, #unanchored) do
-            local group = unanchored[i]
-            cecho(string.format("  <white>%d room%s<reset> from ",
-                group.size, group.size == 1 and "" or "s"))
-            audit_room_id(group.rooms[1])
-            cecho(" <grey>" .. audit_room_name(group.rooms[1]) .. "<reset>\n")
-        end
-        overflow(#unanchored)
-    end
-
     local stranded = details.unreachable or {}
     if section(#stranded, "Unreachable rooms",
         "no exits of their own and nothing in the area exits to them") then
@@ -778,15 +813,12 @@ function map.show_help()
     echo("       disagree with their exit offsets, skipping rooms that can't move due to collisions.\n")
     echo("    4) Flattens cardinally connected rooms to the current room's z-level.\n")
     echo("    5) Snaps in-area up/down room pairs to exact ±1 z-offsets, without moving their (x,y).\n")
-    echo("    6) Aligns each connected sub-graph to the game's coordinate frame using the\n")
-    echo("       user_data.coord values stored during room capture. Sub-graphs with no coord anchor\n")
-    echo("       remain in Mudlet-relative space and are reported.\n")
-    echo("    7) Moves rooms onto the elevation they belong on: surface terrain to z=0 and sky rooms\n")
+    echo("    6) Moves rooms onto the elevation they belong on: surface terrain to z=0 and sky rooms\n")
     echo("       to z=1..3 by counting how far they are above the ground. Rooms move in rigid groups,\n")
     echo("       so a room with no elevation of its own travels with the neighbours that have one.\n")
-    echo("    8) Separates distinct rooms that ended up on the same cell.\n")
-    echo("    9) Reports remaining anomalies by category (cyclic mismatches, shared-target bugs, etc.).\n")
-    echo("    Steps 5-9 are shared with 'map recalculate'; only how the coordinates are produced differs.\n")
+    echo("    7) Separates distinct rooms that ended up on the same cell.\n")
+    echo("    8) Reports remaining anomalies by category (cyclic mismatches, shared-target bugs, etc.).\n")
+    echo("    Steps 5-8 are shared with 'map recalculate'; only how the coordinates are produced differs.\n")
     echo("    Manual coordinate tweaks are preserved; normalize pins the current room and\n")
     echo("    allows other rooms to move so the repair can spread outward from your location.\n")
     echo("    Defaults: maxPasses=" ..
@@ -832,7 +864,7 @@ function map.show_help()
     echo("       free spot. z is purely exit-derived; there is no name-based auto z-split.\n")
     echo("    4) Removes stale BFS placeholder stubs left by the rebuild.\n")
     echo("    5) Then runs the same finishing stages as 'map normalize': vertical snap, alignment\n")
-    echo("       to game coords, elevation, overlap separation, and the anomaly report. The\n")
+    echo("       elevation, overlap separation, and the anomaly report. The\n")
     echo("       elevation stage is what keeps the rebuild from inheriting whatever z the room\n")
     echo("       you started from happened to be on, since every other z is walked out from it.\n")
     echo("    Only the room you start it from is pinned; other locked rooms may still be moved.\n")
@@ -852,12 +884,26 @@ function map.show_help()
     echo("  map audit [area name] [N]\n")
     echo("    Read-only report of what is still wrong with the current (or named) area, naming\n")
     echo("    the rooms: shared-target exits, duplicate-hash rooms, self-loops, rooms sharing a\n")
-    echo("    cell, delta mismatches, vertical drift, unanchored sub-graphs and unreachable rooms.\n")
+    echo("    cell, delta mismatches, vertical drift and unreachable rooms.\n")
     echo("    Same checks step 9 of normalize/recalculate counts, listed instead of tallied.\n")
     echo("    Room ids are clickable and center the mapper on the room.\n")
     echo("    N caps how many entries each category lists (default "
         .. map.configs.audit_max_listed .. "); the totals shown are always the real ones.\n")
     echo("    Nothing is moved, so it is safe to run at any time.\n\n")
+    echo("  map seam\n")
+    echo("    Move the cluster the current room belongs to onto the position its links to the\n")
+    echo("    rest of the map imply, as one rigid piece — for a chunk mapped in isolation and\n")
+    echo("    later joined by a path. The smaller side of the seam moves; on a tie, the side\n")
+    echo("    you are not standing in. Every crossing link must agree on the same offset, so\n")
+    echo("    one uncontradicted link is enough and two that disagree stop it.\n")
+    echo("    This runs by itself on the arrival or exit that discovers a seam; the command is\n")
+    echo("    for seams already sitting in the map. Up to "
+        .. tostring(map.configs.seam_max_component) .. " rooms (seam_max_component).\n\n")
+    echo("  map seams [area name]\n")
+    echo("    The same repair swept over a whole area, repeated until a pass moves nothing.\n")
+    echo("    For seams that formed before seam closing existed, or that nothing has revisited\n")
+    echo("    since: the automatic pass only fires on the arrival or exit that discovers one.\n")
+    echo("    Closing one seam can supply the evidence another was missing, hence the passes.\n\n")
     echo("  map clean-placeholders [area name]\n")
     echo("    Delete placeholder rooms whose map position overlaps a real room in the current (or named) area.\n")
     echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")

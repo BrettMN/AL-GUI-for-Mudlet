@@ -114,6 +114,7 @@ local function wire_one_exit(item)
     end
     if type(_.create_neighbors_for_current_room) ~= "function" then return end
     local posCache = type(_.live_pos_cache) == "function" and _.live_pos_cache(areaID) or nil
+    local realigned = 0
     _.create_neighbors_for_current_room(roomID, posCache,
         { exits = { [item.dir] = item.targetVnum } })
 
@@ -130,7 +131,16 @@ local function wire_one_exit(item)
     -- that discovered it.  No info snapshot to pass — the room is on the map by
     -- now, so its stored name and terrain are the right source.
     if type(_.realign_displaced_room) == "function" then
-        _.realign_displaced_room(roomID, posCache)
+        realigned = _.realign_displaced_room(roomID, posCache) or 0
+    end
+    -- Only when realign declined.  The exit just wired is often the first link
+    -- into a chunk that was mapped in isolation, and that is the one case
+    -- realign is built to refuse: a single new exit against every old one.
+    -- Seam closing asks the cluster instead of the room, so it answers exactly
+    -- where realign stops, and it starts with a cheap check that costs nothing
+    -- on a room whose exits all land where they should.
+    if realigned == 0 and type(_.close_component_seam) == "function" then
+        _.close_component_seam(roomID, posCache)
     end
     if type(_.apply_elevation_anchor) == "function" then
         _.apply_elevation_anchor(roomID, posCache)
@@ -244,6 +254,10 @@ local function make_room()
     local info   = map.room_info
     local coords = { 0, 0, 0 }
     local areaID = resolve_area_id_for_room_info(info)
+    -- Whether this room's position was derived from the room we walked out of.
+    -- False means there was nothing in this area to measure against, and a
+    -- position near the origin is then the expected result rather than a fault.
+    local placedFromPrev = false
     -- make_room runs before handle_move's posCache block, so it looks the
     -- long-lived cache up itself: occupancy probes below are answered from it
     -- when we hold one for this area (nil just means the probes fall back to
@@ -253,11 +267,33 @@ local function make_room()
         echo("Cannot create room: area could not be resolved.\n")
         return
     else
+        -- The room we walked out of, but only when it is in the area we have
+        -- just walked into.
+        --
+        -- Coordinates mean nothing across an area boundary: each area is its own
+        -- frame with its own origin, so "one east of the room I just left" is a
+        -- statement about a different grid entirely.  Inheriting across the
+        -- border imports that frame's offset into this one, once, at the first
+        -- room past the border — and every room walked afterwards inherits it
+        -- consistently, which is why the damage shows up as a whole cluster
+        -- sitting at a constant offset with one seam where it meets the rest.
+        local prevID = nil
         if type(map.prev_info.vnum) == "string" then
-            local prevID = getRoomIDbyHash(map.prev_info.vnum)
-            if type(prevID) == "number" and prevID > 0 then
-                coords = { getRoomCoordinates(prevID) }
+            local candidate = getRoomIDbyHash(map.prev_info.vnum)
+            if type(candidate) == "number" and candidate > 0
+                and getRoomArea(candidate) == areaID then
+                prevID = candidate
+            elseif type(candidate) == "number" and candidate > 0 then
+                _.debug_echo("make_room: previous room " .. candidate
+                    .. " is in area " .. tostring(getRoomArea(candidate))
+                    .. ", not " .. tostring(areaID)
+                    .. " — placing without a relative position.\n")
             end
+        end
+
+        if prevID then
+            placedFromPrev = true
+            coords = { getRoomCoordinates(prevID) }
             if coords[1] == nil then coords = { 0, 0, 0 } end
             local shift = { 0, 0, 0 }
             if type(info.exits) == "table" then
@@ -320,30 +356,49 @@ local function make_room()
             for n = 1, 3 do
                 coords[n] = coords[n] - shift[n]
             end
-            -- Map stretching (skip while grid mode is active)
+            -- Map stretching, off unless map.configs.stretch_area says otherwise.
+            --
+            -- This used to be a second, hand-rolled copy of the pass in
+            -- stretch_area_for_new_room, and it differed from that one in a way
+            -- that mattered: it moved every room it walked, honouring neither a
+            -- user's `map lock` nor the pin on the player's own room.  A room the
+            -- player was standing in could therefore be relocated out from under
+            -- them by the arrival that created their next room.  The shared
+            -- helper skips immobile rooms and writes only rooms that actually
+            -- move, so this now defers to it.
             if not _.should_skip_stretch_for_area(areaID) then
-                local overlap = _.rooms_at_position(posCache, areaID,
-                    coords[1], coords[2], coords[3])
-                if overlap ~= nil then
-                    local rooms = getAreaRooms(areaID)
-                    local rcoords
-                    for _i, id in ipairs(rooms) do
-                        rcoords = { getRoomCoordinates(id) }
-                        -- Skip rooms that have no coordinates yet; the
-                        -- arithmetic below would fault on the nil.
-                        if rcoords[1] ~= nil then
-                            for n = 1, 3 do
-                                if shift[n] ~= 0 and (rcoords[n] - coords[n]) * shift[n] <= 0 then
-                                    rcoords[n] = rcoords[n] - shift[n]
-                                end
-                            end
-                            -- Through the wrapper: this shifts the whole area,
-                            -- so an unmirrored write would invalidate every
-                            -- cell in the cache at once.
-                            _.set_room_coordinates(id, rcoords[1], rcoords[2], rcoords[3], posCache)
-                        end
-                    end
+                _.stretch_area_for_new_room(areaID, coords, shift, posCache)
+            elseif map.configs.debug_mapper
+                and _.rooms_at_position(posCache, areaID,
+                    coords[1], coords[2], coords[3]) ~= nil then
+                -- Left deliberately stacked rather than shoving the area aside:
+                -- dedup in create_neighbors_for_current_room collapses the cell
+                -- once it is touched from a neighbour, and resolve_room_overlaps
+                -- separates whatever genuinely differs under 'map normalize'.
+                -- Said out loud because a silent stack is hard to account for
+                -- later, and this is where the duplicate is born.
+                _.debug_echo(string.format(
+                    "make_room: (%d,%d,%d) already occupied; placing vnum %s there "
+                    .. "and leaving the rest of the area alone.\n",
+                    coords[1], coords[2], coords[3], tostring(info.vnum)))
+            end
+        else
+            -- Nothing in this area to place against: either this is the first
+            -- room seen here, or we have just crossed a border.  There is no
+            -- relative position to be had — so take a free cell rather than
+            -- stacking on whatever occupies the origin, and let the map correct
+            -- it.  realign_displaced_room moves the room onto its real cluster
+            -- as soon as two of its own exits agree where that is, which is the
+            -- same treatment a room created without a directional clue has
+            -- always had.  An empty area keeps (0,0,0) and is simply its origin.
+            if _.rooms_at_position(posCache, areaID, 0, 0, 0) ~= nil
+                and not _.is_large_area(areaID) then
+                local cache = posCache
+                if not _.pos_cache_is_authoritative(cache, areaID) then
+                    cache = _.build_pos_cache(areaID)
                 end
+                local fx, fy, fz = _.find_free_cell_near(cache, 0, 0, 0, 64)
+                if fx ~= nil then coords = { fx, fy, fz } end
             end
         end
     end
@@ -371,7 +426,13 @@ local function make_room()
     -- the prior locked/anchor room lost its hash binding somewhere and we
     -- are about to "teleport" the player to (0,0,0).  The user explicitly
     -- asked us to surface this case so it is no longer silent.
-    if math.abs(coords[1]) <= 2 and math.abs(coords[2]) <= 2 and math.abs(coords[3]) <= 2 then
+    --
+    -- Not raised when the position was never derived from a previous room:
+    -- entering an area for the first time legitimately starts at its origin,
+    -- and warning about it every border crossing would train the eye to ignore
+    -- the message that matters.
+    if placedFromPrev
+        and math.abs(coords[1]) <= 2 and math.abs(coords[2]) <= 2 and math.abs(coords[3]) <= 2 then
         local msg = string.format(
             "make_room: created room %d for vnum %s at (%d,%d,%d). "
             .. "If this is unexpected, an earlier code path may have cleared "
@@ -473,7 +534,6 @@ local function handle_move(isLastInBatch)
 
     if type(info.vnum) == "string" then
         local rnum = getRoomIDbyHash(info.vnum)
-        local roomWasCreatedOrAdopted = false
         if type(rnum) ~= "number" then rnum = -1 end
         -- Self-heal a forward/reverse hash-index desync before treating the
         -- room as missing.  A room may still store this hash even when the
@@ -533,7 +593,6 @@ local function handle_move(isLastInBatch)
                     _.mark_autowalk_dirty()
                     rnum    = placeholderID
                     adopted = true
-                    roomWasCreatedOrAdopted = true
                     _.debug_echo("Adopted placeholder " .. placeholderID
                         .. " for vnum " .. info.vnum .. " (dir " .. arrivalDir .. ")\n")
                 end
@@ -551,7 +610,6 @@ local function handle_move(isLastInBatch)
                         _.mark_autowalk_dirty()
                         rnum    = adoptedID
                         adopted = true
-                        roomWasCreatedOrAdopted = true
                         _.debug_echo("Adopted real room " .. adoptedID
                             .. " (" .. tostring(info.name) .. ") for vnum " .. info.vnum .. "\n")
                     end
@@ -562,7 +620,6 @@ local function handle_move(isLastInBatch)
                 rnum = getRoomIDbyHash(info.vnum)
                 if type(rnum) ~= "number" then rnum = -1 end
                 if rnum > 0 then
-                    roomWasCreatedOrAdopted = true
                 end
             end
         end
@@ -573,20 +630,79 @@ local function handle_move(isLastInBatch)
             local currentAreaID = getRoomArea(rnum)
             local areaMatchesGMCP = not (correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID)
             if correctAreaID and correctAreaID > 0 and correctAreaID ~= currentAreaID then
-                local canAutoMoveArea = roomWasCreatedOrAdopted
-                    or type(currentAreaID) ~= "number"
-                    or currentAreaID < 1
-                if canAutoMoveArea then
+                -- GMCP decides which area this room is in, the same way it
+                -- decides the room's identity: the player is standing in it and
+                -- the server has just named its area.
+                --
+                -- This used to move only rooms the arrival had created or
+                -- adopted, which left the ordinary border crossing behind.  A
+                -- placeholder made as a neighbour in the previous area, then
+                -- walked into and found by its vnum, is neither created nor
+                -- adopted — so it kept the old area, and because
+                -- create_neighbors_for_current_room takes its area from the room
+                -- rather than from GMCP, every neighbour it then created was
+                -- filed under the previous area too.  One skipped move seeded a
+                -- whole cluster on the wrong side of the border.
+                --
+                -- A locked room is the exception: the user placed it deliberately.
+                if _.is_room_locked(rnum) then
+                    _.debug_echo("Room " .. rnum .. " is locked; leaving it in area "
+                        .. tostring(currentAreaID) .. " despite GMCP area "
+                        .. tostring(correctAreaID) .. "\n")
+                    areaMatchesGMCP = false
+                else
                     _.debug_echo("Moving room " ..
-                        rnum .. " from area " .. currentAreaID .. " to area " .. correctAreaID .. "\n")
+                        rnum .. " from area " .. tostring(currentAreaID)
+                        .. " to area " .. correctAreaID .. "\n")
+
+                    -- Mark the cell it is leaving, so the old area's map shows a
+                    -- boundary rather than an exit into empty space.  Done before
+                    -- the move, while the room is still the old area's occupant
+                    -- of that cell — ensure_border_poi declines a cell that is
+                    -- taken, and after the move this one is free.
+                    local ox, oy, oz = getRoomCoordinates(rnum)
+                    local fromRoom, fromDir = nil, nil
+                    if type(map.prev_info) == "table" and type(map.prev_info.vnum) == "string" then
+                        fromRoom = getRoomIDbyHash(map.prev_info.vnum)
+                        for dir, vnum in pairs(map.prev_info.exits or {}) do
+                            if vnum == info.vnum then fromDir = dir break end
+                        end
+                    end
+
                     _.set_room_area(rnum, correctAreaID)
+
+                    if ox ~= nil and type(currentAreaID) == "number" and currentAreaID > 0 then
+                        _.ensure_border_poi(currentAreaID, ox, oy, oz,
+                            fromRoom, fromDir, correctAreaID, nil)
+                    end
+
+                    -- Its coordinates were a statement about the area it just
+                    -- left and mean nothing here.  Keep them when the cell is
+                    -- free — they cost nothing and realign_displaced_room will
+                    -- correct them once the room's exits agree on somewhere
+                    -- better — but never stack on a room that is already there.
+                    if ox ~= nil and not _.is_large_area(correctAreaID) then
+                        local taken = false
+                        local hits = _.rooms_at_position(nil, correctAreaID, ox, oy, oz)
+                        if type(hits) == "table" then
+                            for i = 1, #hits do
+                                if hits[i] ~= rnum then taken = true break end
+                            end
+                        end
+                        if taken then
+                            local cache = _.build_pos_cache(correctAreaID)
+                            local fx, fy, fz = _.find_free_cell_near(cache, ox, oy, oz, 64)
+                            if fx ~= nil then
+                                _.set_room_coordinates(rnum, fx, fy, fz, cache)
+                                _.debug_echo("Room " .. rnum .. " re-placed at ("
+                                    .. fx .. "," .. fy .. "," .. fz
+                                    .. ") in its new area.\n")
+                            end
+                        end
+                    end
+
                     currentAreaID = correctAreaID
                     areaMatchesGMCP = true
-                else
-                    _.debug_echo("Skipping area move for existing room " .. rnum
-                        .. " (current area " .. tostring(currentAreaID)
-                        .. ", GMCP area " .. tostring(correctAreaID) .. ")\n")
-                    areaMatchesGMCP = false
                 end
             end
 
@@ -660,11 +776,26 @@ local function handle_move(isLastInBatch)
                 _.clear_room_user_data(rnum, "terrain")
             end
 
+            -- Grid mode for the area the player is in.
+            --
+            -- The evidence is one room's terrain, but the effect is the whole
+            -- area's rendering, and those two do not match: a tree, a tower, any
+            -- interior inside a wilderness reports no terrain, so re-deciding on
+            -- every arrival switched a 2000-room area out of grid mode for one
+            -- step and back again on the next.  Terrain on the room the player
+            -- occupies is good evidence that the area *is* a grid and no evidence
+            -- that it is not, so the flag is latched on: it may be turned on by an
+            -- arrival, never off by one.  Clear map._last_grid_mode_by_area (or
+            -- call setGridMode yourself) to undo a latch set in error.
             if currentAreaID and currentAreaID > 0 then
                 if type(setGridMode) == "function" then
                     local desiredGrid = _.current_room_uses_grid_mode() and true or false
                     map._last_grid_mode_by_area = map._last_grid_mode_by_area or {}
-                    if map._last_grid_mode_by_area[currentAreaID] ~= desiredGrid then
+                    local latched = map.configs.grid_mode_latch ~= false
+                        and map._last_grid_mode_by_area[currentAreaID] == true
+                        and not desiredGrid
+                    if not latched
+                        and map._last_grid_mode_by_area[currentAreaID] ~= desiredGrid then
                         setGridMode(currentAreaID, desiredGrid)
                         map._last_grid_mode_by_area[currentAreaID] = desiredGrid
                     end
@@ -766,6 +897,11 @@ local function handle_move(isLastInBatch)
             local realigned = 0
             if type(_.realign_displaced_room) == "function" then
                 realigned = _.realign_displaced_room(rnum, posCache, info) or 0
+            end
+            -- See the matching call in wire_one_exit: this is the arrival that
+            -- may have just joined an isolated chunk to the rest of the map.
+            if realigned == 0 and type(_.close_component_seam) == "function" then
+                realigned = _.close_component_seam(rnum, posCache) or 0
             end
 
             -- Elevation is the only thing here that knows an absolute answer:

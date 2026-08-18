@@ -153,32 +153,60 @@ function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
     if type(prevRoomID) ~= "number" or prevRoomID < 1 then return nil end
     if type(arrivalDir) ~= "string" or arrivalDir == "" then return nil end
 
+    -- Adoption turns an existing room into the room the player just walked
+    -- into.  That is right for a placeholder standing in for this very vnum, or
+    -- for one that stands for nothing yet — and wrong for one that is already
+    -- the map's record of a *different* game room, because taking it over
+    -- clears that room's binding and leaves the map with one room where the
+    -- server has two.  Being unvisited does not make a room available; not
+    -- being anyone else does.
+    local function adoptable(rid)
+        -- A border marker is a label, not a room standing in for one.
+        if _.is_border_poi(rid) then return false end
+        if not is_placeholder(rid) then return false end
+        if type(newVnum) ~= "string" or newVnum == "" then return true end
+        if type(getRoomHashByID) ~= "function" then return true end
+        local hash = getRoomHashByID(rid)
+        if type(hash) ~= "string" or hash == "" then return true end
+        return hash == newVnum
+    end
+
     -- Strategy 1: use the exit Mudlet has already wired from prev room.
     local exitTarget = _.get_room_exit_target(prevRoomID, arrivalDir)
     if type(exitTarget) == "number" and exitTarget > 0 then
-        -- Only adopt if it is genuinely unvisited (hash-named placeholder).
-        if is_placeholder(exitTarget) then
+        if adoptable(exitTarget) then
             return exitTarget
         end
-        -- The exit is already a real room — don't adopt it.
+        -- Already a real room, or already someone else — don't adopt it.
         return nil
     end
 
     -- Strategy 2: coordinate scan.
+    --
+    -- Only meaningful inside one area.  Each area is its own coordinate frame,
+    -- so a cell one step north of a room in area A says nothing about area B,
+    -- and a placeholder found that way would be adopted purely because two
+    -- unrelated frames happen to overlap there.
     local shift = _.get_shift_for_exit_key(arrivalDir)
     if not shift then return nil end
+    if type(newVnum) == "string" and newVnum ~= "" and type(map.room_info) == "table" then
+        local expectedArea = tonumber(map.configs.area_ids_by_gmcp[map.room_info.area or ""])
+        if expectedArea and expectedArea > 0 and getRoomArea(prevRoomID) ~= expectedArea then
+            return nil
+        end
+    end
     local px, py, pz = getRoomCoordinates(prevRoomID)
     if px == nil then return nil end
     local tx, ty, tz = px + shift[1], py + shift[2], pz + shift[3]
     if type(getRoomsByPosition) ~= "function" then return nil end
     local areaID   = getRoomArea(prevRoomID)
     local nearbyID = getRoomsByPosition(areaID, tx, ty, tz)
-    if type(nearbyID) == "number" and nearbyID > 0 and is_placeholder(nearbyID) then
+    if type(nearbyID) == "number" and nearbyID > 0 and adoptable(nearbyID) then
         return nearbyID
     end
     if type(nearbyID) == "table" then
         for _, rid in ipairs(nearbyID) do
-            if type(rid) == "number" and rid > 0 and is_placeholder(rid) then
+            if type(rid) == "number" and rid > 0 and adoptable(rid) then
                 return rid
             end
         end
@@ -522,14 +550,20 @@ function _.find_real_room_to_adopt(areaID)
     if type(info.name) ~= "string" or info.name == "" then return nil end
 
     local function is_adoptable(rid)
+        if _.is_border_poi(rid) then return false end
         local h = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or nil
         return (h == nil or h == "") and not is_placeholder(rid)
     end
 
     -- Phase 1: positional lookup via prev room + exit direction.
+    --
+    -- Restricted to a previous room in this same area: the offset is applied to
+    -- that room's coordinates and searched for in areaID, so a previous room
+    -- from another area would mix two frames and land the search on a cell that
+    -- means nothing.
     if type(prevInfo) == "table" and type(prevInfo.vnum) == "string" then
         local prevID = getRoomIDbyHash(prevInfo.vnum)
-        if type(prevID) == "number" and prevID > 0 then
+        if type(prevID) == "number" and prevID > 0 and getRoomArea(prevID) == areaID then
             local px, py, pz = getRoomCoordinates(prevID)
             if px ~= nil then
                 local shift = _.discover_exit_shift(info, prevInfo)
@@ -596,6 +630,14 @@ function _.normalize_terrain_name(terrain)
     return canonical or value
 end
 
+-- Does the room the player currently occupies look like part of a grid area?
+--
+-- Reads the live GMCP room, so this answers a question about one room and must
+-- not be used to decide anything about the area as a whole beyond how it draws.
+-- It no longer gates the stretch pass (see should_skip_stretch_for_area) and the
+-- grid flag it feeds is latched on rather than re-decided per arrival (see
+-- handle_move in Core.lua): a terrain-less interior in the middle of a
+-- wilderness is not evidence that the wilderness stopped being a grid.
 function _.current_room_uses_grid_mode()
     if map.room_info == nil then return false end
     if _.is_elevated_room_name(map.room_info.name) then return false end
@@ -902,11 +944,24 @@ function _.scaled_reconcile_move_cap(roomCount, maxPasses, baseCap)
     return baseCap
 end
 
+-- Whether the stretch pass must be skipped for areaID.  This is the single
+-- authority on that question; callers pass the answer around as `skipStretch`
+-- but may only ever add a reason to skip, never remove one.
+--
+-- Note what is deliberately *not* consulted here any more: grid mode.  The two
+-- had been the same predicate, so the pass that mass-relocates rooms switched
+-- itself on precisely when the player stepped into a room with no terrain — a
+-- tree, a tower — which is where the worst shear in the map turned up.  Whether
+-- an area renders as a grid says nothing about whether rewriting every
+-- coordinate in it is a good idea; see _.current_room_uses_grid_mode, now used
+-- only for setGridMode.
 function _.should_skip_stretch_for_area(areaID)
+    -- Off by default; see map.configs.stretch_area in Data.lua for why.
+    if map.configs.stretch_area ~= true then return true end
     -- Always skip stretch for large areas: iterating millions of rooms to
     -- shift coordinates would freeze Mudlet for a long time.
     if _.is_large_area(areaID) then return true end
-    return _.current_room_uses_grid_mode()
+    return false
 end
 
 -- --------------------------------------------------------------------------
@@ -1408,6 +1463,79 @@ function _.read_room_provenance(roomID)
     return out
 end
 
+-- --------------------------------------------------------------------------
+-- Border markers
+-- --------------------------------------------------------------------------
+-- An exit leading out of the area is drawn from a room that has no counterpart
+-- on this side: the room it reaches lives in another area's coordinate frame and
+-- must stay there, so the map shows an exit going nowhere visible.  A marker
+-- room stands in that gap — placed on the cell the exit points at, in this
+-- area, carrying the POI symbol so the boundary reads at a glance.
+--
+-- It is a label, not a room.  Nothing is wired to it, it holds no vnum, and the
+-- exit itself still points at the real room across the border so autowalk can
+-- cross.  Because it has no vnum, every path that adopts a hashless room has to
+-- be told to leave it alone — hence the flag rather than a naming convention.
+local BORDER_POI_KEY = "border_poi"
+
+function _.is_border_poi(roomID)
+    return room_user_data(roomID, BORDER_POI_KEY) == "1"
+end
+
+-- Ensure a border marker sits at (x, y, z) in areaID.  Returns the marker's
+-- room id, or nil when one was neither found nor warranted.
+--
+-- A cell that already holds a real room is left alone: the marker would either
+-- duplicate it or overwrite the symbol of a room that is genuinely there, and
+-- an exit whose own side of the border is already mapped needs no signpost.
+function _.ensure_border_poi(areaID, x, y, z, fromRoomID, dir, targetAreaID, posCache)
+    if map.configs.border_poi == false then return nil end
+    if type(areaID) ~= "number" or areaID < 1 then return nil end
+    if x == nil or y == nil or z == nil then return nil end
+
+    local occupants = _.rooms_at_position(posCache, areaID, x, y, z)
+    if type(occupants) == "table" and #occupants > 0 then
+        for i = 1, #occupants do
+            if _.is_border_poi(occupants[i]) then return occupants[i] end
+        end
+        return nil
+    end
+
+    local roomID = createRoomID()
+    _.add_room(roomID)
+    _.set_room_area(roomID, areaID)
+    _.set_room_coordinates(roomID, x, y, z, posCache)
+
+    local targetName = _.get_area_name_by_id(targetAreaID)
+    _.set_room_name(roomID,
+        "to " .. (targetName or ("area " .. tostring(targetAreaID))), areaID)
+    setRoomUserData(roomID, BORDER_POI_KEY, "1")
+    if type(setRoomChar) == "function" then pcall(setRoomChar, roomID, "#") end
+    _.apply_room_environment(roomID, "Inside")
+    _.stamp_room_origin(roomID, "border-marker",
+        tostring(fromRoomID) .. ":" .. tostring(dir))
+
+    _.debug_echo("Border marker " .. roomID .. " placed at (" .. x .. "," .. y
+        .. "," .. z .. ") for " .. tostring(dir) .. " out of room "
+        .. tostring(fromRoomID) .. ".\n")
+    return roomID
+end
+
+-- True when two rooms are each bound to a game room and those bindings differ.
+-- The server's vnum is an identity; a shared map cell is a coincidence.  Where
+-- the two disagree the vnum wins, so every caller that merges, deletes or
+-- rebinds a room on positional evidence has to ask this first.
+--
+-- False when either side is unbound: a room with no vnum has no identity to
+-- contradict, which is what lets an imported map without GMCP data be absorbed.
+function _.hashes_conflict(a, b)
+    if type(getRoomHashByID) ~= "function" then return false end
+    local ha, hb = getRoomHashByID(a), getRoomHashByID(b)
+    if type(ha) ~= "string" or ha == "" then return false end
+    if type(hb) ~= "string" or hb == "" then return false end
+    return ha ~= hb
+end
+
 -- Returns the Mudlet ID of the room the player is currently in, or nil.
 function _.current_player_room_id()
     if type(map.room_info) == "table" and type(map.room_info.vnum) == "string" then
@@ -1426,6 +1554,11 @@ function _.is_room_immobile(rid)
 end
 
 function _.stretch_area_for_new_room(areaID, coords, shift, posCache)
+    -- Hard gate, not just a caller-side check: this is the one function that can
+    -- move a whole area by a step, so the config has to be honoured here as well
+    -- as at every call site.  A path that forgets to ask
+    -- should_skip_stretch_for_area cannot shear the map behind the setting.
+    if map.configs.stretch_area ~= true then return end
     local overlap = _.rooms_at_position(posCache, areaID, coords[1], coords[2], coords[3])
     if overlap == nil then return end
     local rooms = (posCache and posCache._rooms) or getAreaRooms(areaID)
@@ -1463,6 +1596,12 @@ function _.move_room_to_expected_position(roomID, roomHash, areaID, coords, shif
             _.set_room_area(roomID, areaID)
         end
         return
+    end
+    -- The caller's hint may only add a reason to skip.  Callers compute it once
+    -- per event and thread it through many rooms, so it can be stale by the time
+    -- it lands here; the area-level answer never is.
+    if not skipStretch then
+        skipStretch = _.should_skip_stretch_for_area(areaID)
     end
     if not skipStretch then
         local overlap = _.rooms_at_position(posCache, areaID, coords[1], coords[2], coords[3])
@@ -1889,8 +2028,17 @@ function _.snap_vertical_pair(areaID, externalPosCache)
                 survivor = targetID < occupantID and targetID or occupantID
             end
             loser = survivor == targetID and occupantID or targetID
+        elseif _.hashes_conflict(targetID, occupantID) then
+            -- Different vnums: two rooms, never one, whatever else they have in
+            -- common.  This branch used to merge them on the strength of one
+            -- carrying terrain metadata and the other not — a property of how
+            -- thoroughly each had been visited, not of which room it is.  The
+            -- caller nudges the blocker aside instead, which costs a cell and
+            -- destroys nothing.
+            return nil, targetID
         elseif targetTerr ~= occupTerr then
-            -- Keep the room with terrain metadata.
+            -- At most one of the two is bound to a game room, so this decides
+            -- only which record survives, not which room it is.
             survivor = targetTerr and targetID or occupantID
             loser = survivor == targetID and occupantID or targetID
         else
@@ -2223,7 +2371,10 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
         end
 
         -- Unreachable: no exits and no in-scope room exits to this room.
-        if not hasAnyExit and not hasIncoming[rid] then
+        -- Border markers are exempt: having neither is what they are, not a
+        -- fault to be reported on every audit for as long as the area has a
+        -- border (see _.ensure_border_poi).
+        if not hasAnyExit and not hasIncoming[rid] and not _.is_border_poi(rid) then
             counts.unreachable = counts.unreachable + 1
             if details then
                 details.unreachable[#details.unreachable + 1] = rid
@@ -2318,8 +2469,7 @@ end
 --   1. Player's current room or locked room (must not be deleted)
 --   2. Most exits (richest connectivity)
 --   3. Name is not equal to the room's own hash (real name)
---   4. Has user_data.coord (game-authoritative position)
---   5. Lowest room id (deterministic tiebreaker)
+--   4. Lowest room id (deterministic tiebreaker)
 function _.choose_survivor(group)
     if type(group) ~= "table" or #group == 0 then return nil end
     local playerRoom = _.current_player_room_id()
@@ -2339,17 +2489,14 @@ function _.choose_survivor(group)
         local name     = type(getRoomName) == "function" and getRoomName(rid) or ""
         local hash     = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or ""
         score[3]       = (name ~= hash and name ~= "") and 1 or 0
-        -- criterion 4: has user_data.coord
-        local coord    = getRoomUserData(rid, "coord")
-        score[4]       = (type(coord) == "string" and coord ~= "") and 1 or 0
-        -- criterion 5: lower id is better (negate for "higher = better" sort)
-        score[5]       = -rid
+        -- criterion 4: lower id is better (negate for "higher = better" sort)
+        score[4]       = -rid
 
         if bestScore == nil then
             best      = rid
             bestScore = score
         else
-            for i = 1, 5 do
+            for i = 1, 4 do
                 if score[i] > bestScore[i] then
                     best      = rid
                     bestScore = score
@@ -2424,6 +2571,24 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
     if survivorID == loserID then return end
     if type(survivorID) ~= "number" or survivorID < 1 then return end
     if type(loserID) ~= "number" or loserID < 1 then return end
+
+    -- Two rooms the server has given different vnums are two rooms, and no
+    -- amount of circumstantial evidence — a shared cell, matching terrain, a
+    -- convenient direction — makes them one.  A merge deletes the loser and
+    -- rewrites every exit that pointed at it, so getting this wrong does not
+    -- misplace a room, it destroys one and silently reroutes the map through
+    -- the survivor.
+    --
+    -- Enforced here rather than only at the call sites: this is the single
+    -- funnel every merge passes through, and a rule this consequential should
+    -- not depend on each caller having remembered it.  Merging a room that has
+    -- no vnum at all stays allowed — that is how an imported map without GMCP
+    -- data gets absorbed, and "no identity" is not a conflicting one.
+    if _.hashes_conflict(survivorID, loserID) then
+        _.debug_echo("Refused to merge room " .. loserID .. " into " .. survivorID
+            .. ": different vnums.\n")
+        return
+    end
 
     -- Keep a caller-supplied index in step with the rewiring below, so a batch
     -- can build it once.  Without this a survivor that later becomes a loser
@@ -2639,42 +2804,8 @@ function map.dedupe_area_by_hash(areaID, posCache)
 end
 
 -- --------------------------------------------------------------------------
--- Anchor-based coordinate translation helpers
+-- Sub-graph translation helpers
 -- --------------------------------------------------------------------------
-
--- Parse a "X,Y" or "X,Y,Z" coord string (with optional spaces) into numbers.
--- Returns x, y, z (z defaults to nil if not present).
-local function parse_coord_string(s)
-    if type(s) ~= "string" then return nil end
-    s = s:match("^%s*(.-)%s*$")  -- trim
-    local parts = {}
-    for part in s:gmatch("[^,]+") do
-        parts[#parts + 1] = tonumber(part:match("^%s*(.-)%s*$"))
-    end
-    if #parts >= 2 and parts[1] and parts[2] then
-        return parts[1], parts[2], parts[3]
-    end
-    return nil
-end
-
--- Returns a table { [roomID] = {x, y, z} } for every room in areaID that
--- has a valid user_data.coord string.
-function _.collect_coord_anchors(areaID)
-    if type(areaID) ~= "number" or areaID < 1 then return {} end
-    local rooms   = getAreaRooms(areaID)
-    local anchors = {}
-    if type(rooms) ~= "table" then return anchors end
-    for _i, rid in ipairs(rooms) do
-        local coordStr = getRoomUserData(rid, "coord")
-        if type(coordStr) == "string" and coordStr ~= "" then
-            local ax, ay, az = parse_coord_string(coordStr)
-            if ax and ay then
-                anchors[rid] = { x = ax, y = ay, z = az }
-            end
-        end
-    end
-    return anchors
-end
 
 -- BFS-walk the area from seedID and collect all reachable room IDs.
 -- visited (optional) lets callers share a visited set across components.
@@ -2702,42 +2833,6 @@ local function bfs_component(seedID, areaID, visited)
         end
     end
     return component
-end
-
--- Read-only counterpart of the "no anchors" branch in _.apply_anchor_translation:
--- the connected sub-graphs holding no room with a user_data.coord, which is why
--- that pass cannot tie them to the game's coordinate frame and leaves them in
--- Mudlet-relative space.  Returned largest first as { size, rooms = { id, ... } },
--- since the size is what says whether a sub-graph is a stranded wing of the area
--- or a single stub nothing has been walked into yet.
-function _.find_unanchored_subgraphs(areaID)
-    local found = {}
-    if type(areaID) ~= "number" or areaID < 1 then return found end
-    local rooms = getAreaRooms(areaID)
-    if type(rooms) ~= "table" or #rooms == 0 then return found end
-
-    local anchors = _.collect_coord_anchors(areaID)
-    local visited = {}
-    for _i, seedID in ipairs(rooms) do
-        if not visited[seedID] then
-            local component = bfs_component(seedID, areaID, visited)
-            if #component > 0 then
-                local anchored = false
-                for _j, rid in ipairs(component) do
-                    if anchors[rid] then anchored = true; break end
-                end
-                if not anchored then
-                    table.sort(component)
-                    found[#found + 1] = { size = #component, rooms = component }
-                end
-            end
-        end
-    end
-    table.sort(found, function(a, b)
-        if a.size ~= b.size then return a.size > b.size end
-        return a.rooms[1] < b.rooms[1]
-    end)
-    return found
 end
 
 -- Translate every room in `component` by (dx, dy, dz), skipping immobile rooms.
@@ -2789,80 +2884,6 @@ function _.translate_subgraph(component, dx, dy, posCache, dz, immobileFn)
         end
     end
     return true
-end
-
--- For each connected sub-graph in areaID:
---   - Collect anchor rooms (those with user_data.coord).
---   - Compute Δ = (coord.x − room.x, coord.y − room.y) per anchor.
---   - If all anchors agree → translate the sub-graph.
---   - If anchors disagree → pick the Δ from the lowest anchor id, count disagreement.
---   - If no anchors → count unanchored sub-graph.
--- Returns { anchor_disagreements=N, unanchored_subgraphs=N, translated=N, skipped=N }.
-function _.apply_anchor_translation(areaID, posCache)
-    local result = { anchor_disagreements = 0, unanchored_subgraphs = 0, translated = 0, skipped = 0 }
-    if type(areaID) ~= "number" or areaID < 1 then return result end
-    local rooms = getAreaRooms(areaID)
-    if type(rooms) ~= "table" or #rooms == 0 then return result end
-
-    local anchors  = _.collect_coord_anchors(areaID)
-    local visited  = {}
-
-    for _i, seedID in ipairs(rooms) do
-        if not visited[seedID] then
-            local component = bfs_component(seedID, areaID, visited)
-            if #component > 0 then
-                -- Find anchors in this component
-                local compAnchors = {}
-                for _j, rid in ipairs(component) do
-                    if anchors[rid] then
-                        compAnchors[#compAnchors + 1] = rid
-                    end
-                end
-
-                if #compAnchors == 0 then
-                    result.unanchored_subgraphs = result.unanchored_subgraphs + 1
-                else
-                    -- Compute Δ per anchor
-                    local deltas    = {}
-                    local disagreed = false
-                    local refDX, refDY, refID
-
-                    for _j, aid in ipairs(compAnchors) do
-                        local ax, ay, _az = getRoomCoordinates(aid)
-                        if ax then
-                            local tdx = anchors[aid].x - ax
-                            local tdy = anchors[aid].y - ay
-                            if refDX == nil then
-                                refDX, refDY, refID = tdx, tdy, aid
-                            elseif tdx ~= refDX or tdy ~= refDY then
-                                disagreed = true
-                                -- prefer lower id
-                                if aid < refID then
-                                    refDX, refDY, refID = tdx, tdy, aid
-                                end
-                            end
-                            deltas[#deltas + 1] = { dx = tdx, dy = tdy, id = aid }
-                        end
-                    end
-
-                    if disagreed then
-                        result.anchor_disagreements = result.anchor_disagreements + 1
-                    end
-
-                    if refDX ~= nil then
-                        local ok = _.translate_subgraph(component, refDX, refDY, posCache)
-                        if ok then
-                            result.translated = result.translated + 1
-                        else
-                            result.skipped = result.skipped + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return result
 end
 
 -- Put whole groups of rooms on the z-plane their own nature says they belong

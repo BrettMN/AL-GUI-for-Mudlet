@@ -36,6 +36,51 @@ map.configs.autowalk_reevaluate = map.configs.autowalk_reevaluate ~= false
 -- cut over sooner; raise it to re-enable both for moderately large areas.
 map.configs.large_area_threshold = map.configs.large_area_threshold or 5000
 
+-- Map stretching: when a new room's cell is already taken, relocate every room
+-- on one side of that cell by one step to open it up.
+--
+-- Off, because it is the wrong trade on a coordinate-dense map.  The arrival
+-- room is pinned while the pass runs, so every room around it slides one cell
+-- along one axis and each exit that was correct becomes off by one — a single
+-- collision spends the whole area's layout to seat one room.  On a wilderness
+-- grid, where a placeholder already occupies nearly every cell, collisions are
+-- the normal case rather than the exception: 'map audit' on a 2332-room area
+-- read 739 delta mismatches, dominated by neighbours two cells out instead of
+-- one on a single axis, which is this pass's fingerprint.
+--
+-- With it off the colliding room is simply placed, and the passes built for
+-- exactly that state settle it: lowest-ID-wins dedup in
+-- create_neighbors_for_current_room, then resolve_room_overlaps and reconcile
+-- under 'map normalize'.  Set true to restore the old behaviour.
+map.configs.stretch_area = map.configs.stretch_area == true
+
+-- Grid mode is latched on per area: once an area has been seen in grid mode it
+-- stays there, rather than being re-decided from the room the player currently
+-- occupies.  Terrain is a property of a room, not of an area, so a terrain-less
+-- room inside a wilderness — a tree, a tower, any interior — used to switch the
+-- whole area's rendering off and then back on a step later.  Set false to let
+-- every arrival re-decide (and flap).
+map.configs.grid_mode_latch = map.configs.grid_mode_latch ~= false
+
+-- Mark the far side of an exit that leaves the area with a POI room, placed on
+-- the cell the exit points at.  The exit itself still points at the real room in
+-- the other area, so routing across a border is unaffected; the marker exists
+-- because that room lives in another coordinate frame and cannot be drawn here,
+-- which otherwise leaves a border exit pointing at nothing visible.
+map.configs.border_poi = map.configs.border_poi ~= false
+
+-- May a placeholder that is already bound to one game room be re-bound to a
+-- different one because it happens to sit where an exit points?
+--
+-- No.  A vnum is the server's own statement of identity; a map cell is an
+-- inference from a walk, and where the two disagree the inference is what is
+-- wrong.  Allowing the rebind is how one Mudlet room came to be adopted twice
+-- for two different vnums 25 minutes apart, welding two unrelated stretches of
+-- wilderness into one road that no layout pass could ever satisfy.  With it off
+-- the exit is left as a stub and becomes a real room when the player walks it,
+-- placed from the room they walked out of.
+map.configs.rebind_placeholder_hash = map.configs.rebind_placeholder_hash == true
+
 -- Deferred neighbour wiring.
 --
 -- On a large area a single arrival costs over a second, nearly all of it inside
@@ -86,6 +131,23 @@ map.configs.realign_min_votes = map.configs.realign_min_votes or 2
 -- the map through some other seam — repositioning that is 'map normalize's
 -- job, and doing it mid-step would stall the client.
 map.configs.realign_max_component = map.configs.realign_max_component or 32
+
+-- Close a seam as soon as one is discovered: when a cluster that is internally
+-- consistent turns out to be joined to the rest of the map at an offset, move
+-- the whole cluster onto the position that link implies, rigidly.
+--
+-- This is the companion to realign_displaced_rooms, for the case that one
+-- cannot serve.  Realign asks a single room whether its own exits agree on
+-- somewhere better and wants two of them to say so; the moment a path into an
+-- isolated chunk is established there is exactly one such exit, outvoted by
+-- every exit that room already had.  Asking the cluster instead makes a single
+-- uncontradicted link sufficient — see _.close_component_seam.
+map.configs.close_seams = map.configs.close_seams ~= false
+-- Largest cluster that may be translated this way.  Both sides of the seam are
+-- measured and the smaller one moves, so this is really "how isolated does a
+-- chunk have to be".  Well above realign_max_component because the test is
+-- unanimity across every link rather than a majority of one room's exits.
+map.configs.seam_max_component = map.configs.seam_max_component or 500
 
 -- Absolute elevation anchoring.
 --

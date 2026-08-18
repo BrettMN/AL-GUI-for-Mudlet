@@ -169,6 +169,14 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
             local targetID = getRoomIDbyHash(targetVnum)
             local created  = false
 
+            -- Set when a room that could have served this exit was refused on
+            -- identity grounds.  It must not fall through to "nothing exists
+            -- here, create one": a new room would land on the cell the refused
+            -- room already holds, and the dedup below would merge the two — the
+            -- same weld by another road.  The exit becomes a stub instead, and a
+            -- real room when the player walks it.
+            local identityRefused = false
+
             -- Guard against stale hash bindings that survive deleteRoom:
             -- Mudlet retains the hash→ID entry even after the room is deleted,
             -- so getRoomIDbyHash can return a ghost ID whose area is invalid.
@@ -263,10 +271,18 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                 -- existing identity of a separately-mapped room.
                 local candidateID = nil
 
+                -- In this area, specifically.  A candidate is about to be given
+                -- this vnum and placed relative to the current room, and both of
+                -- those are statements inside one coordinate frame; a room from
+                -- another area cannot satisfy either.  The genuine cross-area
+                -- exit is still wired further down, from the hash lookup — this
+                -- only governs which room may be *adopted* into that role.
                 local function is_live(rid)
                     if type(rid) ~= "number" or rid < 1 then return false end
-                    local a = getRoomArea(rid)
-                    return type(a) == "number" and a > 0
+                    -- A border marker holds no vnum, so the adoption path below
+                    -- would happily bind one onto it.  It is a label.
+                    if _.is_border_poi(rid) then return false end
+                    return getRoomArea(rid) == areaID
                 end
 
                 -- Source A: wired exit
@@ -299,6 +315,28 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                     end
                 end
 
+                -- Both sources answer "a room is where this exit ought to lead",
+                -- which is not the same claim as "this is the room that exit
+                -- leads to".  A room already bound to another vnum disproves the
+                -- guess outright: the vnum is the server's own statement of
+                -- identity and the cell is our inference from a walk, so the
+                -- inference is what gives way.  The exit goes to a stub rather
+                -- than binding this vnum onto a room that is something else.
+                if type(candidateID) == "number" and candidateID > 0
+                    and map.configs.rebind_placeholder_hash ~= true then
+                    local hash = type(getRoomHashByID) == "function"
+                        and getRoomHashByID(candidateID) or nil
+                    if type(hash) == "string" and hash ~= "" and hash ~= targetVnum then
+                        _.note_room_event(candidateID, "adoption-refused",
+                            tostring(roomID) .. ":" .. tostring(dir))
+                        _.debug_echo("Refused room " .. candidateID .. " for vnum "
+                            .. targetVnum .. " (dir " .. tostring(dir)
+                            .. "): it is already room " .. hash .. ".\n")
+                        candidateID     = nil
+                        identityRefused = true
+                    end
+                end
+
                 if type(candidateID) == "number" and candidateID > 0 then
                     local cHash = type(getRoomHashByID) == "function"
                         and getRoomHashByID(candidateID) or nil
@@ -327,7 +365,7 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                 end
             end
 
-            if targetID < 1 and stubUnexplored then
+            if targetID < 1 and (stubUnexplored or identityRefused) then
                 -- Nothing exists for this vnum yet, and on an area this size a
                 -- placeholder room is far too expensive to stand up for an exit
                 -- the player may never take (~396ms in setRoomArea alone, against
@@ -360,6 +398,21 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
             if targetID > 0 then
                 -- Newly created or existing rooms without an area get placed next to us.
                 local targetAreaID = getRoomArea(targetID)
+
+                -- The exit leaves the area.  The room it reaches keeps its own
+                -- frame and is not moved here — the exit below still points at
+                -- it, so autowalk crosses as before — but nothing of it can be
+                -- drawn on this side, so the cell it would have occupied gets a
+                -- marker instead.  Skipped when this room has no coordinates or
+                -- the direction is not a compass one: there is no cell to mark.
+                if shift and cx ~= nil
+                    and type(targetAreaID) == "number" and targetAreaID > 0
+                    and targetAreaID ~= areaID then
+                    _.ensure_border_poi(areaID,
+                        cx + shift[1], cy + shift[2], cz + shift[3],
+                        roomID, dir, targetAreaID, posCache)
+                end
+
                 if created or not targetAreaID or targetAreaID < 1 then
                     if shift then
                         local tx = cx + shift[1]
@@ -426,6 +479,11 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                                 if la ~= lb then return la end
                                 local pa, pb = (a == playerID), (b == playerID)
                                 if pa ~= pb then return pa end
+                                -- A border marker never outlives a real room:
+                                -- it carries no vnum, so surviving would mean
+                                -- inheriting the identity of whatever it beat.
+                                local ma, mb = _.is_border_poi(a), _.is_border_poi(b)
+                                if ma ~= mb then return mb end
                                 return a < b
                             end)
                             local keep = liveIDs[1]
@@ -437,7 +495,16 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                                         _.debug_echo("Dedup: refused to delete locked room "
                                             .. dup .. " (kept " .. keep .. ")\n")
                                     end
-                                else
+                                elseif _.hashes_conflict(keep, dup) then
+                                    -- Two rooms the server has named separately.
+                                    -- Sharing a cell makes one of them invisible;
+                                    -- deleting one makes it wrong.  Left stacked
+                                    -- for resolve_room_overlaps, which moves a
+                                    -- room without destroying it.
+                                    if type(_.debug_echo) == "function" then
+                                        _.debug_echo("Dedup: kept both " .. keep .. " and "
+                                            .. dup .. " — different game rooms on one cell\n")
+                                    end
                                     -- Promote: if survivor is a placeholder and the
                                     -- duplicate is a real room, copy its visible attrs.
                                     if has_is_placeholder
@@ -537,6 +604,8 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                     if la ~= lb then return la end
                     local pa, pb = (a == playerID), (b == playerID)
                     if pa ~= pb then return pa end
+                    local ma, mb = _.is_border_poi(a), _.is_border_poi(b)
+                    if ma ~= mb then return mb end
                     return a < b
                 end)
                 local keep = list[1]
@@ -548,6 +617,14 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                         if type(_.debug_echo) == "function" then
                             _.debug_echo("Final dedup: refused to delete locked room "
                                 .. dup .. " (kept " .. keep .. ")\n")
+                        end
+                        i = i + 1
+                    elseif _.hashes_conflict(keep, dup) then
+                        -- See the matching guard in the dedup above: distinct
+                        -- game rooms are never merged for sharing a cell.
+                        if type(_.debug_echo) == "function" then
+                            _.debug_echo("Final dedup: kept both " .. keep .. " and "
+                                .. dup .. " — different game rooms on one cell\n")
                         end
                         i = i + 1
                     else
@@ -1212,6 +1289,377 @@ function _.realign_displaced_room(roomID, posCache, info)
 end
 
 -- --------------------------------------------------------------------------
+-- Placement: seams
+-- --------------------------------------------------------------------------
+
+-- The set of rooms reachable from seedID through exits that already sit at
+-- exactly the offset their direction implies — one internally consistent
+-- cluster.  An exit whose delta is wrong is precisely the seam we are looking
+-- for, so the walk stops there rather than crossing it, which is what makes the
+-- two sides of a seam come out as two components.
+--
+-- Returns nil when the cluster is larger than `cap`: past that the caller has
+-- not found an isolated chunk, it has found the main body of the map.
+local function consistent_component(seedID, areaID, cap)
+    local component   = { seedID }
+    local inComponent = { [seedID] = true }
+    local head        = 1
+    while head <= #component do
+        local current    = component[head]
+        head             = head + 1
+        local cx, cy, cz = getRoomCoordinates(current)
+        local exits      = getRoomExits(current)
+        if cx ~= nil and type(exits) == "table" then
+            for dir, tid in _.sorted_exit_pairs(exits) do
+                if type(tid) == "string" then tid = tonumber(tid) end
+                if type(tid) == "number" and tid > 0 and not inComponent[tid]
+                    and getRoomArea(tid) == areaID then
+                    local shift = _.get_shift_for_exit_key(dir)
+                    if shift then
+                        local tx, ty, tz = getRoomCoordinates(tid)
+                        if tx ~= nil and (tx - cx) == shift[1]
+                            and (ty - cy) == shift[2] and (tz - cz) == shift[3] then
+                            if #component >= cap then return nil end
+                            inComponent[tid]          = true
+                            component[#component + 1] = tid
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return component, inComponent
+end
+
+-- Every exit linking `component` to the rest of its area implies one
+-- translation: the amount the component would have to move for that exit to sit
+-- at the offset its direction claims.  Returns dx, dy, dz when every crossing
+-- exit implies the same one, and nil when they disagree or there are none.
+--
+-- Unanimity is the whole test, and it is a stronger one than counting votes.
+-- A cluster joined to the map by a single corridor has exactly one piece of
+-- evidence about where it belongs, and nothing contradicting it — so one exit
+-- is enough.  Two crossing exits that disagree are a real contradiction in the
+-- room graph, and no translation satisfies both; moving would relocate the
+-- problem rather than fix it.
+--
+-- Exits leaving the area are ignored: another area is another coordinate frame
+-- and places no constraint on this one.  So are special exits, which carry no
+-- direction to be wrong about.
+local function seam_translation(component, inComponent, areaID, revIndex)
+    local dx, dy, dz = nil, nil, nil
+    local agreed     = true
+    local crossings  = 0
+
+    -- u --dir--> v requires v - u == shift.  Whichever end lies inside the
+    -- component is the end that will move.
+    local function consider(u, v, shift)
+        if not agreed then return end
+        local ux, uy, uz = getRoomCoordinates(u)
+        local vx, vy, vz = getRoomCoordinates(v)
+        if ux == nil or vx == nil then return end
+        local tx, ty, tz
+        if inComponent[u] then
+            tx, ty, tz = vx - ux - shift[1], vy - uy - shift[2], vz - uz - shift[3]
+        else
+            tx, ty, tz = shift[1] + ux - vx, shift[2] + uy - vy, shift[3] + uz - vz
+        end
+        crossings = crossings + 1
+        if dx == nil then
+            dx, dy, dz = tx, ty, tz
+        elseif dx ~= tx or dy ~= ty or dz ~= tz then
+            agreed = false
+        end
+    end
+
+    -- Outbound: exits from the component to rooms outside it.
+    for i = 1, #component do
+        local rid   = component[i]
+        local exits = getRoomExits(rid)
+        if type(exits) == "table" then
+            for dir, tid in _.sorted_exit_pairs(exits) do
+                if type(tid) == "string" then tid = tonumber(tid) end
+                if type(tid) == "number" and tid > 0 and not inComponent[tid]
+                    and getRoomArea(tid) == areaID then
+                    local shift = _.get_shift_for_exit_key(dir)
+                    if shift then consider(rid, tid, shift) end
+                end
+            end
+        end
+    end
+
+    -- Inbound: exits from outside pointing in.  One-way passages exist, so the
+    -- outbound scan alone can miss evidence — and a missed constraint is one
+    -- that could have vetoed the move.
+    if type(revIndex) == "table" then
+        for i = 1, #component do
+            local entries = revIndex[component[i]]
+            if type(entries) == "table" then
+                for j = 1, #entries do
+                    local entry = entries[j]
+                    if entry.kind == "normal" and not inComponent[entry.sourceID]
+                        and getRoomArea(entry.sourceID) == areaID then
+                        local shift = _.get_shift_for_exit_key(entry.dir)
+                        if shift then consider(entry.sourceID, component[i], shift) end
+                    end
+                end
+            end
+        end
+    end
+
+    if not agreed or crossings == 0 then return nil end
+    return dx, dy, dz, crossings
+end
+
+-- Move a self-consistent cluster onto the position its links to the rest of the
+-- map imply, as one rigid piece.
+--
+-- This is the case realign_displaced_room cannot serve.  Realign asks one room
+-- whether its own exits agree on somewhere better, and needs two of them to say
+-- so; but the instant a path into an isolated chunk is established there is
+-- exactly one such exit, and every other exit that room has votes for where it
+-- already is.  The new link loses one to many, at the only moment it matters.
+-- Asking the *cluster* instead turns that around: one crossing link with
+-- nothing to contradict it is a complete answer.
+--
+-- Which side moves: the smaller cluster, and on a tie the one the player is not
+-- standing in, so the map never shifts under them mid-walk.  Locked rooms are
+-- respected; the player's pin is not, because a rigid translation moves the
+-- frame and not the room within it — everything around them moves too, and the
+-- room keeps every offset to its neighbours.
+--
+-- `thorough` also looks for links pointing *into* this room's cluster, which
+-- costs a reverse-exit index — a whole-world walk.  The automatic callers leave
+-- it off: they fire on the room whose own exit was just written, so the link
+-- that discovered the seam is outbound from where they stand, and one end of a
+-- seam is enough.  The manual command passes it, because the room you happen to
+-- be standing in when you notice a seam may be the end with nothing pointing
+-- out — a one-way passage in, or the reverse exit simply not written yet.
+--
+-- Returns the number of rooms moved (0 when it declines).
+function _.close_component_seam(roomID, posCache, thorough)
+    -- Why the last attempt did nothing, for a command to print.  A seam that
+    -- declines is the interesting case and the reason is not recoverable after
+    -- the fact, so it is recorded rather than only echoed under debug.
+    local function decline(reason)
+        map._seam_reason = reason
+        _.debug_echo("seam: " .. reason .. ".\n")
+        return 0
+    end
+    if map.configs.close_seams == false then return 0 end
+    if type(roomID) ~= "number" or roomID < 1 then return 0 end
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return 0 end
+    local rx, ry, rz = getRoomCoordinates(roomID)
+    if rx == nil then return 0 end
+
+    -- Cheap gate, so the component walk below is paid only when there is a seam
+    -- to walk to.  A room whose every exit lands where it should is not on one.
+    -- Prefer a mismatched exit whose target has exits of its own.  Neighbour
+    -- wiring is one-directional until a room is walked into, so an unvisited
+    -- placeholder is a leaf: seeded there, consistent_component returns that one
+    -- room, and the links pointing at it from *both* sides of the seam then
+    -- disagree and the pass declines.  A leaf is never a cluster — it belongs to
+    -- whichever cluster points at it — so seed from a room that can grow one,
+    -- and fall back to the leaf only if nothing else is on offer.
+    local farID, leafFarID = nil, nil
+    local exits = getRoomExits(roomID)
+    if type(exits) ~= "table" then return 0 end
+    for dir, tid in _.sorted_exit_pairs(exits) do
+        if type(tid) == "string" then tid = tonumber(tid) end
+        if type(tid) == "number" and tid > 0 and tid ~= roomID
+            and getRoomArea(tid) == areaID then
+            local shift = _.get_shift_for_exit_key(dir)
+            if shift then
+                local tx, ty, tz = getRoomCoordinates(tid)
+                if tx ~= nil and ((tx - rx) ~= shift[1]
+                    or (ty - ry) ~= shift[2] or (tz - rz) ~= shift[3]) then
+                    local targetExits = getRoomExits(tid)
+                    local hasExits    = false
+                    if type(targetExits) == "table" then
+                        for _k in pairs(targetExits) do hasExits = true break end
+                    end
+                    if hasExits then
+                        farID = tid
+                        break
+                    elseif leafFarID == nil then
+                        leafFarID = tid
+                    end
+                end
+            end
+        end
+    end
+    farID = farID or leafFarID
+    local cap = tonumber(map.configs.seam_max_component) or 500
+
+    -- Nothing points out of here at a wrong offset.  In thorough mode the seam
+    -- may still exist with only a link pointing *in*, so look for the room at
+    -- the other end and start again from there — where the same link is an
+    -- outgoing one and everything below works unchanged.
+    if farID == nil then
+        if not thorough then return 0 end
+        local near, nearSet = consistent_component(roomID, areaID, cap)
+        if near == nil then return 0 end
+        if type(_.build_reverse_exit_index) ~= "function" then return 0 end
+        local revIndex = _.build_reverse_exit_index(near)
+        for i = 1, #near do
+            local entries = revIndex[near[i]]
+            if type(entries) == "table" then
+                for j = 1, #entries do
+                    local entry = entries[j]
+                    if entry.kind == "normal" and not nearSet[entry.sourceID]
+                        and getRoomArea(entry.sourceID) == areaID then
+                        local shift = _.get_shift_for_exit_key(entry.dir)
+                        local sx, sy, sz = getRoomCoordinates(entry.sourceID)
+                        local tx, ty, tz = getRoomCoordinates(near[i])
+                        if shift and sx ~= nil and tx ~= nil
+                            and ((tx - sx) ~= shift[1] or (ty - sy) ~= shift[2]
+                                or (tz - sz) ~= shift[3]) then
+                            return _.close_component_seam(entry.sourceID, posCache, false)
+                        end
+                    end
+                end
+            end
+        end
+        return 0
+    end
+    local near, nearSet = consistent_component(roomID, areaID, cap)
+    local far,  farSet  = consistent_component(farID, areaID, cap)
+
+    -- The far room turning up inside this room's own cluster means the two are
+    -- already connected by consistent exits and the bad one closes a loop that
+    -- does not close.  No translation fixes that: it is a contradiction in the
+    -- graph, not a displaced chunk.
+    if near and nearSet[farID] then return 0 end
+
+    local component, inComponent
+    local function pick(rooms, set) component, inComponent = rooms, set end
+    if near and far then
+        if #near < #far then
+            pick(near, nearSet)
+        elseif #far < #near then
+            pick(far, farSet)
+        else
+            local playerID = safe_current_player_room_id()
+            if playerID ~= nil and nearSet[playerID] then
+                pick(far, farSet)
+            else
+                pick(near, nearSet)
+            end
+        end
+    elseif near then
+        pick(near, nearSet)
+    elseif far then
+        pick(far, farSet)
+    end
+    if component == nil then
+        return decline(string.format(
+            "both sides of the seam are larger than %d rooms (seam_max_component); "
+            .. "'map normalize' is the pass for that", cap))
+    end
+
+    -- Whole-world walk, so it is paid only now that a move is otherwise going
+    -- ahead — and only for this component's rooms.
+    local revIndex = nil
+    if type(_.build_reverse_exit_index) == "function" then
+        revIndex = _.build_reverse_exit_index(component)
+    end
+
+    local dx, dy, dz, crossings = seam_translation(component, inComponent, areaID, revIndex)
+    if dx == nil then
+        return decline("the links across it disagree about where the cluster belongs, "
+            .. "so no single move satisfies them all")
+    end
+    if dx == 0 and dy == 0 and dz == 0 then return 0 end
+
+    -- Real locks only: see the note above on why the player's pin does not
+    -- block a rigid translation.
+    -- Find what is in the way before asking for the move, so a refusal can name
+    -- it.  A seam that will not close gets looked at by hand, and "something is
+    -- in the way" is the one thing the person looking already knows.  These
+    -- probes are the same ones translate_subgraph makes, paid only here where a
+    -- move is otherwise going ahead.
+    for i = 1, #component do
+        local rid = component[i]
+        if safe_is_room_locked(rid) then
+            return decline("room " .. rid .. " in the cluster is locked")
+        end
+        local cx, cy, cz = getRoomCoordinates(rid)
+        if cx ~= nil then
+            local occupants = _.rooms_at_position(posCache, areaID,
+                cx + dx, cy + dy, cz + dz)
+            if type(occupants) == "table" then
+                for j = 1, #occupants do
+                    local oid = occupants[j]
+                    if not inComponent[oid] then
+                        return decline(string.format(
+                            "room %d already occupies (%d,%d,%d), where room %d needs to go",
+                            oid, cx + dx, cy + dy, cz + dz, rid))
+                    end
+                end
+            end
+        end
+    end
+
+    -- Real locks only: see the note above on why the player's pin does not
+    -- block a rigid translation.
+    local moved = _.translate_subgraph(component, dx, dy, posCache, dz,
+        function(rid) return safe_is_room_locked(rid) end)
+    if not moved then
+        return decline("the move was refused")
+    end
+
+    map._seam_reason = nil
+    _.mark_autowalk_dirty()
+    _.debug_echo(string.format(
+        "seam: moved %d room(s) by (%d,%d,%d) on %d agreeing link(s)\n",
+        #component, dx, dy, dz, crossings))
+    return #component
+end
+
+-- Close every seam in an area that can be closed, and keep going until none
+-- can.  Returns { closed, rooms_moved, passes }.
+--
+-- The automatic pass fires on the arrival or the exit wiring that *discovers* a
+-- seam.  A seam that formed before it existed — or one discovered while the
+-- player was somewhere the pass could not see both ends — is never rediscovered
+-- on its own, because nothing revisits a room to notice its exits are wrong.
+-- This is the sweep for those.
+--
+-- Repeated because closing one seam can hand another the evidence it needed:
+-- two clusters both parked away from the map cannot judge each other until one
+-- of them is home.  It stops when a pass moves nothing, so a set of mutually
+-- contradictory seams costs one extra pass rather than looping.
+function _.close_area_seams(areaID, maxPasses)
+    local result = { closed = 0, rooms_moved = 0, passes = 0 }
+    if type(areaID) ~= "number" or areaID < 1 then return result end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or #rooms == 0 then return result end
+    maxPasses = tonumber(maxPasses) or 8
+
+    local posCache = _.build_pos_cache(areaID)
+    for _pass = 1, maxPasses do
+        result.passes = result.passes + 1
+        local movedThisPass = 0
+        for i = 1, #rooms do
+            local rid = rooms[i]
+            -- Still in this area, and still a room: a seam closed earlier in the
+            -- pass may have taken it somewhere else entirely.
+            if getRoomArea(rid) == areaID then
+                local moved = _.close_component_seam(rid, posCache, true) or 0
+                if moved > 0 then
+                    movedThisPass    = movedThisPass + moved
+                    result.closed    = result.closed + 1
+                end
+            end
+        end
+        result.rooms_moved = result.rooms_moved + movedThisPass
+        if movedThisPass == 0 then break end
+    end
+    return result
+end
+
+-- --------------------------------------------------------------------------
 -- Public layout commands
 -- --------------------------------------------------------------------------
 
@@ -1255,14 +1703,9 @@ function _.finish_layout_repair(areaID, posCache, result, opts)
     result = result or {}
     local anchorRoomID = opts.anchorRoomID
 
+    -- Snap in-area up/down room pairs to adjacent z-levels.
     with_anchor_policy(anchorRoomID, function()
-        -- Snap in-area up/down room pairs to adjacent z-levels.
         result.snap = _.snap_vertical_pair(areaID, posCache)
-
-        -- Align sub-graphs to the game's coordinate frame using the
-        -- user_data.coord values stored during room capture.  x/y only, so it
-        -- cannot undo the elevation pass below.
-        result.anchor = _.apply_anchor_translation(areaID, posCache)
     end)
 
     -- Put groups of rooms on the z-plane their own terrain and names say they
@@ -1339,14 +1782,6 @@ local function emit_layout_report(result)
         tally(result.snap.blocked, "vertical snap", "blocked by occupant")
         tally(result.snap.shared_target_bug, "shared-target bug",
             "(in-area duplicate exit, data issue)")
-    end
-
-    if result.anchor then
-        tally(result.anchor.translated, "sub-graph", "aligned to game coords")
-        tally(result.anchor.unanchored_subgraphs, "sub-graph", "unanchored (no coord data)")
-        tally(result.anchor.anchor_disagreements, "anchor disagreement",
-            "(picked lowest-id anchor)")
-        tally(result.anchor.skipped, "sub-graph", "not translated (locked room or collision)")
     end
 
     if result.elevation then
@@ -1540,7 +1975,6 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     local totalDedupe     = 0
     local totalMoved      = 0
     local totalSnapped    = 0
-    local totalTranslated = 0
     local totalElevated   = 0
     local totalSeparated  = 0
     local areaCount       = 0
@@ -1582,7 +2016,6 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             local r = _.finish_layout_repair(id, posCache, {},
                 { respectRealLocks = true, audit = false })
             totalSnapped    = totalSnapped + (r.snap.snapped or 0)
-            totalTranslated = totalTranslated + (r.anchor.translated or 0)
             totalElevated   = totalElevated
                 + (r.elevation.rooms_shifted or 0) + (r.elevation.anchored or 0)
             totalSeparated  = totalSeparated + (r.overlap.separated or 0)
@@ -1604,11 +2037,6 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     if totalSnapped > 0 then
         parts[#parts + 1] = totalSnapped
             .. " vertical pair" .. (totalSnapped == 1 and "" or "s") .. " snapped"
-    end
-    if totalTranslated > 0 then
-        parts[#parts + 1] = totalTranslated
-            .. " sub-graph" .. (totalTranslated == 1 and "" or "s")
-            .. " aligned to game coords"
     end
     if totalElevated > 0 then
         parts[#parts + 1] = totalElevated
