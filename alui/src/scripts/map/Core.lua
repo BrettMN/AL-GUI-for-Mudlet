@@ -720,7 +720,13 @@ local function handle_move(isLastInBatch)
                         end
                         if taken then
                             local cache = _.build_pos_cache(correctAreaID)
-                            local fx, fy, fz = _.find_free_cell_near(cache, ox, oy, oz, 64)
+                            -- Prefer a parking cell the room's own exits agree
+                            -- with; nothing re-derives its position after this.
+                            local scoreFn = type(_.exit_consistency_score) == "function"
+                                and function(nx, ny, nz)
+                                    return _.exit_consistency_score(rnum, nx, ny, nz)
+                                end or nil
+                            local fx, fy, fz = _.find_free_cell_near(cache, ox, oy, oz, 64, scoreFn)
                             if fx ~= nil then
                                 _.set_room_coordinates(rnum, fx, fy, fz, cache)
                                 _.debug_echo("Room " .. rnum .. " re-placed at ("

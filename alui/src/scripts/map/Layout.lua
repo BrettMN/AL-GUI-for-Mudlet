@@ -878,7 +878,8 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
 
         local ox, oy, oz = getRoomCoordinates(oid)
         if ox == nil then return false end
-        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz, evictRadius)
+        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz, evictRadius,
+            function(nx, ny, nz) return safe_exit_consistency_score(oid, nx, ny, nz) end)
         if fx == nil then return false end
 
         _.set_room_coordinates(oid, fx, fy, fz, posCache)
@@ -886,14 +887,85 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
         return true
     end
 
-    local moved = 0
+    -- Reaching a room and placing it are different events, and conflating them
+    -- is what strands rooms nowhere near their exits.  The BFS marks a room
+    -- visited the first time any exit leads to it; if that first exit could not
+    -- place it (the expected cell was held by a better-anchored room and the
+    -- eviction was refused) the old code still consumed the room, so no other
+    -- exit into it — in that pass or any later one, since every pass repeats the
+    -- same order — was ever allowed to try.  The room then kept whatever stale
+    -- coordinates it already had, which is not a bad placement but no placement
+    -- at all: that is the room sitting on the far side of the area from every
+    -- neighbour that names it.
+    --
+    --   visited     — traversal, per pass: enqueue each room once.
+    --   placed      — per pass: one room moves at most once per pass, but every
+    --                 exit into it may try until one succeeds.
+    --   everPlaced  — across passes: did any exit ever settle this room?
+    --   reached     — across passes: every room the BFS saw, for the pass below.
+    local moved      = 0
+    local passMove   = 0
+    local placed     = { [anchorID] = true }
+    local everPlaced = { [anchorID] = true }
+    local reached    = { [anchorID] = true }
+
+    -- Move targetID onto the cell parentID's exit names, evicting a weaker
+    -- occupant if that is allowed.  Returns true when the move cap has been
+    -- reached and the whole call must stop.
+    local function try_place(parentID, targetID, shift)
+        if placed[targetID] then return false end
+        local cx, cy, cz = getRoomCoordinates(parentID)
+        if cx == nil then return false end
+
+        local expectedX = cx + shift[1]
+        local expectedY = cy + shift[2]
+        local expectedZ = cz + shift[3]
+
+        local occupants = _.pos_cache_get(posCache, expectedX, expectedY, expectedZ)
+        local blockers  = {}
+        if type(occupants) == "table" then
+            for _i, oid in ipairs(occupants) do
+                if oid ~= targetID then blockers[#blockers + 1] = oid end
+            end
+        end
+
+        local alreadyOccupied = #blockers > 0
+        if alreadyOccupied and not safe_is_room_locked(targetID)
+            and evict_blockers(blockers, targetID, expectedX, expectedY, expectedZ) then
+            -- The evicted room was repositioned too, so it counts against
+            -- maxMoves like any other move.
+            alreadyOccupied = false
+            passMove        = passMove + 1
+            moved           = moved + 1
+            if moved >= maxMoves then return true end
+        end
+
+        if not alreadyOccupied and not safe_is_room_locked(targetID) then
+            local tx, ty, tz = getRoomCoordinates(targetID)
+            -- Use expectedZ directly: it already reflects the anchor's actual
+            -- z-plane.  Overriding with forcedZ was what snapped terrain-labelled
+            -- rooms to z=0 even when the whole cluster lives at a different z
+            -- (e.g. forest grid at z=33).
+            placed[targetID]     = true
+            everPlaced[targetID] = true
+            if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
+                _.set_room_coordinates(targetID, expectedX, expectedY, expectedZ, posCache)
+                passMove = passMove + 1
+                moved    = moved + 1
+                if moved >= maxMoves then return true end
+            end
+        end
+        return false
+    end
+
     for _pass = 1, maxPasses do
-        local passMove = 0
+        passMove = 0
 
         -- BFS from anchor
-        local queue    = { { id = anchorID, depth = 0 } }
-        local qHead    = 1
-        local visited  = { [anchorID] = true }
+        local queue       = { { id = anchorID, depth = 0 } }
+        local qHead       = 1
+        local visited     = { [anchorID] = true }
+        placed = { [anchorID] = true }
         if externalVisited then externalVisited[anchorID] = true end
         while qHead <= #queue do
             local entry   = queue[qHead]
@@ -902,7 +974,7 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
             qHead         = qHead + 1
             local exits   = getRoomExits(current)
             if type(exits) == "table" then
-                local cx, cy, cz = getRoomCoordinates(current)
+                local cx = getRoomCoordinates(current)
                 if cx == nil then
                     -- skip; room has no coordinates
                 else
@@ -920,56 +992,31 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
                         end
                         if type(targetID) == "number" and targetID > 0 then
                             local targetAreaID = getRoomArea(targetID)
-                            if targetAreaID == areaID and not visited[targetID] then
-                                visited[targetID] = true
+                            if targetAreaID == areaID then
                                 local nextDepth = depth + 1
                                 local shift = _.get_shift_for_exit_key(dir)
-                                if shift then
-                                    local expectedX       = cx + shift[1]
-                                    local expectedY       = cy + shift[2]
-                                    local expectedZ       = cz + shift[3]
-
-                                    local occupants = _.pos_cache_get(posCache,
-                                        expectedX, expectedY, expectedZ)
-                                    local blockers  = {}
-                                    if type(occupants) == "table" then
-                                        for _, oid in ipairs(occupants) do
-                                            if oid ~= targetID then
-                                                blockers[#blockers + 1] = oid
-                                            end
-                                        end
-                                    end
-
-                                    local alreadyOccupied = #blockers > 0
-                                    if alreadyOccupied and not safe_is_room_locked(targetID)
-                                        and evict_blockers(blockers, targetID,
-                                            expectedX, expectedY, expectedZ) then
-                                        -- The evicted room was repositioned too, so it
-                                        -- counts against maxMoves like any other move.
-                                        alreadyOccupied = false
-                                        passMove        = passMove + 1
-                                        moved           = moved + 1
-                                        if moved >= maxMoves then return moved end
-                                    end
-
-                                    if not alreadyOccupied and not safe_is_room_locked(targetID) then
-                                        local tx, ty, tz = getRoomCoordinates(targetID)
-                                        -- Use expectedZ directly: it already reflects the anchor's
-                                        -- actual z-plane. Overriding with forcedZ was what snapped
-                                        -- terrain-labelled rooms to z=0 even when the whole cluster
-                                        -- lives at a different z (e.g. forest grid at z=33).
-                                        if tx ~= expectedX or ty ~= expectedY or tz ~= expectedZ then
-                                            _.set_room_coordinates(targetID,
-                                                expectedX, expectedY, expectedZ, posCache)
-                                            passMove = passMove + 1
-                                            moved    = moved + 1
-                                            if moved >= maxMoves then return moved end
-                                        end
-                                    end
+                                -- Diagonals are NOT held back here, unlike the
+                                -- rebuild in map.recalculate_room_layout.  That
+                                -- command derives every coordinate from scratch,
+                                -- so ranking a cardinal chain above a diagonal
+                                -- shortcut decides the shape of the result.  This
+                                -- one only corrects coordinates that already
+                                -- exist, and a blocked cardinal claim leaves the
+                                -- room where it is -- whereupon the diagonal,
+                                -- running later, finds the room already on the
+                                -- cell it names, calls it settled, and the pass
+                                -- ends with the room never moved.  Measured on
+                                -- the Aquia dump that cost two extra mismatches.
+                                if shift and try_place(current, targetID, shift) then
+                                    return moved
                                 end
-                                if not maxDepth or nextDepth < maxDepth then
-                                    table.insert(queue, { id = targetID, depth = nextDepth })
-                                    if externalVisited then externalVisited[targetID] = true end
+                                if not visited[targetID] then
+                                    visited[targetID] = true
+                                    reached[targetID] = true
+                                    if not maxDepth or nextDepth < maxDepth then
+                                        table.insert(queue, { id = targetID, depth = nextDepth })
+                                        if externalVisited then externalVisited[targetID] = true end
+                                    end
                                 end
                             end
                         end
@@ -980,6 +1027,120 @@ function _.reconcile_connected_rooms(anchorID, maxPasses, maxMoves, maxDepth, ex
 
         if passMove == 0 then break end
     end
+
+    -- Last resort for rooms the passes reached but no exit ever placed: every
+    -- cell their exits name was held by a better-anchored room, so above they
+    -- were simply left alone — and "left alone" for a room that was misplaced to
+    -- begin with means it stays wherever it was, with no relation to its exits
+    -- at all.  Park it on the cell its own exits vote for, or the nearest free
+    -- one to that, so the worst outcome is a room one cell out of place instead
+    -- of one sitting across the area from every neighbour that names it.
+    --
+    -- Only for the multi-pass repair commands, and only when the cache actually
+    -- knows what is occupied — a large-area sentinel cache reports every cell as
+    -- free, which would turn "nearest free cell" into a guess.
+    local parkEnabled = maxPasses > 1
+        and type(_.find_free_cell_near) == "function"
+        and type(_.pos_cache_is_authoritative) == "function"
+        and _.pos_cache_is_authoritative(posCache, areaID)
+
+    if parkEnabled then
+        -- The position most of the room's own in-area exits agree on.  Ties keep
+        -- the first in canonical exit order, so this is stable run to run.
+        local function voted_position(rid)
+            local exits = getRoomExits(rid)
+            if type(exits) ~= "table" then return nil end
+            local votes, best, bestVotes = {}, nil, 0
+            for dir, tgt in _.sorted_exit_pairs(exits) do
+                if type(tgt) == "string" then tgt = tonumber(tgt) end
+                if type(tgt) == "number" and tgt > 0 and tgt ~= rid
+                    and getRoomArea(tgt) == areaID then
+                    local shift = _.get_shift_for_exit_key(dir)
+                    if shift then
+                        local tx, ty, tz = getRoomCoordinates(tgt)
+                        if tx ~= nil then
+                            local px, py, pz = tx - shift[1], ty - shift[2], tz - shift[3]
+                            local key  = px .. "," .. py .. "," .. pz
+                            local slot = votes[key]
+                            if slot then
+                                slot.n = slot.n + 1
+                            else
+                                slot = { n = 1, x = px, y = py, z = pz }
+                                votes[key] = slot
+                            end
+                            if slot.n > bestVotes then best, bestVotes = slot, slot.n end
+                        end
+                    end
+                end
+            end
+            if best == nil then return nil end
+            return best.x, best.y, best.z
+        end
+
+        -- Sorted: pairs() order over `reached` is not stable, and these moves
+        -- compete for cells, so an unsorted walk would make the command's result
+        -- differ between runs on identical input (see map test-recalculate).
+        local pending = {}
+        for rid in pairs(reached) do
+            if rid ~= anchorID and not everPlaced[rid] and not safe_is_room_locked(rid) then
+                pending[#pending + 1] = rid
+            end
+        end
+        table.sort(pending)
+
+        for i = 1, #pending do
+            if moved >= maxMoves then break end
+            local rid = pending[i]
+            local vx, vy, vz = voted_position(rid)
+            if vx ~= nil then
+                local occupants = _.pos_cache_get(posCache, vx, vy, vz)
+                local free = true
+                if type(occupants) == "table" then
+                    for j = 1, #occupants do
+                        if occupants[j] ~= rid then free = false break end
+                    end
+                end
+                local nx, ny, nz = vx, vy, vz
+                if not free then
+                    -- rid itself does not block rid: the cell it already sits on
+                    -- has to be one of the answers, or a room whose best cell is
+                    -- its current one gets bounced somewhere worse on every run
+                    -- and the command stops converging.
+                    nx, ny, nz = _.find_free_cell_near(posCache, vx, vy, vz, evictRadius,
+                        function(px, py, pz)
+                            return safe_exit_consistency_score(rid, px, py, pz)
+                        end, rid)
+                end
+                if nx ~= nil then
+                    local cx, cy, cz = getRoomCoordinates(rid)
+                    if cx == nil or cx ~= nx or cy ~= ny or cz ~= nz then
+                        -- Move only for a strict improvement, so two cells that
+                        -- satisfy the room equally well cannot trade it back and
+                        -- forth run after run.  A room sharing its cell with
+                        -- another is the exception: leaving it stacked is worse
+                        -- than an equal-scoring cell of its own.
+                        local shared = false
+                        if cx ~= nil then
+                            local here = _.pos_cache_get(posCache, cx, cy, cz)
+                            if type(here) == "table" then
+                                for j = 1, #here do
+                                    if here[j] ~= rid then shared = true break end
+                                end
+                            end
+                        end
+                        local newScore = safe_exit_consistency_score(rid, nx, ny, nz)
+                        local curScore = cx ~= nil
+                            and safe_exit_consistency_score(rid, cx, cy, cz) or -1
+                        if newScore > curScore or (shared and newScore >= curScore) then
+                            _.set_room_coordinates(rid, nx, ny, nz, posCache)
+                            moved = moved + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     return moved
 end
 
@@ -1330,7 +1491,8 @@ function _.place_room_from_previous(roomID, posCache, info)
         local ox, oy, oz = getRoomCoordinates(blocker)
         if ox == nil then return 0, false end
         local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz,
-            tonumber(map.configs.reconcile_evict_radius) or 8)
+            tonumber(map.configs.reconcile_evict_radius) or 8,
+            function(nx, ny, nz) return safe_exit_consistency_score(blocker, nx, ny, nz) end)
         if fx == nil then return 0, false end
         _.set_room_coordinates(blocker, fx, fy, fz, posCache)
         _.debug_echo(string.format(
@@ -2367,82 +2529,185 @@ function map.recalculate_room_layout()
     -- already placed and something is badly wrong with the data.
     local MAX_BFS_ROOMS = maxRooms
 
-    while qHead <= #queue do
-        if qHead > MAX_BFS_ROOMS then
-            echo("[map recalculate] BFS exceeded " .. MAX_BFS_ROOMS
-                .. " rooms and was stopped; the area layout is left partly rebuilt.\n")
-            break
-        end
-        local entry = queue[qHead]
-        qHead = qHead + 1
-        local exits = getRoomExits(entry.id)
+    local deferred      = {}
+    local diagonals     = {}
 
-        if type(exits) == "table" then
-            for dir, targetID in _.sorted_exit_pairs(exits) do
-                if type(targetID) == "string" then
-                    targetID = tonumber(targetID)
+    -- Place targetID on the cell `entry` + `shift` names, and enqueue it.
+    --
+    -- allowNudge = false is the whole point of the two-phase walk below.  A room
+    -- is reached by every exit that leads to it, and those exits disagree: one
+    -- may name a cell another room already holds while a second names a free
+    -- one.  Taking the first claim and nudging the room off to some nearby cell
+    -- when it collides throws away the claim that would have worked -- the room
+    -- ends up on a cell no exit named, which is exactly "the layout ignores the
+    -- exits".  So a blocked claim places nothing, leaves the room unvisited for
+    -- the next exit to try, and is only remembered in `deferred` in case no exit
+    -- ever finds it a free cell.
+    --
+    -- Returns true when the room was placed.
+    local function place_target(entry, dir, targetID, shift, allowNudge)
+        local tx     = entry.x + shift[1]
+        local ty     = entry.y + shift[2]
+        local tz     = entry.z + shift[3]
+        local posKey = pos_key(tx, ty, tz)
+
+        local holder = occupied[posKey]
+        if holder ~= nil and holder ~= targetID then
+            if not allowNudge then
+                deferred[#deferred + 1] =
+                    { entry = entry, dir = dir, id = targetID, shift = shift }
+                if type(_.debug_echo) == "function" then
+                    _.debug_echo("[recalculate] deferred " .. targetID
+                        .. " (parent " .. entry.id .. " -" .. tostring(dir) .. "-> ), wanted ("
+                        .. tx .. "," .. ty .. "," .. tz .. "), held by "
+                        .. tostring(holder) .. "\n")
                 end
+                return false
+            end
+            if type(_.debug_echo) == "function" then
+                _.debug_echo("[recalculate] collision placing " .. targetID
+                    .. " (parent " .. entry.id .. " -" .. tostring(dir) .. "-> ), wanted ("
+                    .. tx .. "," .. ty .. "," .. tz .. "), already occupied by "
+                    .. tostring(holder) .. "\n")
+            end
+            -- Every exit into this room was blocked, so the direction of any one
+            -- of them is no guide.  Score the candidates by how much of the room
+            -- agrees with each instead; by now the rest of the area is placed,
+            -- so those coordinates are the finished ones.
+            tx, ty, tz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift, nil,
+                function(nx, ny, nz)
+                    return safe_exit_consistency_score(targetID, nx, ny, nz)
+                end)
+            posKey     = pos_key(tx, ty, tz)
+            nudgeCount = nudgeCount + 1
+        end
 
-                if type(targetID) == "number" and targetID > 0 and not visited[targetID] then
-                    visited[targetID]  = true
+        visited[targetID] = true
 
-                    local shift        = _.get_shift_for_exit_key(dir)
-                    local targetAreaID = getRoomArea(targetID)
+        local cx, cy, cz = getRoomCoordinates(targetID)
+        if safe_is_room_locked(targetID) and cx ~= nil then
+            -- Can't move this room: anchor its subtree to where it REALLY is
+            -- instead of the hypothetical cell above.  Using the computed cell
+            -- here would place every descendant relative to a position the room
+            -- was never actually moved to, producing spurious delta mismatches
+            -- through the whole subtree.
+            occupied[posKey] = nil
+            tx, ty, tz = cx, cy, cz
+            posKey = pos_key(tx, ty, tz)
+        elseif cx ~= tx or cy ~= ty or cz ~= tz then
+            -- No cache of our own here (occupancy lives in the `occupied` table
+            -- above), but the write still has to reach the long-lived one
+            -- Core.lua holds.
+            _.set_room_coordinates(targetID, tx, ty, tz)
+            movedCount = movedCount + 1
+        end
 
-                    if shift and targetAreaID == areaID then
-                        local tx = entry.x + shift[1]
-                        local ty = entry.y + shift[2]
-                        local tz = entry.z + shift[3]
+        occupied[posKey]        = targetID
+        roomPositions[targetID] = { x = tx, y = ty, z = tz }
+        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
+        return true
+    end
 
-                        -- Collision avoidance: if the ideal position is already
-                        -- taken by an earlier BFS room, nudge to the nearest
-                        -- free spot so rooms don't stack on top of each other.
-                        local posKey = pos_key(tx, ty, tz)
-                        if occupied[posKey] then
-                            if type(_.debug_echo) == "function" then
-                                _.debug_echo("[recalculate] collision placing " .. targetID
-                                    .. " (parent " .. entry.id .. " -" .. tostring(dir) .. "-> ), wanted ("
-                                    .. tx .. "," .. ty .. "," .. tz .. "), already occupied by "
-                                    .. tostring(occupied[posKey]) .. "\n")
+    -- Walk the queue, taking only placements that land on a free cell.
+    -- Returns false if the safety cap tripped.
+    local function drain()
+        while qHead <= #queue do
+            if qHead > MAX_BFS_ROOMS then
+                echo("[map recalculate] BFS exceeded " .. MAX_BFS_ROOMS
+                    .. " rooms and was stopped; the area layout is left partly rebuilt.\n")
+                return false
+            end
+            local entry = queue[qHead]
+            qHead = qHead + 1
+            local exits = getRoomExits(entry.id)
+
+            if type(exits) == "table" then
+                for dir, targetID in _.sorted_exit_pairs(exits) do
+                    if type(targetID) == "string" then
+                        targetID = tonumber(targetID)
+                    end
+
+                    if type(targetID) == "number" and targetID > 0 and not visited[targetID] then
+                        local shift        = _.get_shift_for_exit_key(dir)
+                        local targetAreaID = getRoomArea(targetID)
+
+                        -- Marked visited only once an exit actually places it.
+                        -- Marking on first sight consumed the room: an exit with
+                        -- no direction (a portal, in/out, a special exit) or one
+                        -- crossing an area boundary would claim it, and the
+                        -- cardinal exit that could have positioned it then found
+                        -- it already visited and skipped it.  The room kept its
+                        -- stale coordinates and, never being enqueued, took its
+                        -- whole subtree with it.
+                        if shift and targetAreaID == areaID then
+                            if _.is_diagonal_shift(shift) then
+                                -- Held back until the cardinal frontier is
+                                -- exhausted: see _.is_diagonal_shift.
+                                diagonals[#diagonals + 1] =
+                                    { entry = entry, dir = dir, id = targetID, shift = shift }
+                            else
+                                place_target(entry, dir, targetID, shift, false)
                             end
-                            tx, ty, tz = _.find_nearest_unoccupied(occupied, tx, ty, tz, shift)
-                            posKey = pos_key(tx, ty, tz)
-                            nudgeCount = nudgeCount + 1
+                        elseif type(_.debug_echo) == "function" then
+                            _.debug_echo("[recalculate] skipped " .. targetID
+                                .. " (parent " .. entry.id .. " -" .. tostring(dir)
+                                .. "-> ): shift=" .. tostring(shift ~= nil)
+                                .. " targetArea=" .. tostring(targetAreaID)
+                                .. " areaID=" .. tostring(areaID)
+                                .. " (not placed by this exit; still open to another)\n")
                         end
-
-                        local cx, cy, cz = getRoomCoordinates(targetID)
-                        if safe_is_room_locked(targetID) and cx ~= nil then
-                            -- Can't move this room: anchor its subtree to
-                            -- where it REALLY is instead of the hypothetical
-                            -- BFS-computed cell above. Using the computed
-                            -- cell here would place every descendant relative
-                            -- to a position the room was never actually moved
-                            -- to, producing spurious delta mismatches through
-                            -- the whole subtree.
-                            occupied[posKey] = nil
-                            tx, ty, tz = cx, cy, cz
-                            posKey = pos_key(tx, ty, tz)
-                        elseif cx ~= tx or cy ~= ty or cz ~= tz then
-                            -- No cache of our own here (occupancy lives in the
-                            -- `occupied` table above), but the write still has to
-                            -- reach the long-lived one Core.lua holds.
-                            _.set_room_coordinates(targetID, tx, ty, tz)
-                            movedCount = movedCount + 1
-                        end
-
-                        occupied[posKey]        = targetID
-                        roomPositions[targetID] = { x = tx, y = ty, z = tz }
-                        table.insert(queue, { id = targetID, x = tx, y = ty, z = tz })
-                    elseif type(_.debug_echo) == "function" then
-                        _.debug_echo("[recalculate] skipped " .. targetID
-                            .. " (parent " .. entry.id .. " -" .. tostring(dir)
-                            .. "-> ): shift=" .. tostring(shift ~= nil)
-                            .. " targetArea=" .. tostring(targetAreaID)
-                            .. " areaID=" .. tostring(areaID) .. " (marked visited, never placed)\n")
                     end
                 end
             end
         end
+        return true
+    end
+
+    -- Three tiers, weakest evidence last.  Each tier places at most one room
+    -- before the cardinal frontier is drained again, because a single placement
+    -- can free the rest of a chain to fit cleanly:
+    --
+    --   1. cardinal exits onto a free cell -- the strongest statement there is;
+    --   2. diagonal exits onto a free cell -- believed only where no cardinal
+    --      chain reaches, since a diagonal often compresses geometry the
+    --      cardinal route spells out;
+    --   3. any claim at all, forced onto the nearest scored free cell, for a
+    --      room every one of whose exits named a taken cell.
+    --
+    -- Ranking the first two tiers globally rather than per room is what stops
+    -- the result depending on which room the command was run from: a diagonal
+    -- one BFS level nearer the seed no longer outranks the cardinal chain that
+    -- reaches the same room a level later.
+    local ok       = drain()
+    local nextDiag, nextDefer = 1, 1
+    while ok do
+        local progress = false
+
+        while nextDiag <= #diagonals do
+            local d = diagonals[nextDiag]
+            nextDiag = nextDiag + 1
+            if not visited[d.id] then
+                -- A diagonal that also collides drops to tier three via
+                -- place_target's own `deferred` bookkeeping.
+                if place_target(d.entry, d.dir, d.id, d.shift, false) then
+                    progress = true
+                    break
+                end
+            end
+        end
+
+        if not progress then
+            local claim
+            while nextDefer <= #deferred do
+                local c = deferred[nextDefer]
+                nextDefer = nextDefer + 1
+                if not visited[c.id] then claim = c break end
+            end
+            if claim == nil then break end
+            place_target(claim.entry, claim.dir, claim.id, claim.shift, true)
+        end
+
+        ok = drain()
     end
 
     -- Post-BFS placeholder cleanup:

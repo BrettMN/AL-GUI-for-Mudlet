@@ -621,6 +621,19 @@ function _.is_horizontal_shift(shift)
     return type(shift) == "table" and shift[3] == 0
 end
 
+-- A shift that moves on both horizontal axes at once (northeast and friends).
+--
+-- Worth naming because the layout passes rank these below cardinals.  A diagonal
+-- exit in a MUD very often compresses geometry the cardinal route spells out --
+-- "southeast" from a town centre can land where walking south then east twice
+-- lands -- so when the two disagree about where a room goes, the cardinal chain
+-- is the one to believe.  Letting a diagonal place a room first because it
+-- happened to sit one BFS level nearer the seed is what makes the same area come
+-- out differently depending on which room the player was standing in.
+function _.is_diagonal_shift(shift)
+    return type(shift) == "table" and shift[1] ~= 0 and shift[2] ~= 0
+end
+
 function _.normalize_terrain_name(terrain)
     if type(terrain) ~= "string" then return nil end
     local value = terrain:gsub("^%s+", ""):gsub("%s+$", "")
@@ -1122,40 +1135,92 @@ function _.set_room_coordinates(roomID, x, y, z, posCache)
     end
 end
 
+-- The cells of the Chebyshev ring of radius r around (x,y), in order of true
+-- distance from the centre: the four cardinals (distance r), then each edge
+-- cell working outward from its cardinal, then the four diagonal corners
+-- (distance r*sqrt2, the farthest cells in the ring).
+--
+-- The order matters because callers take the first acceptable cell.  The
+-- previous version walked the perimeter geometrically — the whole west column,
+-- then each intermediate column's two ends, then the east column — which
+-- returned the *south-west corner* of the ring before any cardinal at the same
+-- radius, and returned a western cell before an equidistant eastern one.  Every
+-- room a repair pass had to park therefore drifted west and diagonally away
+-- from where its exits said it belonged, which is a delta mismatch the audit
+-- then reports on both ends of every exit into it.
+local function ring_cells(x, y, r)
+    local cells = {
+        { x, y + r }, { x + r, y }, { x, y - r }, { x - r, y },
+    }
+    for i = 1, r - 1 do
+        cells[#cells + 1] = { x + i, y + r }
+        cells[#cells + 1] = { x - i, y + r }
+        cells[#cells + 1] = { x + i, y - r }
+        cells[#cells + 1] = { x - i, y - r }
+        cells[#cells + 1] = { x + r, y + i }
+        cells[#cells + 1] = { x + r, y - i }
+        cells[#cells + 1] = { x - r, y + i }
+        cells[#cells + 1] = { x - r, y - i }
+    end
+    cells[#cells + 1] = { x + r, y + r }
+    cells[#cells + 1] = { x + r, y - r }
+    cells[#cells + 1] = { x - r, y - r }
+    cells[#cells + 1] = { x - r, y + r }
+    return cells
+end
+
 -- Find the nearest unoccupied cell to (x,y,z) on the same z-plane, searched in
 -- expanding Chebyshev rings out to maxRadius.  "Unoccupied" is judged from the
 -- supplied position cache, so callers must keep the cache current (relocate
 -- rooms via set_room_coordinates).  Returns nx,ny,nz or nil if the whole search
 -- radius is full.
+--
 -- Only the perimeter of each ring is a candidate — the interior belongs to a
 -- ring already searched — so walk the perimeter directly instead of scanning the
 -- full (2r+1)² square and discarding the interior.  That is O(r) per ring and
--- O(maxRadius²) overall, rather than O(r²) per ring and O(maxRadius³) overall:
--- at the default maxRadius of 64 an exhausted search costs ~12.5k loop
--- iterations instead of ~366k for the same ~16.6k cell look-ups.  Probe order is
--- unchanged from the square-scan version (west column south-to-north, then each
--- intermediate column's two ends, then the east column), so the cell chosen for
--- a given cache is identical.
-function _.find_free_cell_near(cache, x, y, z, maxRadius)
+-- O(maxRadius²) overall rather than O(r²) per ring and O(maxRadius³).
+--
+-- scoreFn is optional: `scoreFn(nx, ny, nz)` rates a candidate cell, higher is
+-- better.  With it, the search still stops at the first ring that has any free
+-- cell — nearest still wins — but picks the best-rated cell *within* that ring
+-- instead of the first one it happens to walk past.  Ties keep the earlier, and
+-- therefore closer, candidate.  Callers relocating a room that already has
+-- exits pass _.exit_consistency_score here so the parking spot agrees with as
+-- many of the room's own neighbours as any cell at that distance can.
+function _.find_free_cell_near(cache, x, y, z, maxRadius, scoreFn, ignoreRoomID)
     if cache == nil or x == nil then return nil end
     maxRadius = tonumber(maxRadius) or 64
+
+    -- A cell holding nothing but the room that is being moved is free for it.
+    -- Without this a caller relocating a room can never be offered the cell the
+    -- room is already on, so "stay where you are" is not among the answers and a
+    -- room whose best cell is its current one is bounced somewhere worse on
+    -- every run — the command stops being idempotent and appears to give a
+    -- different result each time it is used.
+    local function cell_is_free(nx, ny, nz)
+        local occupants = _.pos_cache_get(cache, nx, ny, nz)
+        if occupants == nil then return true end
+        if ignoreRoomID == nil or type(occupants) ~= "table" then return false end
+        for i = 1, #occupants do
+            if occupants[i] ~= ignoreRoomID then return false end
+        end
+        return true
+    end
+
     for r = 1, maxRadius do
-        -- West column, in full.
-        for dy = -r, r do
-            local nx, ny = x - r, y + dy
-            if _.pos_cache_get(cache, nx, ny, z) == nil then return nx, ny, z end
+        local cells = ring_cells(x, y, r)
+        local best, bestScore
+        for i = 1, #cells do
+            local nx, ny = cells[i][1], cells[i][2]
+            if cell_is_free(nx, ny, z) then
+                if scoreFn == nil then return nx, ny, z end
+                local score = scoreFn(nx, ny, z)
+                if best == nil or score > bestScore then
+                    best, bestScore = cells[i], score
+                end
+            end
         end
-        -- Intermediate columns: south and north ends only.
-        for dx = -r + 1, r - 1 do
-            local nx = x + dx
-            if _.pos_cache_get(cache, nx, y - r, z) == nil then return nx, y - r, z end
-            if _.pos_cache_get(cache, nx, y + r, z) == nil then return nx, y + r, z end
-        end
-        -- East column, in full.
-        for dy = -r, r do
-            local nx, ny = x + r, y + dy
-            if _.pos_cache_get(cache, nx, ny, z) == nil then return nx, ny, z end
-        end
+        if best ~= nil then return best[1], best[2], z end
     end
     return nil
 end
@@ -1272,20 +1337,45 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, resp
         return best
     end
 
-    -- Nearest free cell on the same z-plane, searched in expanding rings.
-    local function find_free_cell(x, y, z)
-        return _.find_free_cell_near(cache, x, y, z, maxRadius)
+    -- Nearest free cell on the same z-plane, searched in expanding rings, and
+    -- within the nearest ring that has one, the cell the moved room's own exits
+    -- agree with best.  This pass is the last thing to touch coordinates in
+    -- finish_layout_repair and nothing re-derives what it moves, so a cell
+    -- picked purely by walk order is a delta mismatch that stays — reported by
+    -- the audit that runs immediately afterwards, on both ends of every exit
+    -- into the room.  Scoring costs one exit_consistency_score call per free
+    -- cell in a single ring (eight at radius 1, the usual case).
+    local function find_free_cell(rid, x, y, z)
+        return _.find_free_cell_near(cache, x, y, z, maxRadius,
+            function(cx, cy, cz) return consistency_score(rid, cx, cy, cz) end)
     end
 
     -- Snapshot the colliding cell keys first: the cache is mutated below, so we
     -- must not iterate it live.
+    --
+    -- Sorted, because pairs() order over the cache is not stable between runs
+    -- and the cells compete: whichever contested cell is handled first takes the
+    -- free cells around it, so an unsorted walk gave `map normalize` a different
+    -- answer every time it was run on identical input.  Ordered by z, then y,
+    -- then x, so the walk is also spatially sensible rather than merely
+    -- repeatable.
     local collisions = {}
+    local cellOrder  = {}
     for k, list in pairs(cache) do
         if type(k) == "string" and k:sub(1, 1) ~= "_"
             and type(list) == "table" and #list > 1 then
             collisions[#collisions + 1] = k
+            local cx, cy, cz = k:match("^(-?%d+),(-?%d+),(-?%d+)$")
+            cellOrder[k] = { tonumber(cz) or 0, tonumber(cy) or 0, tonumber(cx) or 0 }
         end
     end
+    table.sort(collisions, function(a, b)
+        local ka, kb = cellOrder[a], cellOrder[b]
+        for i = 1, 3 do
+            if ka[i] ~= kb[i] then return ka[i] < kb[i] end
+        end
+        return a < b
+    end)
 
     for _c = 1, #collisions do
         local list = cache[collisions[_c]]
@@ -1300,7 +1390,7 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, resp
                     if immobile(rid) or x == nil then
                         result.unresolved = result.unresolved + 1
                     else
-                        local fx, fy, fz = find_free_cell(x, y, z)
+                        local fx, fy, fz = find_free_cell(rid, x, y, z)
                         if fx == nil then
                             result.unresolved = result.unresolved + 1
                         else
@@ -1818,11 +1908,16 @@ end
 -- Finds the nearest unoccupied position on the same z-level.
 -- When an exit-direction shift is provided, positions along that axis are
 -- probed first so nudged rooms keep their directional alignment.
-function _.find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius)
+function _.find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius, scoreFn)
     -- Cap radius; at r=20 the ring search already covers 1600 candidate positions.
     maxRadius = math.min(maxRadius or 20, 20)
 
-    if type(shift) == "table" then
+    -- The axis probe below walks straight out along the exit that was blocked,
+    -- which keeps a corridor a corridor — but only while nothing knows better.
+    -- With a scorer the ring search is used instead, so the cell is chosen by
+    -- how many of the room's own exits it satisfies rather than by which way
+    -- the one blocked exit happened to point.
+    if type(shift) == "table" and scoreFn == nil then
         local ax, ay = shift[1], shift[2]
         if ax ~= 0 and ay == 0 then
             local dir = ax > 0 and 1 or -1
@@ -1865,10 +1960,16 @@ function _.find_nearest_unoccupied(occupied, x, y, z, shift, maxRadius)
             candidates[#candidates + 1] = { x - r, y + i }
             candidates[#candidates + 1] = { x - r, y - i }
         end
+        local best, bestScore
         for _, p in ipairs(candidates) do
             local key = p[1] .. "," .. p[2] .. "," .. z
-            if not occupied[key] then return p[1], p[2], z end
+            if not occupied[key] then
+                if scoreFn == nil then return p[1], p[2], z end
+                local score = scoreFn(p[1], p[2], z)
+                if best == nil or score > bestScore then best, bestScore = p, score end
+            end
         end
+        if best ~= nil then return best[1], best[2], z end
     end
     return x, y, z
 end
@@ -2103,7 +2204,10 @@ function _.snap_vertical_pair(areaID, externalPosCache)
                             return
                         end
                         local ox, oy, oz = getRoomCoordinates(oid)
-                        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz, 64)
+                        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz, 64,
+                            function(nx, ny, nz)
+                                return _.exit_consistency_score(oid, nx, ny, nz)
+                            end)
                         if fx == nil then
                             blocked = blocked + 1
                             return
