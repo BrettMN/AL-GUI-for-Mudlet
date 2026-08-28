@@ -1114,6 +1114,238 @@ function _.apply_elevation_anchor(roomID, posCache, info, depth)
 end
 
 -- --------------------------------------------------------------------------
+-- Placement: derive a position from the rooms a new room already adjoins
+-- --------------------------------------------------------------------------
+
+-- Where a room belongs according to its own GMCP exits, for the arrival where
+-- the room the player walked out of cannot say: a border crossing, where the
+-- previous room is in another area and so in another coordinate frame entirely,
+-- or an event gap, where it is not adjacent at all.
+--
+-- Without this the room is placed at the area origin (or the first free cell
+-- near it), which is a guess with nothing behind it, and the correction passes
+-- have to rescue it after the fact — close_component_seam usually can, but only
+-- once the exits are wired, and only while nothing contradicts it.  A room
+-- walked back into on a later visit is more likely to already have neighbours
+-- here than not: re-entering an area at the same gate means the rooms past it
+-- were mapped last time.  Each of those exits names an exact cell for this room,
+-- which is a far better answer than the origin and is available before the room
+-- is created rather than after.
+--
+-- The winner must beat every other candidate outright.  A tie is two clusters
+-- disagreeing, and there is no arrival direction here to break it with — the
+-- one thing that would have settled it is exactly what is missing.  One
+-- uncontradicted exit is enough, though: unlike realign, which needs two
+-- because it is overruling a position the room already has, this room has no
+-- position at all yet and the alternative is the origin.
+--
+-- Returns x, y, z and the number of agreeing exits, or nil to leave the caller
+-- with its own fallback.
+function _.position_from_known_neighbors(areaID, info, posCache)
+    if type(areaID) ~= "number" or areaID < 1 then return nil end
+    if type(info) ~= "table" or type(info.exits) ~= "table" then return nil end
+    if type(_.get_shift_for_exit_key) ~= "function" then return nil end
+
+    local votes, best, bestVotes, bestKey = {}, nil, 0, nil
+    for dir, vnum in _.sorted_exit_pairs(info.exits) do
+        if type(vnum) == "string" and vnum ~= "" then
+            local shift = _.get_shift_for_exit_key(dir)
+            local tid   = shift and getRoomIDbyHash(vnum) or nil
+            -- Only rooms in this area vote: an exit into another area says
+            -- nothing about where this one's grid starts.
+            if type(tid) == "number" and tid > 0 and getRoomArea(tid) == areaID then
+                local tx, ty, tz = getRoomCoordinates(tid)
+                if tx ~= nil then
+                    local px, py, pz = tx - shift[1], ty - shift[2], tz - shift[3]
+                    local key  = pos_key(px, py, pz)
+                    local slot = votes[key]
+                    if slot then
+                        slot.n = slot.n + 1
+                    else
+                        slot = { n = 1, x = px, y = py, z = pz }
+                        votes[key] = slot
+                    end
+                    if slot.n > bestVotes then
+                        best, bestVotes, bestKey = slot, slot.n, key
+                    end
+                end
+            end
+        end
+    end
+    if best == nil then return nil end
+    for key, slot in pairs(votes) do
+        if key ~= bestKey and slot.n >= bestVotes then return nil end
+    end
+
+    if _.rooms_at_position(posCache, areaID, best.x, best.y, best.z) == nil then
+        return best.x, best.y, best.z, bestVotes
+    end
+
+    -- Occupied.  A cell beside the neighbours is still an enormously better
+    -- starting point than the area origin — the room is in the right
+    -- neighbourhood, so its remaining exits are short of their targets rather
+    -- than pointing across the map, and that is the shape the correction passes
+    -- repair well.  Skipped on a large area for the same reason the origin probe
+    -- is: without an authoritative cache "nearest free cell" is not a fact.
+    if type(_.is_large_area) == "function" and _.is_large_area(areaID) then return nil end
+    if type(_.find_free_cell_near) ~= "function" then return nil end
+    local cache = posCache
+    if type(_.pos_cache_is_authoritative) ~= "function"
+        or not _.pos_cache_is_authoritative(cache, areaID) then
+        if type(_.build_pos_cache) ~= "function" then return nil end
+        cache = _.build_pos_cache(areaID)
+    end
+    local fx, fy, fz = _.find_free_cell_near(cache, best.x, best.y, best.z, 16)
+    if fx == nil then return nil end
+    return fx, fy, fz, bestVotes
+end
+
+-- --------------------------------------------------------------------------
+-- Placement: follow the room the player just left
+-- --------------------------------------------------------------------------
+
+-- The room the player walked out of is the strongest statement there is about
+-- where the room they walked into belongs: the server just said this exit leads
+-- that way, and the player took it.  make_room already places a *new* room that
+-- way; this does the same for a room that already exists.
+--
+-- Without it, an existing room keeps whatever coordinates it was given the first
+-- time it was seen, and the only things that may correct it are the exit-vote
+-- passes — which ask the room's own (stale) cluster, so a cluster that agrees
+-- with itself votes confidently for the old position.  That is why moving one
+-- room by hand and running 'map normalize' repairs only as far as the normalize
+-- pass reached: walk one step past it and the next room drags the layout back to
+-- what was there before.  Here the previous room wins instead, so a correction
+-- made once propagates outward one step at a time as the player walks.
+--
+-- Declines, leaving the exit-vote passes to have their say, when:
+--   * the previous room is in another area — another coordinate frame entirely;
+--   * neither room's GMCP exits name a direction between them (a portal or a
+--     special exit says nothing about offsets);
+--   * this room is locked, i.e. the user pinned it deliberately;
+--   * the target cell is occupied and its occupant cannot be evicted (see
+--     below), since stacking two rooms on one cell is worse than a stale one.
+--
+-- Returns moved (0 or 1) and whether the previous room settled the question.
+-- The second value is the one the caller acts on: "already exactly where the
+-- previous room says" is a decline to move *and* an answer, and the exit-vote
+-- passes must not then be given the chance to overrule it.
+function _.place_room_from_previous(roomID, posCache, info)
+    if map.configs.place_from_previous == false then return 0, false end
+    if type(roomID) ~= "number" or roomID < 1 then return 0, false end
+    if safe_is_room_locked(roomID) then return 0, false end
+
+    info = type(info) == "table" and info or map.room_info
+    local prev = map.prev_info
+    if type(info) ~= "table" or type(info.vnum) ~= "string" then return 0, false end
+    if type(prev) ~= "table" or type(prev.vnum) ~= "string" or prev.vnum == "" then
+        return 0, false
+    end
+    if prev.vnum == info.vnum then return 0, false end
+
+    local prevID = getRoomIDbyHash(prev.vnum)
+    if type(prevID) ~= "number" or prevID < 1 or prevID == roomID then return 0, false end
+
+    local areaID = getRoomArea(roomID)
+    if type(areaID) ~= "number" or areaID < 1 then return 0, false end
+    if getRoomArea(prevID) ~= areaID then return 0, false end
+
+    local px, py, pz = getRoomCoordinates(prevID)
+    if px == nil then return 0, false end
+
+    -- The direction walked, taken from the previous room's own GMCP exit list
+    -- first: that is that room's authoritative account of where this one lies,
+    -- and it is right even for a one-way passage.  This room's exit back is the
+    -- fallback, reversed.
+    local shift
+    if type(prev.exits) == "table" then
+        for dir, vnum in pairs(prev.exits) do
+            if vnum == info.vnum then
+                local s = _.get_shift_for_exit_key(dir)
+                if s then shift = s break end
+            end
+        end
+    end
+    if not shift and type(info.exits) == "table" then
+        for dir, vnum in pairs(info.exits) do
+            if vnum == prev.vnum then
+                local s = _.get_shift_for_exit_key(dir)
+                if s then shift = { -s[1], -s[2], -s[3] } break end
+            end
+        end
+    end
+    if not shift then return 0, false end
+
+    local tx, ty, tz = px + shift[1], py + shift[2], pz + shift[3]
+
+    -- The same elevated/surface adjustment make_room applies, so a room created
+    -- by walking into it and a room re-placed by walking into it land on the
+    -- same cell rather than fighting each other on alternate visits.
+    if type(_.is_elevated_room_name) == "function" then
+        local currEL = _.is_elevated_room_name(info.name or getRoomName(roomID) or "")
+        local prevEL = _.is_elevated_room_name(prev.name or "")
+        if currEL and not prevEL then
+            tz = tz + 1
+        elseif prevEL and not currEL then
+            tz = tz - 1
+        end
+    end
+
+    local rx, ry, rz = getRoomCoordinates(roomID)
+    if rx == nil then return 0, false end
+    if rx == tx and ry == ty and rz == tz then return 0, true end
+
+    -- Something already on the target cell.  The incoming room has the better
+    -- claim only when it agrees with more of its own exits there than the
+    -- occupant does where it sits — the same measure reconcile evicts on — and
+    -- the occupant is then parked on the nearest free cell.  Unlike reconcile
+    -- there is no following pass to re-derive its position, but there does not
+    -- need to be: this feature re-derives it the moment the player walks into
+    -- it, which is the only time its position is visible anyway.
+    local occupants = _.rooms_at_position(posCache, areaID, tx, ty, tz)
+    local blocker   = nil
+    if type(occupants) == "table" then
+        for i = 1, #occupants do
+            if occupants[i] ~= roomID then
+                if blocker then return 0, false end
+                blocker = occupants[i]
+            end
+        end
+    end
+    if blocker then
+        if map.configs.place_from_previous_evict == false then return 0, false end
+        if blocker == prevID or safe_is_room_locked(blocker) then return 0, false end
+        if type(_.find_free_cell_near) ~= "function"
+            or type(_.pos_cache_is_authoritative) ~= "function"
+            or not _.pos_cache_is_authoritative(posCache, areaID) then
+            return 0, false
+        end
+        local incoming = safe_exit_consistency_score(roomID, tx, ty, tz)
+        if incoming < 1 or safe_exit_consistency_score(blocker) >= incoming then
+            _.debug_echo(string.format(
+                "follow: room %d stays at (%d,%d,%d); (%d,%d,%d) held by better-anchored room %d\n",
+                roomID, rx, ry, rz, tx, ty, tz, blocker))
+            return 0, false
+        end
+        local ox, oy, oz = getRoomCoordinates(blocker)
+        if ox == nil then return 0, false end
+        local fx, fy, fz = _.find_free_cell_near(posCache, ox, oy, oz,
+            tonumber(map.configs.reconcile_evict_radius) or 8)
+        if fx == nil then return 0, false end
+        _.set_room_coordinates(blocker, fx, fy, fz, posCache)
+        _.debug_echo(string.format(
+            "follow: evicted room %d from (%d,%d,%d) to (%d,%d,%d)\n",
+            blocker, ox, oy, oz, fx, fy, fz))
+    end
+
+    _.set_room_coordinates(roomID, tx, ty, tz, posCache)
+    _.debug_echo(string.format(
+        "follow: room %d (%d,%d,%d)→(%d,%d,%d), from room %d at (%d,%d,%d)\n",
+        roomID, rx, ry, rz, tx, ty, tz, prevID, px, py, pz))
+    return 1, true
+end
+
+-- --------------------------------------------------------------------------
 -- Placement: realign a displaced room onto the cluster it adjoins
 -- --------------------------------------------------------------------------
 

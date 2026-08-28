@@ -72,6 +72,27 @@ function map.unlock_current_room()
     updateMap()
 end
 
+-- Show or set whether an arrival positions the room relative to the room the
+-- player just left.  See map.configs.place_from_previous in Data.lua.
+function map.set_follow_previous(arg)
+    local setting = type(arg) == "string" and string.lower(arg) or nil
+    if setting == "on" or setting == "true" then
+        map.configs.place_from_previous = true
+    elseif setting == "off" or setting == "false" then
+        map.configs.place_from_previous = false
+    elseif setting ~= nil then
+        echo("map follow: expected 'on' or 'off'.\n")
+        return
+    end
+    if map.configs.place_from_previous == false then
+        echo("map follow is off: rooms keep the coordinates they already have, and only\n")
+        echo("  the exit-vote passes (and 'map normalize') may move them.\n")
+    else
+        echo("map follow is on: each room you walk into is positioned one step from the room\n")
+        echo("  you left, in the direction you walked.\n")
+    end
+end
+
 function map.set_poi(roomID)
     roomID = roomID or _.get_current_area_context()
     if not roomID or roomID < 1 then
@@ -846,6 +867,18 @@ function map.show_help()
     echo("    Stop the current auto walk. If no auto walk is active, sends 'stop' to the game.\n\n")
     echo("  Mapper right-click POI\n")
     echo("    Select or right-click a terrain-mapped room, then choose Toggle POI on selected room.\n\n")
+    echo("  map follow [on|off]\n")
+    echo("    Show or set whether each room you walk into is positioned one step from the room\n")
+    echo("    you just left, in the direction you walked. On by default.\n")
+    echo("    This is what makes a manual fix stick: move a room with 'map shift' (or run\n")
+    echo("    'map normalize'), then walk on, and the rooms you enter follow from it instead of\n")
+    echo("    snapping back to where they were. A room you locked with 'map lock' is never moved,\n")
+    echo("    and neither is one whose exits give no direction (a portal or a special exit).\n")
+    echo("    A room already sitting on the target cell is pushed to the nearest free cell when\n")
+    echo("    the arriving room's own exits agree with that cell better than the occupant's do.\n")
+    echo("    Geography that cannot fit a grid (e.g. three rooms that loop by going east three\n")
+    echo("    times) walks one cell further out each lap; 'map lock' one room of the loop to\n")
+    echo("    pin it, or turn this off.\n\n")
     echo("  map auto-reconcile\n")
     echo("    Automatic room repositioning is disabled.\n")
     echo("    This command is kept only for compatibility; use 'map normalize' to reposition manually.\n\n")

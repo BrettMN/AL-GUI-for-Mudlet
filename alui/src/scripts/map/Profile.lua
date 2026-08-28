@@ -289,6 +289,8 @@ local function targets()
         { _, "create_neighbors_for_current_room", "create_neighbors" },
         { _, "reconcile_connected_rooms",     "reconcile" },
         { _, "flatten_cardinal_connected_rooms", "flatten" },
+        { _, "position_from_known_neighbors", "place_from_neighbors" },
+        { _, "place_room_from_previous",      "place_from_prev" },
         { _, "realign_displaced_room",        "realign" },
         { _, "apply_elevation_anchor",        "elevation_anchor" },
         { _, "sky_altitude",                  "sky_altitude" },

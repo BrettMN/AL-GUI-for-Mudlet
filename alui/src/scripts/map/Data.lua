@@ -132,6 +132,31 @@ map.configs.realign_min_votes = map.configs.realign_min_votes or 2
 -- job, and doing it mid-step would stall the client.
 map.configs.realign_max_component = map.configs.realign_max_component or 32
 
+-- Place the room the player walks into relative to the room they walked out of,
+-- every arrival, not only the first (see _.place_room_from_previous in
+-- Layout.lua).  The walked exit is direct evidence — the server named it and the
+-- player took it — where every other per-step correction is an inference from
+-- coordinates already on the map.  It is what makes a manual fix stick: move one
+-- room, and the rooms walked from it follow, instead of the old layout being
+-- restored one step past wherever 'map normalize' reached.
+--
+-- The trade-off is geography that cannot be laid out on a grid at all — a
+-- corridor of three rooms that loops back on itself by going east three times.
+-- There the walked exit is right every single step and the layout still cannot
+-- satisfy all of them, so each lap walks the loop one cell further out.  'map
+-- lock' on one room of the loop stops it: a locked room is never moved, which
+-- gives the lap somewhere to close against.
+--
+-- Set false to go back to leaving existing rooms where they are and letting the
+-- exit-vote passes decide.
+map.configs.place_from_previous = map.configs.place_from_previous ~= false
+-- Whether a room in the way may be pushed aside to make room.  It is moved to
+-- the nearest free cell, and only when the arriving room agrees with more of its
+-- own exits on that cell than the occupant does where it sits — the same measure
+-- reconcile evicts on, and the same radius (reconcile_evict_radius).  Set false
+-- to leave the arriving room where it is whenever the cell is taken.
+map.configs.place_from_previous_evict = map.configs.place_from_previous_evict ~= false
+
 -- Close a seam as soon as one is discovered: when a cluster that is internally
 -- consistent turns out to be joined to the rest of the map at an offset, move
 -- the whole cluster onto the position that link implies, rigidly.

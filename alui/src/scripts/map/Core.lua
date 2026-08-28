@@ -258,6 +258,10 @@ local function make_room()
     -- False means there was nothing in this area to measure against, and a
     -- position near the origin is then the expected result rather than a fault.
     local placedFromPrev = false
+    -- Whether this room's position came from rooms it already adjoins in this
+    -- area, which is the border-crossing answer: absolute, and owing nothing to
+    -- the frame of the area just left.
+    local placedFromNeighbors = false
     -- make_room runs before handle_move's posCache block, so it looks the
     -- long-lived cache up itself: occupancy probes below are answered from it
     -- when we hold one for this area (nil just means the probes fall back to
@@ -383,16 +387,34 @@ local function make_room()
                     coords[1], coords[2], coords[3], tostring(info.vnum)))
             end
         else
-            -- Nothing in this area to place against: either this is the first
-            -- room seen here, or we have just crossed a border.  There is no
-            -- relative position to be had — so take a free cell rather than
-            -- stacking on whatever occupies the origin, and let the map correct
-            -- it.  realign_displaced_room moves the room onto its real cluster
-            -- as soon as two of its own exits agree where that is, which is the
-            -- same treatment a room created without a directional clue has
-            -- always had.  An empty area keeps (0,0,0) and is simply its origin.
-            if _.rooms_at_position(posCache, areaID, 0, 0, 0) ~= nil
+            -- Nothing in this area to place *against*, but this room's own
+            -- exits may still name rooms that are already in it — which is the
+            -- ordinary case for an area re-entered at a gate walked before.
+            -- Each such exit fixes an exact cell for this room, and unlike the
+            -- previous room's coordinates that answer is in this area's own
+            -- frame, so it is asked first.
+            local nx, ny, nz, nvotes
+            if type(_.position_from_known_neighbors) == "function" then
+                nx, ny, nz, nvotes = _.position_from_known_neighbors(areaID, info, posCache)
+            end
+            if nx ~= nil then
+                coords              = { nx, ny, nz }
+                placedFromNeighbors = true
+                _.debug_echo(string.format(
+                    "make_room: placed vnum %s at (%d,%d,%d) from %d neighbouring room(s) "
+                    .. "already in this area.\n",
+                    tostring(info.vnum), nx, ny, nz, nvotes or 0))
+            elseif _.rooms_at_position(posCache, areaID, 0, 0, 0) ~= nil
                 and not _.is_large_area(areaID) then
+                -- Neither the previous room nor a neighbour can say: either this
+                -- is the first room seen here, or the rooms past this gate were
+                -- never mapped.  There is no relative position to be had — so
+                -- take a free cell rather than stacking on whatever occupies the
+                -- origin, and let the map correct it.  realign_displaced_room
+                -- moves the room onto its real cluster as soon as two of its own
+                -- exits agree where that is, which is the same treatment a room
+                -- created without a directional clue has always had.  An empty
+                -- area keeps (0,0,0) and is simply its origin.
                 local cache = posCache
                 if not _.pos_cache_is_authoritative(cache, areaID) then
                     cache = _.build_pos_cache(areaID)
@@ -403,12 +425,19 @@ local function make_room()
         end
     end
     -- Adjust z-level for elevated/surface transitions on first visit.
-    local currEL = _.is_elevated_room_name(info.name)
-    local prevEL = _.is_elevated_room_name(map.prev_info.name or "")
-    if currEL and not prevEL then
-        coords[3] = coords[3] + 1
-    elseif not currEL and prevEL then
-        coords[3] = coords[3] - 1
+    --
+    -- This is a correction to a position derived from the previous room, so it
+    -- has nothing to say about one derived from neighbours in this area: that
+    -- one already names the plane the room belongs on, and adding a level to it
+    -- would move the room off the cluster its own exits just placed it on.
+    if not placedFromNeighbors then
+        local currEL = _.is_elevated_room_name(info.name)
+        local prevEL = _.is_elevated_room_name(map.prev_info.name or "")
+        if currEL and not prevEL then
+            coords[3] = coords[3] + 1
+        elseif not currEL and prevEL then
+            coords[3] = coords[3] - 1
+        end
     end
     local thisRoom = createRoomID()
     _.add_room(thisRoom)
@@ -894,13 +923,30 @@ local function handle_move(isLastInBatch)
             -- it, and realign identifies that group by which exits are already
             -- consistent — so a z nudge landing first severs the group and
             -- strands its members where nothing will ever look for them again.
+            --
+            -- Ahead of all of them sits the room the player just walked out of.
+            -- It is better evidence than any vote: the server named the exit and
+            -- the player took it, so this room is one step that way and nowhere
+            -- else.  The exit votes ask this room's own cluster instead, and a
+            -- stale cluster agrees with itself — which is what used to drag a
+            -- hand-placed correction back the moment the player walked one step
+            -- past whatever 'map normalize' had reached.  When the previous room
+            -- settles the question the votes are skipped entirely, including
+            -- when it settles it by finding the room already in the right place.
             local realigned = 0
-            if type(_.realign_displaced_room) == "function" then
+            local settled   = false
+            if type(_.place_room_from_previous) == "function" then
+                local moved, answered = _.place_room_from_previous(rnum, posCache, info)
+                realigned = moved or 0
+                settled   = answered and true or false
+            end
+            if not settled and realigned == 0
+                and type(_.realign_displaced_room) == "function" then
                 realigned = _.realign_displaced_room(rnum, posCache, info) or 0
             end
             -- See the matching call in wire_one_exit: this is the arrival that
             -- may have just joined an isolated chunk to the rest of the map.
-            if realigned == 0 and type(_.close_component_seam) == "function" then
+            if not settled and realigned == 0 and type(_.close_component_seam) == "function" then
                 realigned = _.close_component_seam(rnum, posCache) or 0
             end
 
@@ -929,8 +975,10 @@ local function handle_move(isLastInBatch)
             -- correct z alone, from one neighbour or from a shared offset.  Both
             -- are guesses, so a room with a known plane retires them outright —
             -- including one that was already on it, where the guess has nothing
-            -- to add and everything to undo.
-            if realigned == 0 and not anchored and anchorZ == nil then
+            -- to add and everything to undo.  So does a room the previous room
+            -- placed: its z came from the direction actually walked, which is
+            -- not a guess either.
+            if not settled and realigned == 0 and not anchored and anchorZ == nil then
                 -- Correct z-level for elevated/surface transitions on rooms that
                 -- were pre-created as placeholders at the wrong z.
                 local currEL = _.is_elevated_room_name(info.name)
