@@ -69,6 +69,12 @@ map.configs.grid_mode_latch = map.configs.grid_mode_latch ~= false
 -- which otherwise leaves a border exit pointing at nothing visible.
 map.configs.border_poi = map.configs.border_poi ~= false
 
+-- Override the border marker's room symbol.  Left unset, a marker uses the
+-- arrow for the direction its exit leaves in (see _.direction_symbols); set it
+-- to a string and every marker carries that instead -- the escape hatch when the
+-- mapper font has no arrows.
+map.configs.border_poi_char = map.configs.border_poi_char or nil
+
 -- May a placeholder that is already bound to one game room be re-bound to a
 -- different one because it happens to sit where an exit points?
 --
@@ -80,6 +86,53 @@ map.configs.border_poi = map.configs.border_poi ~= false
 -- the exit is left as a stub and becomes a real room when the player walks it,
 -- placed from the room they walked out of.
 map.configs.rebind_placeholder_hash = map.configs.rebind_placeholder_hash == true
+
+-- Adopt a room for a vnum on the strength of its map position alone.
+--
+-- create_neighbors_for_current_room looks at the cell an exit ought to lead to
+-- and, when a hashless room or a placeholder is sitting there, used to bind the
+-- exit's vnum onto it.  That turns "a room is where this exit points" into "this
+-- room IS what this exit points at", and the first claim is only as good as the
+-- layout -- so a wrong layout hands the vnum to the wrong room, the exit is
+-- wired to it, and every later exit resolving that vnum by hash lands on a room
+-- that sits somewhere else entirely.  The map then reports delta mismatches the
+-- server never sent, and neither map recalculate nor map normalize can undo
+-- them: both read exits as input.  A wrong layout writes itself into the data as
+-- wrong topology, permanently.
+--
+-- Off by default.  A room whose origin stamp names the same room and direction
+-- is still adopted -- that is corroboration, not position -- and everything else
+-- waits for the player to walk the exit, where handle_move binds the vnum from
+-- the server's own hash.  Turn on only for a map whose rooms carry no hashes at
+-- all (an import, a hand-built map), where position is the only evidence there
+-- is and stacking duplicates is the worse failure.
+map.configs.adopt_by_position = map.configs.adopt_by_position == true
+
+-- Treat an exit as satisfied when the room it names lies the right way out at
+-- ANY distance, rather than only at exactly one cell.
+--
+-- The per-arrival passes place a room one step from whatever named it, so a room
+-- three east of its neighbour is judged displaced and dragged back to one east —
+-- on every arrival, so an area that was deliberately spread out (a road drawn to
+-- scale, a hand-nudged room, a cluster a normalize pass spaced apart to clear an
+-- overlap) collapses toward the player one step per move.  An exit says "that
+-- way".  It does not say "one cell".
+--
+-- With this on, a room already lying along the direction stays put and only
+-- rooms pointing somewhere else are moved.  The cost is that walking no longer
+-- tightens a stretched-out cluster; 'map recalculate' rebuilds spacing from
+-- scratch and is the command for that.  Set false for the old behaviour.
+map.configs.keep_direction_over_distance =
+    map.configs.keep_direction_over_distance ~= false
+
+-- How far along an exit to look for the placeholder standing in for the room
+-- the player just walked into.  Companion to keep_direction_over_distance: once
+-- rooms are allowed to keep their spacing, the placeholder is no longer
+-- guaranteed to be on the adjacent cell, and a scan that stops there creates a
+-- second room for a game room that already has one.  The scan stops at the
+-- first occupied cell either way, so this is a ceiling on empty space crossed,
+-- not on rooms examined.
+map.configs.placeholder_scan_steps = map.configs.placeholder_scan_steps or 16
 
 -- Deferred neighbour wiring.
 --
@@ -361,6 +414,29 @@ _.move_vectors = {
     northwest = { -1, 1, 0 },
     up = { 0, 0, 1 },
     down = { 0, 0, -1 }
+}
+
+-- Room symbols for the border markers that stand in for an exit leaving the
+-- area (see _.ensure_border_poi).  A marker is a signpost, so it points: the
+-- glyph is the direction the exit leaves in, which reads at a glance and does
+-- not collide with the "#" that 'map set poi' puts on the player's own marks.
+--
+-- Written as decimal byte escapes rather than literal arrows: Lua 5.1 has no
+-- \u{} escape, and this way the bytes survive the trip through Muddler and
+-- Mudlet's XML regardless of file encoding.  They are UTF-8 for U+2190..U+2199
+-- and U+21D1/U+21D3.  If the mapper font renders them as boxes, set
+-- map.configs.border_poi_char to an ASCII character instead.
+_.direction_symbols = {
+    north     = "\226\134\145", -- up arrow
+    northeast = "\226\134\151",
+    east      = "\226\134\146",
+    southeast = "\226\134\152",
+    south     = "\226\134\147",
+    southwest = "\226\134\153",
+    west      = "\226\134\144",
+    northwest = "\226\134\150",
+    up        = "\226\135\145", -- double up
+    down      = "\226\135\147",
 }
 
 _.exitmap = {

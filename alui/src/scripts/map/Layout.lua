@@ -342,9 +342,54 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                         and getRoomHashByID(candidateID) or nil
                     local candidateIsPlaceholder = type(_.is_placeholder) == "function"
                         and _.is_placeholder(candidateID)
-                    if cHash == nil or cHash == "" or candidateIsPlaceholder then
-                        -- Hashless room OR placeholder: adopt fully — bind this
-                        -- GMCP vnum to the existing room to avoid stacking.
+                    local hashless   = (cHash == nil or cHash == "")
+                    local isThisRoom = (type(cHash) == "string" and cHash == targetVnum)
+
+                    -- Corroboration for an identity that would otherwise be
+                    -- assigned from a map position.
+                    --
+                    -- Source B above answers "a room is sitting where this exit
+                    -- ought to lead", and binding targetVnum onto it turns that
+                    -- into "this room IS the room the exit leads to".  Those are
+                    -- different claims, and the first is only as good as the
+                    -- layout -- so when the layout is wrong the wrong room takes
+                    -- the vnum, the exit is wired to it, and from then on every
+                    -- exit that resolves this vnum by hash lands on a room that
+                    -- is geometrically somewhere else.  The map then reports a
+                    -- delta mismatch the server never sent, and no layout pass
+                    -- can undo it: recalculate and normalize both read exits as
+                    -- input.  That is a wrong layout writing itself into the
+                    -- data as wrong topology.
+                    --
+                    -- An origin stamp naming this same room and direction is a
+                    -- different kind of evidence: nothing but this exit could
+                    -- have written it, so the room really was stood up for this
+                    -- vnum and merely lost its hash since (a merge, a rebind, a
+                    -- hand edit).  Adopting there re-establishes what was already
+                    -- true rather than guessing.
+                    --
+                    -- Everything else is refused, and the exit becomes a stub.
+                    -- Nothing is lost by waiting: the moment the player walks it,
+                    -- handle_move resolves the vnum by hash -- the server's own
+                    -- statement of identity -- and wires it correctly.
+                    local witnessed = type(_.room_origin_is) == "function"
+                        and _.room_origin_is(candidateID, "neighbour-of",
+                            tostring(roomID) .. ":" .. tostring(dir))
+
+                    if isThisRoom then
+                        -- Already the right room.  A placeholder still gets the
+                        -- bind so the index is consistent; it is a no-op for a
+                        -- room that is not one.
+                        if candidateIsPlaceholder then
+                            _.bind_room_hash(candidateID, targetVnum)
+                        end
+                        _.debug_echo("Reusing " .. candidateID
+                            .. " (already this vnum) for "
+                            .. targetVnum .. " (dir " .. dir .. ")\n")
+                        targetID = candidateID
+                    elseif witnessed
+                        or ((hashless or candidateIsPlaceholder)
+                            and map.configs.adopt_by_position == true) then
                         if type(cHash) == "string" and cHash ~= "" and cHash ~= targetVnum then
                             pcall(setRoomIDbyHash, candidateID, "")
                         end
@@ -353,15 +398,19 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                             tostring(roomID) .. ":" .. tostring(dir))
                         _.mark_autowalk_dirty()
                         _.debug_echo("Adopted existing room " .. candidateID
-                            .. " for vnum " .. targetVnum .. " (dir " .. dir .. ")\n")
+                            .. " for vnum " .. targetVnum .. " (dir " .. dir
+                            .. (witnessed and "; stood up by this exit" or "; adopt_by_position")
+                            .. ")\n")
+                        targetID = candidateID
                     else
-                        -- Room already has its own identity; just reuse it to
-                        -- avoid stacking.  Don't touch its hash.
-                        _.debug_echo("Reusing " .. candidateID
-                            .. " (existing hash) to avoid stacking for "
-                            .. targetVnum .. " (dir " .. dir .. ")\n")
+                        _.note_room_event(candidateID, "adoption-unwitnessed",
+                            tostring(roomID) .. ":" .. tostring(dir))
+                        _.debug_echo("Refused room " .. candidateID .. " for vnum "
+                            .. targetVnum .. " (dir " .. tostring(dir)
+                            .. "): nothing but its map position says it is this room.\n")
+                        candidateID     = nil
+                        identityRefused = true
                     end
-                    targetID = candidateID
                 end
             end
 
@@ -1384,6 +1433,9 @@ end
 --   * neither room's GMCP exits name a direction between them (a portal or a
 --     special exit says nothing about offsets);
 --   * this room is locked, i.e. the user pinned it deliberately;
+--   * this room already lies along the walked direction, at any distance — the
+--     exit said "that way", not "one cell", and a placement that already agrees
+--     with it is not something to overwrite (see the block below);
 --   * the target cell is occupied and its occupant cannot be evicted (see
 --     below), since stacking two rooms on one cell is worse than a stale one.
 --
@@ -1455,6 +1507,45 @@ function _.place_room_from_previous(roomID, posCache, info)
     local rx, ry, rz = getRoomCoordinates(roomID)
     if rx == nil then return 0, false end
     if rx == tx and ry == ty and rz == tz then return 0, true end
+
+    -- Already the right way out of the previous room, only farther along it.
+    --
+    -- The exit says "that way"; it does not say "one cell".  Pulling a room that
+    -- is three east back to one east is not a correction, it is the mapper
+    -- overwriting a placement that already agrees with the exit -- and it does it
+    -- on every arrival, so a layout that was deliberately spread out (a long
+    -- road drawn to scale, a hand-nudged room, a cluster a normalize pass spaced
+    -- to clear an overlap) collapses toward whatever room the player last walked
+    -- out of, one step per move.
+    --
+    -- So: same direction at any distance is left alone, and the answer counts as
+    -- settled so the exit-vote passes do not immediately drag it in instead.
+    -- Only rooms that are somewhere else entirely get moved.
+    --
+    -- The z-plane still has to match: `tz` already carries the elevated/surface
+    -- adjustment below, and a room one east but a level down is not east of here.
+    -- Vertical exits get no leeway either -- z-levels are floors, not distances,
+    -- so up is one up.
+    --
+    -- The cost is that this no longer straightens a stretched-out cluster as the
+    -- player walks it.  `map recalculate` still rebuilds spacing from scratch,
+    -- which is the command for that.  Set keep_direction_over_distance
+    -- false to restore the old always-snap-to-one-cell behaviour.
+    if map.configs.keep_direction_over_distance ~= false
+        and (shift[1] ~= 0 or shift[2] ~= 0)
+        and rz == tz
+        and type(_.direction_multiple) == "function" then
+        local steps = _.direction_multiple(rx - px, ry - py, 0,
+            { shift[1], shift[2], 0 })
+        if steps then
+            _.debug_echo(string.format(
+                "follow: room %d left at (%d,%d,%d); already %d step%s along the "
+                .. "exit from room %d at (%d,%d,%d)\n",
+                roomID, rx, ry, rz, steps, steps == 1 and "" or "s",
+                prevID, px, py, pz))
+            return 0, true
+        end
+    end
 
     -- Something already on the target cell.  The incoming room has the better
     -- claim only when it agrees with more of its own exits there than the
@@ -1572,8 +1663,25 @@ function _.realign_displaced_room(roomID, posCache, info)
             local shift = _.get_shift_for_exit_key(dir)
             if shift then
                 local tx, ty, tz = getRoomCoordinates(targetID)
-                if tx ~= nil and (anchorZ == nil or (tz - shift[3]) == anchorZ) then
-                    local px, py, pz = tx - shift[1], ty - shift[2], tz - shift[3]
+                local px, py, pz
+                if tx ~= nil then
+                    -- An exit that already points the right way is satisfied
+                    -- where the room stands, however far along it the target
+                    -- sits, so it votes for here rather than for one-cell-out.
+                    -- Without this every vote is "one step from me", and a room
+                    -- three east of its neighbour is judged displaced and hauled
+                    -- back to one east on every single arrival — which collapses
+                    -- any deliberately spread-out area toward the player as they
+                    -- walk it.
+                    if map.configs.keep_direction_over_distance ~= false
+                        and type(_.direction_multiple) == "function"
+                        and _.direction_multiple(tx - rx, ty - ry, tz - rz, shift) then
+                        px, py, pz = rx, ry, rz
+                    else
+                        px, py, pz = tx - shift[1], ty - shift[2], tz - shift[3]
+                    end
+                end
+                if px ~= nil and (anchorZ == nil or pz == anchorZ) then
                     local key  = pos_key(px, py, pz)
                     local slot = votes[key]
                     if slot then
@@ -1753,7 +1861,17 @@ local function seam_translation(component, inComponent, areaID, revIndex)
         local vx, vy, vz = getRoomCoordinates(v)
         if ux == nil or vx == nil then return end
         local tx, ty, tz
-        if inComponent[u] then
+        -- A crossing exit that already points the right way needs no move,
+        -- however far along it the far end sits.  Computing a translation from
+        -- it anyway is what drags a component that is merely spread out into
+        -- one-cell contact with the rest of the map.  Implying zero also keeps
+        -- the unanimity test honest: if another crossing exit does need a move,
+        -- the two disagree and nothing is translated, which is correct.
+        if map.configs.keep_direction_over_distance ~= false
+            and type(_.direction_multiple) == "function"
+            and _.direction_multiple(vx - ux, vy - uy, vz - uz, shift) then
+            tx, ty, tz = 0, 0, 0
+        elseif inComponent[u] then
             tx, ty, tz = vx - ux - shift[1], vy - uy - shift[2], vz - uz - shift[3]
         else
             tx, ty, tz = shift[1] + ux - vx, shift[2] + uy - vy, shift[3] + uz - vz

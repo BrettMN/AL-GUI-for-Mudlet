@@ -197,18 +197,39 @@ function _.find_placeholder_for_arrival(prevRoomID, arrivalDir, newVnum)
     end
     local px, py, pz = getRoomCoordinates(prevRoomID)
     if px == nil then return nil end
-    local tx, ty, tz = px + shift[1], py + shift[2], pz + shift[3]
     if type(getRoomsByPosition) ~= "function" then return nil end
-    local areaID   = getRoomArea(prevRoomID)
-    local nearbyID = getRoomsByPosition(areaID, tx, ty, tz)
-    if type(nearbyID) == "number" and nearbyID > 0 and adoptable(nearbyID) then
-        return nearbyID
-    end
-    if type(nearbyID) == "table" then
-        for _, rid in ipairs(nearbyID) do
-            if type(rid) == "number" and rid > 0 and adoptable(rid) then
-                return rid
+    local areaID = getRoomArea(prevRoomID)
+
+    -- Walk outward along the exit instead of probing only the adjacent cell.
+    --
+    -- This used to look at prev + shift and nowhere else, which was right while
+    -- every pass dragged rooms to one-cell spacing: the placeholder standing in
+    -- for this vnum was always exactly there.  With keep_direction_over_distance
+    -- a room that is already the right way out is left alone at whatever
+    -- distance it sits, so the placeholder can legitimately be several cells
+    -- along the direction.  A single-cell probe then finds nothing, make_room
+    -- builds a brand-new room for a vnum that already has one, and the
+    -- placeholder is stranded where it stood -- two rooms for one game room.
+    --
+    -- The first occupied cell along the ray settles it.  If that room is
+    -- adoptable it is the one the exit leads to; if it is not, something real is
+    -- in the way and nothing farther out can be reached through this exit
+    -- without passing through it.
+    local maxSteps = tonumber(map.configs.placeholder_scan_steps) or 16
+    for step = 1, maxSteps do
+        local tx = px + shift[1] * step
+        local ty = py + shift[2] * step
+        local tz = pz + shift[3] * step
+        local hits = getRoomsByPosition(areaID, tx, ty, tz)
+        if type(hits) == "number" and hits > 0 then hits = { hits } end
+        if type(hits) == "table" and #hits > 0 then
+            for i = 1, #hits do
+                local rid = hits[i]
+                if type(rid) == "number" and rid > 0 and adoptable(rid) then
+                    return rid
+                end
             end
+            return nil
         end
     end
     return nil
@@ -632,6 +653,34 @@ end
 -- out differently depending on which room the player was standing in.
 function _.is_diagonal_shift(shift)
     return type(shift) == "table" and shift[1] ~= 0 and shift[2] ~= 0
+end
+
+-- How many steps of `shift` separate two rooms, when the offset between them
+-- lies exactly along that direction.  Returns the multiple (an integer >= 1) or
+-- nil when the offset points anywhere else -- including nil for a zero offset,
+-- since "the same cell" is not a direction.
+--
+-- The question this answers is "is that room already the right way out of this
+-- one, just farther than one cell?".  Two east of here is still east of here;
+-- two east and one north is not east of anything.
+function _.direction_multiple(dx, dy, dz, shift)
+    if type(shift) ~= "table" then return nil end
+    local delta, steps = { dx, dy, dz }, nil
+    for i = 1, 3 do
+        local s = shift[i]
+        if s == 0 then
+            if delta[i] ~= 0 then return nil end
+        else
+            local n = delta[i] / s
+            if n < 1 or n ~= math.floor(n) then return nil end
+            if steps == nil then
+                steps = n
+            elseif steps ~= n then
+                return nil
+            end
+        end
+    end
+    return steps
 end
 
 function _.normalize_terrain_name(terrain)
@@ -1501,6 +1550,26 @@ function _.stamp_room_origin(roomID, origin, detail)
         tostring(origin) .. "|" .. tostring(detail or "") .. "|" .. provenance_now())
 end
 
+-- Does this room's origin stamp say it was created by exactly this cause?
+--
+-- The point of asking is corroboration before an identity is assigned.  A room
+-- sitting on the cell an exit points at is evidence about geometry, not about
+-- identity, and geometry is the thing that is wrong when a layout is wrong --
+-- so "the room over there is the room this exit leads to" is a guess that gets
+-- worse exactly when it is most likely to be made.  A stamp of
+-- "neighbour-of|<room>:<dir>" from the same room and direction is a different
+-- claim: this room exists *because of this very exit*, which nothing but that
+-- exit could have written.
+--
+-- Cheaper than _.read_room_provenance for this question -- no history parse.
+function _.room_origin_is(roomID, origin, detail)
+    local stamp = room_user_data(roomID, ORIGIN_KEY)
+    if stamp == nil then return false end
+    local gotOrigin, gotDetail = stamp:match("^(.-)|(.-)|")
+    if gotOrigin == nil then return false end
+    return gotOrigin == origin and gotDetail == tostring(detail)
+end
+
 -- The player is standing in this room right now.
 function _.stamp_room_visited(roomID)
     if type(roomID) ~= "number" or roomID < 1 then return end
@@ -1583,10 +1652,31 @@ function _.ensure_border_poi(areaID, x, y, z, fromRoomID, dir, targetAreaID, pos
     if type(areaID) ~= "number" or areaID < 1 then return nil end
     if x == nil or y == nil or z == nil then return nil end
 
+    -- The symbol a marker for this direction should carry.  A signpost points:
+    -- the arrow says which way the exit leaves, and unlike the "#" this used to
+    -- use it does not collide with the mark 'map set poi' puts on the player's
+    -- own points of interest.
+    local function marker_symbol()
+        local override = map.configs.border_poi_char
+        if type(override) == "string" and override ~= "" then return override end
+        local canonical = _.normalize_exit_direction(dir)
+        local arrow = canonical and type(_.direction_symbols) == "table"
+            and _.direction_symbols[canonical] or nil
+        return arrow or ""
+    end
+
     local occupants = _.rooms_at_position(posCache, areaID, x, y, z)
     if type(occupants) == "table" and #occupants > 0 then
         for i = 1, #occupants do
-            if _.is_border_poi(occupants[i]) then return occupants[i] end
+            if _.is_border_poi(occupants[i]) then
+                -- Refresh the symbol on a marker that already exists, so markers
+                -- left over from an earlier build stop showing the old "#"
+                -- without needing the area remapped.
+                if type(setRoomChar) == "function" then
+                    pcall(setRoomChar, occupants[i], marker_symbol())
+                end
+                return occupants[i]
+            end
         end
         return nil
     end
@@ -1600,7 +1690,7 @@ function _.ensure_border_poi(areaID, x, y, z, fromRoomID, dir, targetAreaID, pos
     _.set_room_name(roomID,
         "to " .. (targetName or ("area " .. tostring(targetAreaID))), areaID)
     setRoomUserData(roomID, BORDER_POI_KEY, "1")
-    if type(setRoomChar) == "function" then pcall(setRoomChar, roomID, "#") end
+    if type(setRoomChar) == "function" then pcall(setRoomChar, roomID, marker_symbol()) end
     _.apply_room_environment(roomID, "Inside")
     _.stamp_room_origin(roomID, "border-marker",
         tostring(fromRoomID) .. ":" .. tostring(dir))
