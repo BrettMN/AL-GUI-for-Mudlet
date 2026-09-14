@@ -112,6 +112,14 @@
         "regex": "^map\\s+clean-placeholders(?:\\s+(.+))?$"
     },
     {
+        "name": "map clean-borders",
+        "regex": "^map\\s+clean-borders(?:\\s+(.+))?$"
+    },
+    {
+        "name": "map stub-placeholders",
+        "regex": "^map\\s+stub-placeholders(?:\\s+(.+))?$"
+    },
+    {
         "name": "map audit",
         "regex": "^map\\s+audit(?:\\s+(.+))?$"
     },

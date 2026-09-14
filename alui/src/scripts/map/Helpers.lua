@@ -1623,82 +1623,195 @@ function _.read_room_provenance(roomID)
 end
 
 -- --------------------------------------------------------------------------
--- Border markers
+-- Border arrows
 -- --------------------------------------------------------------------------
 -- An exit leading out of the area is drawn from a room that has no counterpart
--- on this side: the room it reaches lives in another area's coordinate frame and
--- must stay there, so the map shows an exit going nowhere visible.  A marker
--- room stands in that gap — placed on the cell the exit points at, in this
--- area, carrying the POI symbol so the boundary reads at a glance.
+-- on this side: the room it reaches lives in another area's coordinate frame
+-- and must stay there, so the map shows an exit going nowhere visible.  A
+-- custom line closes that gap — drawn from the room towards the cell the exit
+-- points at and capped with an arrowhead, so the boundary reads at a glance.
 --
--- It is a label, not a room.  Nothing is wired to it, it holds no vnum, and the
--- exit itself still points at the real room across the border so autowalk can
--- cross.  Because it has no vnum, every path that adopts a hashless room has to
--- be told to leave it alone — hence the flag rather than a naming convention.
+-- Earlier builds put a marker ROOM on that cell instead, flagged with the
+-- "border_poi" user data key.  A room in this area standing in for a room in
+-- another one is exactly what a reader should not be shown: it takes a cell,
+-- it is counted, and every pass that walks the area has to be taught to skip
+-- it.  _.is_border_poi still recognises them so the ones already on the map
+-- can be found and deleted (see _.delete_border_markers_at and
+-- map.clean_border_markers).
 local BORDER_POI_KEY = "border_poi"
 
 function _.is_border_poi(roomID)
     return room_user_data(roomID, BORDER_POI_KEY) == "1"
 end
 
--- Ensure a border marker sits at (x, y, z) in areaID.  Returns the marker's
--- room id, or nil when one was neither found nor warranted.
---
--- A cell that already holds a real room is left alone: the marker would either
--- duplicate it or overwrite the symbol of a room that is genuinely there, and
--- an exit whose own side of the border is already mapped needs no signpost.
-function _.ensure_border_poi(areaID, x, y, z, fromRoomID, dir, targetAreaID, posCache)
-    if map.configs.border_poi == false then return nil end
-    if type(areaID) ~= "number" or areaID < 1 then return nil end
-    if x == nil or y == nil or z == nil then return nil end
+-- Compass directions only, keyed to the short form Mudlet's custom-line API
+-- uses.  Up and down have no cell in this plane to point at, so no line of
+-- theirs would be visible; they are left to the ordinary exit rendering.
+local BORDER_ARROW_DIRS = {
+    north     = "n",  northeast = "ne",
+    east      = "e",  southeast = "se",
+    south     = "s",  southwest = "sw",
+    west      = "w",  northwest = "nw",
+}
 
-    -- The symbol a marker for this direction should carry.  A signpost points:
-    -- the arrow says which way the exit leaves, and unlike the "#" this used to
-    -- use it does not collide with the mark 'map set poi' puts on the player's
-    -- own points of interest.
-    local function marker_symbol()
-        local override = map.configs.border_poi_char
-        if type(override) == "string" and override ~= "" then return override end
-        local canonical = _.normalize_exit_direction(dir)
-        local arrow = canonical and type(_.direction_symbols) == "table"
-            and _.direction_symbols[canonical] or nil
-        return arrow or ""
+-- How far along the way to the target cell the arrow stops.  Short of the cell
+-- so the arrowhead reads as a boundary rather than as a link to a room that is
+-- not drawn there.
+local BORDER_ARROW_REACH = 0.6
+
+-- Which of a room's custom lines this script drew, as a comma-separated list of
+-- the short direction keys.  Kept so cleanup can tell its own arrows from lines
+-- the user drew by hand in the map editor.
+local BORDER_ARROW_KEY = "alui_border_arrows"
+
+local function border_arrow_dirs(roomID)
+    local out = {}
+    local raw = room_user_data(roomID, BORDER_ARROW_KEY)
+    if type(raw) ~= "string" or raw == "" then return out end
+    for part in string.gmatch(raw, "[^,]+") do out[part] = true end
+    return out
+end
+
+local function write_border_arrow_dirs(roomID, dirs)
+    local list = {}
+    for d in pairs(dirs) do list[#list + 1] = d end
+    if #list == 0 then
+        _.clear_room_user_data(roomID, BORDER_ARROW_KEY)
+        return
     end
+    table.sort(list)
+    setRoomUserData(roomID, BORDER_ARROW_KEY, table.concat(list, ","))
+end
+
+local function remember_border_arrow(roomID, short)
+    local dirs = border_arrow_dirs(roomID)
+    if dirs[short] then return end
+    dirs[short] = true
+    write_border_arrow_dirs(roomID, dirs)
+end
+
+local function forget_border_arrow(roomID, short)
+    local dirs = border_arrow_dirs(roomID)
+    if not dirs[short] then return end
+    dirs[short] = nil
+    write_border_arrow_dirs(roomID, dirs)
+end
+
+-- Delete legacy border marker rooms sitting on (x, y, z).  Returns how many
+-- were removed.
+function _.delete_border_markers_at(areaID, x, y, z, posCache)
+    if type(areaID) ~= "number" or areaID < 1 then return 0 end
+    if x == nil or y == nil or z == nil then return 0 end
 
     local occupants = _.rooms_at_position(posCache, areaID, x, y, z)
-    if type(occupants) == "table" and #occupants > 0 then
-        for i = 1, #occupants do
-            if _.is_border_poi(occupants[i]) then
-                -- Refresh the symbol on a marker that already exists, so markers
-                -- left over from an earlier build stop showing the old "#"
-                -- without needing the area remapped.
-                if type(setRoomChar) == "function" then
-                    pcall(setRoomChar, occupants[i], marker_symbol())
-                end
-                return occupants[i]
-            end
+    if type(occupants) ~= "table" then return 0 end
+
+    -- Copied because the cache list is mutated by the drops below.
+    local ids = {}
+    for i = 1, #occupants do ids[#ids + 1] = occupants[i] end
+
+    local removed = 0
+    for i = 1, #ids do
+        local rid = ids[i]
+        if _.is_border_poi(rid) and _.delete_room(rid) then
+            _.pos_cache_drop(posCache, x, y, z, rid)
+            removed = removed + 1
+            _.debug_echo("Removed legacy border marker " .. rid .. " at ("
+                .. x .. "," .. y .. "," .. z .. ").\n")
         end
-        return nil
+    end
+    return removed
+end
+
+-- Draw the border arrow for fromRoomID's exit in dir, which leaves areaID for
+-- targetAreaID and would have landed on (x, y, z).  Returns the direction key
+-- the line was stored under, or nil when none was warranted.
+--
+-- The arguments are the marker signature this replaces, so the call sites read
+-- the same: the cell is still what identifies the boundary, it just gets a line
+-- ending in it instead of a room sitting on it.
+function _.ensure_border_arrow(areaID, x, y, z, fromRoomID, dir, targetAreaID, posCache)
+    -- Unconditional, before the config check: a marker room from an earlier
+    -- build occupies the very cell this covers, and turning arrows off must not
+    -- be what keeps those rooms on the map.
+    local removed = _.delete_border_markers_at(areaID, x, y, z, posCache)
+
+    if map.configs.border_arrows == false then return nil end
+    if type(addCustomLine) ~= "function" then return nil end
+    if type(fromRoomID) ~= "number" or fromRoomID < 1 then return nil end
+    if x == nil or y == nil or z == nil then return nil end
+
+    local canonical = _.normalize_exit_direction(dir)
+    local short     = canonical and BORDER_ARROW_DIRS[canonical] or nil
+    if not short then return nil end
+
+    -- Two reasons to leave an existing custom line alone: it is the arrow from
+    -- an earlier arrival (re-adding it is a map redraw, and this runs for every
+    -- border exit of every room the player walks into), or it is a line the
+    -- user drew by hand, which is theirs and not ours to overwrite.
+    local ours = border_arrow_dirs(fromRoomID)[short]
+    if type(getCustomLines) == "function" then
+        local ok, lines = pcall(getCustomLines, fromRoomID)
+        if ok and type(lines) == "table" and lines[short] ~= nil then
+            if ours and removed == 0 then return short end
+            if not ours then return nil end
+        end
     end
 
-    local roomID = createRoomID()
-    _.add_room(roomID)
-    _.set_room_area(roomID, areaID)
-    _.set_room_coordinates(roomID, x, y, z, posCache)
+    local sx, sy = getRoomCoordinates(fromRoomID)
+    if sx == nil then return nil end
 
-    local targetName = _.get_area_name_by_id(targetAreaID)
-    _.set_room_name(roomID,
-        "to " .. (targetName or ("area " .. tostring(targetAreaID))), areaID)
-    setRoomUserData(roomID, BORDER_POI_KEY, "1")
-    if type(setRoomChar) == "function" then pcall(setRoomChar, roomID, marker_symbol()) end
-    _.apply_room_environment(roomID, "Inside")
-    _.stamp_room_origin(roomID, "border-marker",
-        tostring(fromRoomID) .. ":" .. tostring(dir))
+    local color = map.configs.border_arrow_color
+    if type(color) ~= "table" or #color < 3 then color = { 160, 160, 160 } end
 
-    _.debug_echo("Border marker " .. roomID .. " placed at (" .. x .. "," .. y
-        .. "," .. z .. ") for " .. tostring(dir) .. " out of room "
-        .. tostring(fromRoomID) .. ".\n")
-    return roomID
+    local function draw(px, py)
+        local ok, res = pcall(addCustomLine, fromRoomID,
+            { { px, py, z } }, short, "solid line", color, true)
+        return ok and res == true
+    end
+
+    -- Fractional first; a build that will not take a fractional point gets the
+    -- whole cell rather than no arrow at all.
+    local drawn = draw(sx + (x - sx) * BORDER_ARROW_REACH,
+                       sy + (y - sy) * BORDER_ARROW_REACH)
+    if not drawn then drawn = draw(x, y) end
+    if not drawn then return nil end
+
+    -- Remember whose line this is.  A custom line drawn by hand in the map
+    -- editor is indistinguishable from one of these otherwise, and the cleanup
+    -- below must never delete somebody's own work.
+    remember_border_arrow(fromRoomID, short)
+
+    _.debug_echo("Border arrow drawn from room " .. fromRoomID .. " "
+        .. tostring(dir) .. " towards (" .. x .. "," .. y .. "," .. z
+        .. ") for area " .. tostring(targetAreaID) .. ".\n")
+    return short
+end
+
+-- Remove the border arrow on roomID's exit in dir, if there is one.  Called
+-- where an exit is found to stay inside the area: a room that was in another
+-- area when the arrow was drawn and has since been moved here leaves the arrow
+-- pointing at a room that is now drawn normally, which reads as a second exit.
+function _.clear_border_arrow(roomID, dir)
+    if type(removeCustomLine) ~= "function" then return false end
+    if type(getCustomLines) ~= "function" then return false end
+    if type(roomID) ~= "number" or roomID < 1 then return false end
+
+    local canonical = _.normalize_exit_direction(dir)
+    local short     = canonical and BORDER_ARROW_DIRS[canonical] or nil
+    if not short then return false end
+
+    if not border_arrow_dirs(roomID)[short] then return false end
+
+    local ok, lines = pcall(getCustomLines, roomID)
+    if not ok or type(lines) ~= "table" or lines[short] == nil then
+        forget_border_arrow(roomID, short)
+        return false
+    end
+
+    local removed = pcall(removeCustomLine, roomID, short)
+    if removed then forget_border_arrow(roomID, short) end
+    return removed
 end
 
 -- True when two rooms are each bound to a game room and those bindings differ.
@@ -2348,6 +2461,9 @@ end
 --   duplicate_hash_rooms — multiple mapper IDs resolve to the same GMCP hash
 --   overlapping_rooms — distinct rooms occupying the same (x,y,z) cell (visual overlap)
 --   unreachable       — rooms in the area with no exits and no exit-stubs pointing at them
+--   border_markers    — legacy marker rooms standing in for a room in another
+--                       area; border arrows replaced them, so these are stale
+--                       (delete with 'map clean-borders')
 --
 -- `collect` adds counts.details: the same anomalies as lists rather than only
 -- tallies, for a caller that means to name the rooms involved.  It is off by
@@ -2365,6 +2481,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
         duplicate_hash_rooms = 0,
         overlapping_rooms  = 0,
         unreachable        = 0,
+        border_markers     = 0,
     }
     local details
     if collect then
@@ -2377,6 +2494,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
             duplicate_hash   = {},  -- { hash, rooms = { roomID, ... } }
             overlapping      = {},  -- { x, y, z, rooms = { roomID, ... } }
             unreachable      = {},  -- roomID
+            border_markers   = {},  -- roomID
         }
         counts.details = details
     end
@@ -2565,10 +2683,15 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
         end
 
         -- Unreachable: no exits and no in-scope room exits to this room.
-        -- Border markers are exempt: having neither is what they are, not a
-        -- fault to be reported on every audit for as long as the area has a
-        -- border (see _.ensure_border_poi).
-        if not hasAnyExit and not hasIncoming[rid] and not _.is_border_poi(rid) then
+        -- Legacy border markers are exempt: having neither is what they are,
+        -- and they are reported as their own category instead (they should be
+        -- deleted, not wired up -- see _.ensure_border_arrow).
+        if _.is_border_poi(rid) then
+            counts.border_markers = counts.border_markers + 1
+            if details then
+                details.border_markers[#details.border_markers + 1] = rid
+            end
+        elseif not hasAnyExit and not hasIncoming[rid] then
             counts.unreachable = counts.unreachable + 1
             if details then
                 details.unreachable[#details.unreachable + 1] = rid

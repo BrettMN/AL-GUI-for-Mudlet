@@ -488,6 +488,159 @@ function map.clean_placeholders(areaNameArg, silent)
 end
 
 -- --------------------------------------------------------------------------
+-- Placeholder -> exit stub conversion
+-- --------------------------------------------------------------------------
+
+-- Replaces every placeholder room in the current (or named) area with an exit
+-- stub on the room that pointed at it.
+--
+-- A placeholder is created from a GMCP exit, and GMCP names the room an exit
+-- leads to but never the area that room is in, so a placeholder standing on the
+-- far side of a border is filed under the wrong area until somebody walks it.
+-- New exploration stubs those exits instead (see stub_unexplored_exits in
+-- Data.lua); this converts the ones already on the map.
+--
+-- Locked rooms are left alone: the user pinned them deliberately.
+function map.stub_placeholders(areaNameArg, silent)
+    if type(_.is_placeholder) ~= "function" then
+        echo("Error: _.is_placeholder is not loaded yet.\n")
+        return
+    end
+
+    local areaID, areaErr = resolve_area_arg(areaNameArg)
+    if not areaID then
+        echo(areaErr)
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        echo("Cannot get rooms for area.\n")
+        return
+    end
+
+    local placeholders = {}
+    for _k, rid in ipairs(rooms) do
+        if _.is_placeholder(rid) and not _.is_border_poi(rid)
+            and not _.is_room_locked(rid) then
+            placeholders[rid] = true
+        end
+    end
+
+    -- Which real room pointed at each placeholder, and in which direction.
+    -- Read before anything is deleted: Mudlet drops the exits into a room when
+    -- the room goes, so afterwards there is nothing left to read.
+    local pending = {}
+    for _k, rid in ipairs(rooms) do
+        if not placeholders[rid] then
+            local exits = getRoomExits(rid)
+            if type(exits) == "table" then
+                for dir, target in pairs(exits) do
+                    if placeholders[tonumber(target) or target] then
+                        pending[#pending + 1] = { room = rid, dir = dir }
+                    end
+                end
+            end
+        end
+    end
+
+    local deletedCount = 0
+    for rid in pairs(placeholders) do
+        if _.delete_room(rid) then deletedCount = deletedCount + 1 end
+    end
+
+    local stubbedCount = 0
+    for _k, entry in ipairs(pending) do
+        if _.ensure_exit_stub(entry.room, entry.dir) then
+            stubbedCount = stubbedCount + 1
+        end
+    end
+
+    if deletedCount > 0 and not silent then updateMap() end
+    if not silent then
+        local areaDisplayName = _.get_area_name_by_id(areaID) or tostring(areaID)
+        echo("Deleted " .. deletedCount .. " placeholder room"
+            .. (deletedCount == 1 and "" or "s")
+            .. " in area '" .. areaDisplayName .. "', leaving "
+            .. stubbedCount .. " exit stub"
+            .. (stubbedCount == 1 and "" or "s") .. ".\n")
+    end
+    return deletedCount
+end
+
+-- --------------------------------------------------------------------------
+-- Legacy border marker cleanup
+-- --------------------------------------------------------------------------
+
+-- Deletes the marker rooms earlier builds placed on the far side of an exit
+-- that leaves the area (user data "border_poi").  Border arrows replaced them:
+-- a cross-area exit is now capped with a custom line ending in an arrowhead, so
+-- no room in this area stands in for a room in another one.
+--
+-- New arrivals clear the markers on the cells they cover as they draw, but only
+-- for the exits actually walked past; this sweeps a whole area at once.
+function map.clean_border_markers(areaNameArg, silent)
+    if type(_.is_border_poi) ~= "function" then
+        echo("Error: _.is_border_poi is not loaded yet.\n")
+        return
+    end
+
+    local areaID, areaErr = resolve_area_arg(areaNameArg)
+    if not areaID then
+        echo(areaErr)
+        return
+    end
+
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" then
+        echo("Cannot get rooms for area.\n")
+        return
+    end
+
+    local deletedCount = 0
+    for _k, rid in ipairs(rooms) do
+        if _.is_border_poi(rid) and _.delete_room(rid) then
+            deletedCount = deletedCount + 1
+        end
+    end
+
+    -- Draw the arrows the markers stood in for, so the border still reads after
+    -- the sweep instead of waiting for the player to walk each room again.
+    local arrowCount = 0
+    for _k, rid in ipairs(rooms) do
+        if getRoomArea(rid) == areaID then
+            local x, y, z = getRoomCoordinates(rid)
+            local exits = x ~= nil and getRoomExits(rid) or nil
+            if type(exits) == "table" then
+                for dir, target in pairs(exits) do
+                    local targetID = tonumber(target)
+                    local shift    = _.get_shift_for_exit_key(dir)
+                    local tArea    = targetID and getRoomArea(targetID) or nil
+                    if shift and type(tArea) == "number" and tArea > 0 and tArea ~= areaID then
+                        if _.ensure_border_arrow(areaID,
+                            x + shift[1], y + shift[2], z + shift[3],
+                            rid, dir, tArea, nil) then
+                            arrowCount = arrowCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if (deletedCount > 0 or arrowCount > 0) and not silent then updateMap() end
+    if not silent then
+        local areaDisplayName = _.get_area_name_by_id(areaID) or tostring(areaID)
+        echo("Deleted " .. deletedCount .. " border marker room"
+            .. (deletedCount == 1 and "" or "s")
+            .. " in area '" .. areaDisplayName .. "'; "
+            .. arrowCount .. " border exit"
+            .. (arrowCount == 1 and " carries an arrow" or "s carry an arrow") .. ".\n")
+    end
+    return deletedCount
+end
+
+-- --------------------------------------------------------------------------
 -- Room provenance
 -- --------------------------------------------------------------------------
 
@@ -805,6 +958,17 @@ function map.audit_layout(areaNameArg, limitArg)
         overflow(#stranded)
     end
 
+    local markers = details.border_markers or {}
+    if section(#markers, "Border marker rooms",
+        "left by an older build to stand in for a room in another area; 'map clean-borders' deletes them") then
+        for i = 1, math.min(limit, #markers) do
+            cecho("  ")
+            audit_room_id(markers[i])
+            cecho(" <grey>" .. audit_room_name(markers[i]) .. "<reset>\n")
+        end
+        overflow(#markers)
+    end
+
     if reported == 0 then
         cecho("<green>No anomalies found.<reset>\n")
     end
@@ -940,6 +1104,13 @@ function map.show_help()
     echo("  map clean-placeholders [area name]\n")
     echo("    Delete placeholder rooms whose map position overlaps a real room in the current (or named) area.\n")
     echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")
+    echo("  map stub-placeholders [area name]\n")
+    echo("    Replace every unvisited placeholder room in the area with an exit stub on the\n")
+    echo("    room that pointed at it. GMCP never says which area an exit's target is in, so a\n")
+    echo("    placeholder past a border sits in the wrong area until it is walked.\n\n")
+    echo("  map clean-borders [area name]\n")
+    echo("    Delete the border marker rooms older builds placed where a cross-area exit leads.\n")
+    echo("    Those cells now get an arrow on the exit line instead, so the markers are stale.\n\n")
     echo("  map remove poi\n")
     echo("    Remove the POI marker from the current room and restore its original terrain color.\n\n")
     echo("  map profile [on|off|reset|report [N]|status]\n")

@@ -101,12 +101,21 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
     -- Whether an exit to a room we have never seen gets a placeholder room or
     -- just an exit stub.  Placeholders are what make the map show unexplored
     -- exits and are what add_placeholder_exits chains together to route autowalk
-    -- through unmapped space, but on a large area each one costs roughly half a
-    -- second to create and most are never walked.  Above the large-area
-    -- threshold the stub carries the same information for free, and the exit to
-    -- the real room gets written on arrival instead (handle_move, Core.lua).
+    -- through unmapped space; the stub carries "an exit leaves here" for free.
+    --
+    -- The default is the stub, everywhere, because GMCP names an exit's target
+    -- but not the area that target is in.  A placeholder therefore has to be
+    -- filed under the area of the room it was seen from, and a border is
+    -- exactly where the next room is unmapped, so the exits that matter most
+    -- are the ones that put a room in the wrong area until somebody walks it.
+    -- Waiting costs nothing: handle_move creates the room from the server's own
+    -- statement of where it is, the moment the player is standing in it.
+    --
+    -- A large area forces the stub regardless of the setting: there each
+    -- placeholder costs roughly half a second to create and most are never
+    -- walked.
     local stubUnexplored   = map.configs.stub_unexplored_exits ~= false
-        and type(_.is_large_area) == "function" and _.is_large_area(areaID)
+        or (type(_.is_large_area) == "function" and _.is_large_area(areaID))
 
     local forcedZ          = _.get_forced_z_for_room(roomID)
     local createdCount     = 0
@@ -448,20 +457,6 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                 -- Newly created or existing rooms without an area get placed next to us.
                 local targetAreaID = getRoomArea(targetID)
 
-                -- The exit leaves the area.  The room it reaches keeps its own
-                -- frame and is not moved here — the exit below still points at
-                -- it, so autowalk crosses as before — but nothing of it can be
-                -- drawn on this side, so the cell it would have occupied gets a
-                -- marker instead.  Skipped when this room has no coordinates or
-                -- the direction is not a compass one: there is no cell to mark.
-                if shift and cx ~= nil
-                    and type(targetAreaID) == "number" and targetAreaID > 0
-                    and targetAreaID ~= areaID then
-                    _.ensure_border_poi(areaID,
-                        cx + shift[1], cy + shift[2], cz + shift[3],
-                        roomID, dir, targetAreaID, posCache)
-                end
-
                 if created or not targetAreaID or targetAreaID < 1 then
                     if shift then
                         local tx = cx + shift[1]
@@ -629,6 +624,32 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                 if exitDir and not exit_already_set(exitDir, targetID) then
                     setExit(roomID, targetID, exitDir)
                     note_exit(exitDir, targetID)
+                end
+
+                -- The exit leaves the area.  The room it reaches keeps its own
+                -- frame and is not moved here — the exit still points at it, so
+                -- autowalk crosses as before — but nothing of it can be drawn on
+                -- this side, so the exit is capped with an arrow pointing at the
+                -- cell it would have occupied.  Skipped when this room has no
+                -- coordinates or the direction is not a compass one: there is no
+                -- cell to point at.
+                --
+                -- After the exit is wired, not before: Mudlet refuses a custom
+                -- line for a direction the room has no exit in, and on a first
+                -- visit the write above is what creates it.  The area is re-read
+                -- for the same reason -- dedup above can have replaced targetID.
+                local borderAreaID = getRoomArea(targetID)
+                if shift and cx ~= nil
+                    and type(borderAreaID) == "number" and borderAreaID > 0
+                    and borderAreaID ~= areaID then
+                    _.ensure_border_arrow(areaID,
+                        cx + shift[1], cy + shift[2], cz + shift[3],
+                        roomID, dir, borderAreaID, posCache)
+                elseif type(_.clear_border_arrow) == "function" then
+                    -- The exit stays inside the area, so the room it reaches is
+                    -- drawn here.  Any arrow from a run when it was elsewhere
+                    -- now reads as a second exit beside a real one.
+                    _.clear_border_arrow(roomID, dir)
                 end
             end
         end

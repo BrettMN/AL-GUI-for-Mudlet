@@ -685,10 +685,9 @@ local function handle_move(isLastInBatch)
                         .. " to area " .. correctAreaID .. "\n")
 
                     -- Mark the cell it is leaving, so the old area's map shows a
-                    -- boundary rather than an exit into empty space.  Done before
-                    -- the move, while the room is still the old area's occupant
-                    -- of that cell — ensure_border_poi declines a cell that is
-                    -- taken, and after the move this one is free.
+                    -- boundary rather than an exit into empty space.  The
+                    -- coordinates are read before the move, while the room is
+                    -- still the old area's occupant of that cell.
                     local ox, oy, oz = getRoomCoordinates(rnum)
                     local fromRoom, fromDir = nil, nil
                     if type(map.prev_info) == "table" and type(map.prev_info.vnum) == "string" then
@@ -701,7 +700,7 @@ local function handle_move(isLastInBatch)
                     _.set_room_area(rnum, correctAreaID)
 
                     if ox ~= nil and type(currentAreaID) == "number" and currentAreaID > 0 then
-                        _.ensure_border_poi(currentAreaID, ox, oy, oz,
+                        _.ensure_border_arrow(currentAreaID, ox, oy, oz,
                             fromRoom, fromDir, correctAreaID, nil)
                     end
 

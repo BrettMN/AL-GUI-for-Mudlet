@@ -62,18 +62,22 @@ map.configs.stretch_area = map.configs.stretch_area == true
 -- every arrival re-decide (and flap).
 map.configs.grid_mode_latch = map.configs.grid_mode_latch ~= false
 
--- Mark the far side of an exit that leaves the area with a POI room, placed on
--- the cell the exit points at.  The exit itself still points at the real room in
--- the other area, so routing across a border is unaffected; the marker exists
--- because that room lives in another coordinate frame and cannot be drawn here,
--- which otherwise leaves a border exit pointing at nothing visible.
-map.configs.border_poi = map.configs.border_poi ~= false
+-- Cap an exit that leaves the area with a short arrow: a custom line drawn from
+-- the room towards the cell the exit points at, ending in an arrowhead.  The
+-- exit itself still points at the real room in the other area, so routing
+-- across a border is unaffected; the arrow exists because that room lives in
+-- another coordinate frame and cannot be drawn here, which otherwise leaves a
+-- border exit pointing at nothing visible.
+--
+-- This replaces the marker ROOMS earlier builds put on that cell: no room in
+-- this area now stands in for a room in another one.  Leftovers from those
+-- builds are deleted as the arrows are drawn, and wholesale by
+-- 'map clean-borders'.
+map.configs.border_arrows = map.configs.border_arrows ~= false
 
--- Override the border marker's room symbol.  Left unset, a marker uses the
--- arrow for the direction its exit leaves in (see _.direction_symbols); set it
--- to a string and every marker carries that instead -- the escape hatch when the
--- mapper font has no arrows.
-map.configs.border_poi_char = map.configs.border_poi_char or nil
+-- Colour of the border arrow, as { r, g, b } 0-255.  Grey by default so it
+-- reads as boundary furniture rather than as another exit.
+map.configs.border_arrow_color = map.configs.border_arrow_color or { 160, 160, 160 }
 
 -- May a placeholder that is already bound to one game room be re-bound to a
 -- different one because it happens to sit where an exit points?
@@ -155,17 +159,24 @@ map.configs.deferred_neighbor_per_tick = map.configs.deferred_neighbor_per_tick 
 -- the forward graph that map normalize and map recalculate both navigate by.
 map.configs.deferred_neighbor_soft_cap = map.configs.deferred_neighbor_soft_cap or 2000
 
--- On a large area, mark an exit leading somewhere unvisited with Mudlet's own
--- exit stub rather than creating a placeholder room to stand in for it.  A
--- placeholder costs ~500ms there (setRoomArea alone ~396ms) and most are never
--- walked; a stub carries the same "an exit leaves here" information for no
--- measurable cost.  The exit to the real room is written when the player walks
--- it, so the forward graph that map normalize and map recalculate navigate by
--- stays complete for every connection actually travelled.
+-- Mark an exit leading somewhere unvisited with Mudlet's own exit stub rather
+-- than creating a placeholder room to stand in for it.  A stub carries the same
+-- "an exit leaves here" information for no measurable cost, and the exit to the
+-- real room is written when the player walks it, so the forward graph that map
+-- normalize and map recalculate navigate by stays complete for every connection
+-- actually travelled.
 --
--- The trade-off: autowalk cannot route through unexplored space in those areas,
--- because add_placeholder_exits needs real placeholder rooms to chain together.
--- Set false to go back to creating placeholders everywhere.
+-- The reason this is the default rather than a large-area optimisation: GMCP
+-- names the room an exit leads to but never the area that room is in, so a
+-- placeholder can only be filed under the area it was seen from.  Every exit
+-- that crosses a border therefore creates a room in the wrong area, and stays
+-- wrong until the player walks it.  On a large area the placeholder also costs
+-- ~500ms to create (setRoomArea alone ~396ms) and most are never walked, so
+-- there the stub is used whatever this is set to.
+--
+-- The trade-off: autowalk cannot route through unexplored space, because
+-- add_placeholder_exits needs real placeholder rooms to chain together.  Set
+-- false to go back to creating placeholders in normal-sized areas.
 map.configs.stub_unexplored_exits = map.configs.stub_unexplored_exits ~= false
 
 -- Move a room onto the cluster its exits say it adjoins, as soon as enough of
@@ -414,29 +425,6 @@ _.move_vectors = {
     northwest = { -1, 1, 0 },
     up = { 0, 0, 1 },
     down = { 0, 0, -1 }
-}
-
--- Room symbols for the border markers that stand in for an exit leaving the
--- area (see _.ensure_border_poi).  A marker is a signpost, so it points: the
--- glyph is the direction the exit leaves in, which reads at a glance and does
--- not collide with the "#" that 'map set poi' puts on the player's own marks.
---
--- Written as decimal byte escapes rather than literal arrows: Lua 5.1 has no
--- \u{} escape, and this way the bytes survive the trip through Muddler and
--- Mudlet's XML regardless of file encoding.  They are UTF-8 for U+2190..U+2199
--- and U+21D1/U+21D3.  If the mapper font renders them as boxes, set
--- map.configs.border_poi_char to an ASCII character instead.
-_.direction_symbols = {
-    north     = "\226\134\145", -- up arrow
-    northeast = "\226\134\151",
-    east      = "\226\134\146",
-    southeast = "\226\134\152",
-    south     = "\226\134\147",
-    southwest = "\226\134\153",
-    west      = "\226\134\144",
-    northwest = "\226\134\150",
-    up        = "\226\135\145", -- double up
-    down      = "\226\135\147",
 }
 
 _.exitmap = {

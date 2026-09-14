@@ -170,12 +170,14 @@ local API_NAMES = {
     "getRoomIDbyHash", "getRoomHashByID", "getRoomName", "getRoomArea",
     "getRoomExits", "getRoomUserData", "getAllRoomUserData", "getRoomEnv",
     "getRoomChar", "getExitStubs1", "getSpecialExitsSwap", "getPlayerRoom",
+    "getCustomLines",
     "roomLocked", "getAreaTableSwap", "getAreaRoomsCount", "getPath",
     -- writes
     "setRoomCoordinates", "setRoomArea", "setRoomName", "setRoomIDbyHash",
     "setRoomUserData", "clearRoomUserDataItem", "setRoomEnv", "setRoomChar",
     "setExit", "connectExitStub", "setExitStub", "addRoom", "deleteRoom",
     "createRoomID", "lockRoom", "setGridMode", "updateMap", "centerview",
+    "addCustomLine", "removeCustomLine",
 }
 
 -- name -> the function that was in place before we wrapped it.  Held on the
