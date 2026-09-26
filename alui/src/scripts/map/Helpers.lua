@@ -33,6 +33,14 @@ local underground_name_patterns = {
     "cave", "tunnel", "underground", "beneath", "cavern", "subterranean",
 }
 
+-- Name patterns that indicate a room is below the surface of a body of water.
+-- Needed because the "under the river"/"under the lake" terrains canonicalise
+-- to plain "lake" (same color, same menu entry), so once stored the terrain
+-- alone no longer says whether the room is on the water or under it.
+local underwater_name_patterns  = {
+    "under water", "underwater",
+}
+
 -- Name patterns that indicate a room is on an elevated z-level (+1 from surface).
 local elevated_name_patterns    = {
     "stone wall",
@@ -716,6 +724,13 @@ end
 function _.get_forced_z_for_room(roomID)
     if type(roomID) ~= "number" or roomID < 1 then return nil end
 
+    local currentInfo = nil
+    if type(map.room_info.vnum) == "string"
+        and getRoomIDbyHash(map.room_info.vnum) == roomID then
+        currentInfo = map.room_info
+    end
+    if _.is_underwater_room(roomID, currentInfo) then return nil end
+
     if type(map.room_info.vnum) == "string" then
         local currentRoomID = getRoomIDbyHash(map.room_info.vnum)
         if currentRoomID == roomID then
@@ -1364,7 +1379,7 @@ function _.resolve_room_overlaps(areaID, posCache, maxRadius, anchorRoomID, resp
     -- Pick the occupant that keeps the cell: the anchor first, then the most
     -- exit-consistent, then lowest id.
     local function pick_keeper(ids)
-        local best      = ids[1]
+        local best       = ids[1]
         local bestAnchor = immobile(best)
         local bestScore  = consistency_score(best)
         for i = 2, #ids do
@@ -1504,10 +1519,10 @@ end
 --   alui_history  the ordered list of everything that has since claimed the
 --                 room, capped, for the cases where the origin alone is not the
 --                 whole story (promoted from a duplicate, adopted by position).
-local ORIGIN_KEY      = "alui_origin"
-local VISITED_KEY     = "alui_visited"
-local HISTORY_KEY     = "alui_history"
-local HISTORY_MAX     = 8
+local ORIGIN_KEY  = "alui_origin"
+local VISITED_KEY = "alui_visited"
+local HISTORY_KEY = "alui_history"
+local HISTORY_MAX = 8
 
 local function provenance_now()
     return tostring(os.time())
@@ -1587,8 +1602,8 @@ function _.inherit_room_provenance(keepID, dupID)
     local dupVisited = room_user_data(dupID, VISITED_KEY)
     if dupVisited then
         local keepVisited = room_user_data(keepID, VISITED_KEY)
-        local dupAt  = tonumber(dupVisited) or 0
-        local keepAt = tonumber(keepVisited) or 0
+        local dupAt       = tonumber(dupVisited) or 0
+        local keepAt      = tonumber(keepVisited) or 0
         if not keepVisited or dupAt > keepAt then
             setRoomUserData(keepID, VISITED_KEY, dupVisited)
         end
@@ -1648,10 +1663,14 @@ end
 -- uses.  Up and down have no cell in this plane to point at, so no line of
 -- theirs would be visible; they are left to the ordinary exit rendering.
 local BORDER_ARROW_DIRS = {
-    north     = "n",  northeast = "ne",
-    east      = "e",  southeast = "se",
-    south     = "s",  southwest = "sw",
-    west      = "w",  northwest = "nw",
+    north = "n",
+    northeast = "ne",
+    east = "e",
+    southeast = "se",
+    south = "s",
+    southwest = "sw",
+    west = "w",
+    northwest = "nw",
 }
 
 -- How far along the way to the target cell the arrow stops.  Short of the cell
@@ -1773,7 +1792,7 @@ function _.ensure_border_arrow(areaID, x, y, z, fromRoomID, dir, targetAreaID, p
     -- Fractional first; a build that will not take a fractional point gets the
     -- whole cell rather than no arrow at all.
     local drawn = draw(sx + (x - sx) * BORDER_ARROW_REACH,
-                       sy + (y - sy) * BORDER_ARROW_REACH)
+        sy + (y - sy) * BORDER_ARROW_REACH)
     if not drawn then drawn = draw(x, y) end
     if not drawn then return nil end
 
@@ -1952,6 +1971,38 @@ function _.is_underground_room_name(name)
     return false
 end
 
+function _.is_underwater_room_name(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local lower = string.lower(name)
+    for _, pattern in ipairs(underwater_name_patterns) do
+        if lower:find(pattern, 1, true) then return true end
+    end
+    return false
+end
+
+-- True when the raw (not yet canonicalised) terrain names a submerged room,
+-- e.g. "under the river", "under ocean".
+function _.is_underwater_terrain(terrain)
+    if type(terrain) ~= "string" then return false end
+    return string.lower(terrain):match("^%s*under%s") ~= nil
+end
+
+-- A submerged room has no fixed plane of its own: it sits however many `down`
+-- steps below the surface water it was reached from.  Callers that anchor rooms
+-- by terrain must skip it, or the "lake" it canonicalises to pulls it up to 0.
+function _.is_underwater_room(roomID, info)
+    local name = type(info) == "table" and info.name or nil
+    if (type(name) ~= "string" or name == "") and type(roomID) == "number" then
+        name = getRoomName(roomID)
+    end
+    if _.is_underwater_room_name(name) then return true end
+    if type(info) == "table" and _.is_underwater_terrain(info.terrain) then return true end
+    if type(roomID) == "number" and roomID > 0 then
+        return _.is_underwater_terrain(getRoomUserData(roomID, "terrain"))
+    end
+    return false
+end
+
 function _.is_elevated_room_name(name)
     if type(name) ~= "string" or name == "" then return false end
     local lower = string.lower(name)
@@ -2002,10 +2053,10 @@ function _.sky_altitude(roomID)
     local maxLevel = tonumber(map.configs.sky_max_level) or 3
     local budget   = tonumber(map.configs.sky_altitude_search) or 16
 
-    local queue   = { { id = roomID, offset = 0 } }
-    local seen    = { [roomID] = true }
-    local head    = 1
-    local visited = 0
+    local queue    = { { id = roomID, offset = 0 } }
+    local seen     = { [roomID] = true }
+    local head     = 1
+    local visited  = 0
     while head <= #queue do
         local entry   = queue[head]
         local current = entry.id
@@ -2066,6 +2117,7 @@ function _.anchor_z_for_room(roomID, info)
     if _.is_sky_room_name(name) then
         return _.sky_altitude(roomID)
     end
+    if _.is_underwater_room(roomID, info) then return nil end
 
     -- Surface terrain is already enumerated: forced_z_by_terrain_name is the
     -- list of terrains that sit on the ground, and every one of them maps to 0.
@@ -2254,13 +2306,13 @@ function _.snap_vertical_pair(areaID, externalPosCache)
     end
 
     -- Position cache for fast occupancy lookups.
-    local posCache = (type(externalPosCache) == "table" and externalPosCache._areaID == areaID)
+    local posCache        = (type(externalPosCache) == "table" and externalPosCache._areaID == areaID)
         and externalPosCache
         or _.build_pos_cache(areaID)
 
     -- Tally how many in-area rooms point `up` / `down` to each target ID.
     -- More than one in the same direction = shared_target_bug (violates uniqueness).
-    local upTargetCount   = {}   -- targetID → count of in-area rooms that exit `up` to it
+    local upTargetCount   = {} -- targetID → count of in-area rooms that exit `up` to it
     local downTargetCount = {}
 
     for _i, rid in ipairs(areaRooms) do
@@ -2473,28 +2525,28 @@ end
 -- NOTE: This function is intentionally read-only; it never calls setRoomCoordinates or setExit.
 function _.audit_layout_anomalies(roomIDs, areaID, collect)
     local counts = {
-        self_loops         = 0,
-        delta_mismatches   = 0,
-        vertical_drift     = 0,
-        cross_area         = 0,
-        shared_target_bug  = 0,
+        self_loops           = 0,
+        delta_mismatches     = 0,
+        vertical_drift       = 0,
+        cross_area           = 0,
+        shared_target_bug    = 0,
         duplicate_hash_rooms = 0,
-        overlapping_rooms  = 0,
-        unreachable        = 0,
-        border_markers     = 0,
+        overlapping_rooms    = 0,
+        unreachable          = 0,
+        border_markers       = 0,
     }
     local details
     if collect then
         details = {
-            self_loops       = {},  -- { room, dir }
-            delta_mismatches = {},  -- { room, dir, target, dx, dy, dz, ex, ey, ez }
-            vertical_drift   = {},  -- same shape as delta_mismatches
-            cross_area       = {},  -- { room, dir, target, area }
-            shared_target    = {},  -- { dir, target, sources = { roomID, ... } }
-            duplicate_hash   = {},  -- { hash, rooms = { roomID, ... } }
-            overlapping      = {},  -- { x, y, z, rooms = { roomID, ... } }
-            unreachable      = {},  -- roomID
-            border_markers   = {},  -- roomID
+            self_loops       = {}, -- { room, dir }
+            delta_mismatches = {}, -- { room, dir, target, dx, dy, dz, ex, ey, ez }
+            vertical_drift   = {}, -- same shape as delta_mismatches
+            cross_area       = {}, -- { room, dir, target, area }
+            shared_target    = {}, -- { dir, target, sources = { roomID, ... } }
+            duplicate_hash   = {}, -- { hash, rooms = { roomID, ... } }
+            overlapping      = {}, -- { x, y, z, rooms = { roomID, ... } }
+            unreachable      = {}, -- roomID
+            border_markers   = {}, -- roomID
         }
         counts.details = details
     end
@@ -2627,7 +2679,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
                         counts.self_loops = counts.self_loops + 1
                         if details then
                             details.self_loops[#details.self_loops + 1] =
-                                { room = rid, dir = dir }
+                            { room = rid, dir = dir }
                         end
                     else
                         local targetAreaID
@@ -2638,7 +2690,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
                             counts.cross_area = counts.cross_area + 1
                             if details then
                                 details.cross_area[#details.cross_area + 1] =
-                                    { room = rid, dir = dir, target = targetID, area = targetAreaID }
+                                { room = rid, dir = dir, target = targetID, area = targetAreaID }
                             end
                         else
                             -- Shared-target bug
@@ -2668,9 +2720,15 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
                                         end
                                         if bucket then
                                             bucket[#bucket + 1] = {
-                                                room = rid, dir = dir, target = targetID,
-                                                dx = dx, dy = dy, dz = dz,
-                                                ex = shift[1], ey = shift[2], ez = shift[3],
+                                                room = rid,
+                                                dir = dir,
+                                                target = targetID,
+                                                dx = dx,
+                                                dy = dy,
+                                                dz = dz,
+                                                ex = shift[1],
+                                                ey = shift[2],
+                                                ez = shift[3],
                                             }
                                         end
                                     end
@@ -2727,7 +2785,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
         for hash, group in pairs(hashGroups) do
             table.sort(group)
             details.duplicate_hash[#details.duplicate_hash + 1] =
-                { hash = hash, rooms = group }
+            { hash = hash, rooms = group }
         end
         table.sort(details.duplicate_hash, function(a, b)
             return a.rooms[1] < b.rooms[1]
@@ -2737,7 +2795,7 @@ function _.audit_layout_anomalies(roomIDs, areaID, collect)
             if #cell > 1 then
                 table.sort(cell)
                 details.overlapping[#details.overlapping + 1] =
-                    { x = cell.x, y = cell.y, z = cell.z, rooms = cell }
+                { x = cell.x, y = cell.y, z = cell.z, rooms = cell }
             end
         end
         table.sort(details.overlapping, function(a, b)
@@ -2759,8 +2817,8 @@ function _.find_duplicate_hash_groups(areaID)
     if type(getRoomHashByID) ~= "function" then return {} end
     local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then return {} end
-    local seen   = {}  -- hash → first roomID
-    local groups = {}  -- hash → {roomID, ...} (only when dup found)
+    local seen   = {} -- hash → first roomID
+    local groups = {} -- hash → {roomID, ...} (only when dup found)
     for _i, rid in ipairs(rooms) do
         local h = getRoomHashByID(rid)
         if type(h) == "string" and h ~= "" then
@@ -2794,20 +2852,20 @@ function _.choose_survivor(group)
     local bestScore  = nil
 
     for _i, rid in ipairs(group) do
-        local score    = {}
+        local score = {}
         -- criterion 1: immobile (player or locked)
-        score[1]       = (rid == playerRoom or _.is_room_locked(rid)) and 1 or 0
+        score[1]    = (rid == playerRoom or _.is_room_locked(rid)) and 1 or 0
         -- criterion 2: exit count
-        local exits    = getRoomExits(rid)
-        score[2]       = type(exits) == "table" and (function()
+        local exits = getRoomExits(rid)
+        score[2]    = type(exits) == "table" and (function()
             local n = 0; for _ in pairs(exits) do n = n + 1 end; return n
         end)() or 0
         -- criterion 3: name is not the hash string
-        local name     = type(getRoomName) == "function" and getRoomName(rid) or ""
-        local hash     = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or ""
-        score[3]       = (name ~= hash and name ~= "") and 1 or 0
+        local name  = type(getRoomName) == "function" and getRoomName(rid) or ""
+        local hash  = type(getRoomHashByID) == "function" and getRoomHashByID(rid) or ""
+        score[3]    = (name ~= hash and name ~= "") and 1 or 0
         -- criterion 4: lower id is better (negate for "higher = better" sort)
-        score[4]       = -rid
+        score[4]    = -rid
 
         if bestScore == nil then
             best      = rid
@@ -3017,7 +3075,7 @@ function _.merge_duplicate_room(survivorID, loserID, posCache, revIndex)
         local survivorData = getAllRoomUserData(survivorID)
         if type(loserData) == "table" then
             for k, v in pairs(loserData) do
-                if k ~= "locked" then  -- never carry lock state from loser
+                if k ~= "locked" then -- never carry lock state from loser
                     local survivorHas = type(survivorData) == "table" and survivorData[k] ~= nil
                     if not survivorHas then
                         setRoomUserData(survivorID, k, v)
@@ -3083,13 +3141,15 @@ function map.dedupe_area_by_hash(areaID, posCache)
 
     -- Collect all loser IDs so we can build the reverse exit index once.
     -- First pass: choose survivors.
-    local survivorFor = {}  -- loserID → survivorID
-    local losers      = {}  -- list of loserIDs
+    local survivorFor = {} -- loserID → survivorID
+    local losers      = {} -- list of loserIDs
     for _i, group in ipairs(groups) do
         -- If ALL members are immobile we cannot touch this group.
         local allImmobile = true
         for _j, rid in ipairs(group) do
-            if not _.is_room_immobile(rid) then allImmobile = false; break end
+            if not _.is_room_immobile(rid) then
+                allImmobile = false; break
+            end
         end
         if allImmobile then
             skipped = skipped + 1
@@ -3175,10 +3235,10 @@ function _.translate_subgraph(component, dx, dy, posCache, dz, immobileFn)
 
     for _i, rid in ipairs(component) do
         local rx, ry, rz = getRoomCoordinates(rid)
-        if rx == nil then return false end  -- room has no coords, abort
+        if rx == nil then return false end -- room has no coords, abort
         local nx, ny, nz = rx + dx, ry + dy, rz + dz
         if immobile(rid) and (nx ~= rx or ny ~= ry or nz ~= rz) then
-            return false  -- all-or-nothing: an immobile room blocks the whole translate
+            return false -- all-or-nothing: an immobile room blocks the whole translate
         end
         -- Preflight collision: is the destination occupied by a room NOT in this component?
         if posCache then
@@ -3186,7 +3246,7 @@ function _.translate_subgraph(component, dx, dy, posCache, dz, immobileFn)
             if type(occupants) == "table" then
                 for _j, oid in ipairs(occupants) do
                     if not componentSet[oid] then
-                        return false  -- collision with outside room — abort
+                        return false -- collision with outside room — abort
                     end
                 end
             end
@@ -3250,7 +3310,7 @@ function _.apply_elevation_planes(areaID, posCache)
     for _i = 1, #rooms do
         local seedID = rooms[_i]
         if not visited[seedID] then
-            local component = bfs_component(seedID, areaID, visited)
+            local component  = bfs_component(seedID, areaID, visited)
 
             -- What each room says about itself, and where the spread starts.
             local correction = {}
@@ -3273,9 +3333,9 @@ function _.apply_elevation_planes(areaID, posCache)
                 for j = 1, #seeds do queue[j] = seeds[j] end
                 while head <= #queue do
                     local current = queue[head]
-                    head = head + 1
-                    local dz    = correction[current]
-                    local exits = getRoomExits(current)
+                    head          = head + 1
+                    local dz      = correction[current]
+                    local exits   = getRoomExits(current)
                     if type(exits) == "table" then
                         for _dir, targetID in _.sorted_exit_pairs(exits) do
                             if type(targetID) == "string" then targetID = tonumber(targetID) end
@@ -3294,7 +3354,9 @@ function _.apply_elevation_planes(areaID, posCache)
                 for rid, dz in pairs(correction) do
                     if dz ~= 0 then
                         local g = groups[dz]
-                        if g == nil then g = {}; groups[dz] = g end
+                        if g == nil then
+                            g = {}; groups[dz] = g
+                        end
                         g[#g + 1] = rid
                     end
                 end
@@ -3312,7 +3374,9 @@ function _.apply_elevation_planes(areaID, posCache)
 
                     local locked = false
                     for j = 1, #group do
-                        if _.is_room_locked(group[j]) then locked = true; break end
+                        if _.is_room_locked(group[j]) then
+                            locked = true; break
+                        end
                     end
 
                     if locked then
