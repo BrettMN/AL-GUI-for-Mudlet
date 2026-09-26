@@ -303,10 +303,10 @@ local _ = map._
 -- in the recording implementations; `map profile off` puts these back.
 local function prof_noop() end
 
-_.prof_enter = prof_noop
-_.prof_exit  = prof_noop
+_.prof_enter              = prof_noop
+_.prof_exit               = prof_noop
 
-_.terrain_types = {
+_.terrain_types           = {
     -- used to make rooms of different terrain types have different colors
     -- add a new entry for each terrain type, and set the color with RGB values
     -- each id value must be unique, terrain types not listed here will use mapper default color
@@ -366,6 +366,7 @@ _.terrain_canonical_names = {
     ["s river"] = "lake",
     ["max river"] = "lake",
     ["under river"] = "lake",
+    ["under the river"] = "lake",
     ["pond"] = "lake",
     ["ocean"] = "ocean",
     ["under ocean"] = "ocean",
