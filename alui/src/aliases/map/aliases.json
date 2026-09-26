@@ -72,8 +72,16 @@
         "regex": "^map\\s+fix-selected-layout$"
     },
     {
+        "name": "map areas",
+        "regex": "^map\\s+areas$"
+    },
+    {
         "name": "map clear-area-cache",
         "regex": "^map\\s+clear-area-cache$"
+    },
+    {
+        "name": "map merge-duplicates",
+        "regex": "^map\\s+merge-duplicates(?:\\s+(\\w+))?$"
     },
     {
         "name": "map auto-reconcile",

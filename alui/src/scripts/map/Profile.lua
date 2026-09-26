@@ -166,7 +166,7 @@ local API_ARITY = {
 
 local API_NAMES = {
     -- reads
-    "getRoomCoordinates", "getRoomsByPosition", "getAreaRooms", "getRooms",
+    "getRoomCoordinates", "getRoomsByPosition", "getAreaRooms", "getAreaRooms1", "getRooms",
     "getRoomIDbyHash", "getRoomHashByID", "getRoomName", "getRoomArea",
     "getRoomExits", "getRoomUserData", "getAllRoomUserData", "getRoomEnv",
     "getRoomChar", "getExitStubs1", "getSpecialExitsSwap", "getPlayerRoom",

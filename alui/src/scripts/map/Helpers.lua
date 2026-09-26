@@ -278,7 +278,7 @@ end
 function _.build_area_index(areaID)
     local index = { byHash = {}, byName = {} }
     if type(areaID) ~= "number" or areaID < 1 then return index end
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then return index end
     _.record_area_room_count(areaID, #rooms)
     local has_hash = type(getRoomHashByID) == "function"
@@ -865,7 +865,7 @@ function _.get_estimated_area_room_count(areaID)
     local cached = map._area_room_counts[areaID]
     if type(cached) == "number" then return cached end
     -- One-time cost: count via getAreaRooms and cache the result.
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     local count = type(rooms) == "table" and #rooms or 0
     map._area_room_counts[areaID] = count
     return count
@@ -1042,7 +1042,7 @@ _.pos_cache_key = pc_key
 function _.build_pos_cache(areaID)
     local cache = { _areaID = areaID, _rooms = {} }
     if type(areaID) ~= "number" or areaID < 1 then return cache end
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then return cache end
     _.record_area_room_count(areaID, #rooms)
     cache._rooms = rooms
@@ -1854,7 +1854,7 @@ function _.stretch_area_for_new_room(areaID, coords, shift, posCache)
     if map.configs.stretch_area ~= true then return end
     local overlap = _.rooms_at_position(posCache, areaID, coords[1], coords[2], coords[3])
     if overlap == nil then return end
-    local rooms = (posCache and posCache._rooms) or getAreaRooms(areaID)
+    local rooms = (posCache and posCache._rooms) or _.get_area_rooms(areaID)
     local rcoords
     for i, id in ipairs(rooms) do
         if not _.is_room_immobile(id) then
@@ -2248,7 +2248,7 @@ function _.snap_vertical_pair(areaID, externalPosCache)
     if type(areaID) ~= "number" or areaID < 1 then
         return { snapped = 0, blocked = 0, shared_target_bug = 0 }
     end
-    local areaRooms = getAreaRooms(areaID)
+    local areaRooms = _.get_area_rooms(areaID)
     if type(areaRooms) ~= "table" then
         return { snapped = 0, blocked = 0, shared_target_bug = 0 }
     end
@@ -2757,7 +2757,7 @@ end
 function _.find_duplicate_hash_groups(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return {} end
     if type(getRoomHashByID) ~= "function" then return {} end
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then return {} end
     local seen   = {}  -- hash → first roomID
     local groups = {}  -- hash → {roomID, ...} (only when dup found)
@@ -3238,7 +3238,7 @@ function _.apply_elevation_planes(areaID, posCache)
     if map.configs.anchor_elevation == false then return result end
     if type(_.anchor_z_for_room) ~= "function" then return result end
     if type(areaID) ~= "number" or areaID < 1 then return result end
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" or #rooms == 0 then return result end
 
     -- Locks are vetted per group below, so the translation itself has nothing
@@ -3346,6 +3346,27 @@ function _.apply_elevation_planes(areaID, posCache)
     return result
 end
 
+-- Mudlet's getAreaRooms() returns a table indexed from 0, so ipairs() and #
+-- silently skip its first room.  getAreaRooms1() is the 1-indexed variant; on
+-- clients without it, shift the 0-indexed result up by one.  Every map/ caller
+-- goes through here so iteration and counts see the whole area.
+function _.get_area_rooms(areaID)
+    if type(getAreaRooms1) == "function" then
+        return getAreaRooms1(areaID)
+    end
+    local rooms = getAreaRooms(areaID)
+    if type(rooms) ~= "table" or rooms[0] == nil then
+        return rooms
+    end
+    local list = {}
+    local i = 0
+    while rooms[i] ~= nil do
+        list[i + 1] = rooms[i]
+        i = i + 1
+    end
+    return list
+end
+
 function _.get_area_name_by_id(areaID)
     if type(areaID) ~= "number" or areaID < 1 then return nil end
     local areas = getAreaTable()
@@ -3384,7 +3405,7 @@ function _.infer_area_vnum_key_for_area(areaID)
         end
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" or #rooms == 0 then
         local areaName = _.get_area_name_by_id(areaID)
         local numericNameKey = type(areaName) == "string" and areaName:match("^%s*(%d+)%s*$") or nil
@@ -3437,7 +3458,7 @@ local function is_meaningful_area_name(areaName)
 end
 
 local function get_area_room_count(areaID)
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     return (type(rooms) == "table" and #rooms) or 0
 end
 
@@ -3513,7 +3534,7 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
     end
 
     local function maybe_delete_empty_area(areaID)
-        local roomsAfterMerge = getAreaRooms(areaID)
+        local roomsAfterMerge = _.get_area_rooms(areaID)
         if type(roomsAfterMerge) == "table" and #roomsAfterMerge > 0 then
             return false
         end
@@ -3542,7 +3563,7 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
 
     for _idx, id in ipairs(duplicateAreaIDs) do
         if id ~= targetAreaID then
-            local otherRooms = getAreaRooms(id)
+            local otherRooms = _.get_area_rooms(id)
             local movedThisArea = 0
             if type(otherRooms) == "table" and #otherRooms > 0 then
                 for _ridx, rid in ipairs(otherRooms) do
@@ -3572,9 +3593,17 @@ function _.merge_duplicate_areas_by_area_vnum(anchorAreaID)
         end
     end
 
+    -- Stamp the live GMCP area onto the target only when the player is standing
+    -- in it.  A merge run from another area would otherwise label the target
+    -- with whatever area the player happens to be in.
     if type(map.room_info.area) == "string" and map.room_info.area ~= "" then
-        map.configs.area_ids_by_gmcp[map.room_info.area] = targetAreaID
-        setAreaUserData(targetAreaID, "gmcp_area_key", map.room_info.area)
+        local currentRoomID = type(map.room_info.vnum) == "string"
+            and getRoomIDbyHash(map.room_info.vnum) or nil
+        if type(currentRoomID) == "number" and currentRoomID > 0
+            and getRoomArea(currentRoomID) == targetAreaID then
+            map.configs.area_ids_by_gmcp[map.room_info.area] = targetAreaID
+            setAreaUserData(targetAreaID, "gmcp_area_key", map.room_info.area)
+        end
     end
 
     return result

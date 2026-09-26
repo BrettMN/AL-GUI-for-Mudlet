@@ -797,7 +797,7 @@ local function pos_key(x, y, z) return x .. "," .. y .. "," .. z end
 -- that have coordinates.  Much cheaper than calling getRoomsByPosition per BFS node.
 local function build_pos_cache(areaID)
     local cache = {}
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then return cache end
     for _, id in ipairs(rooms) do
         local x, y, z = getRoomCoordinates(id)
@@ -833,7 +833,7 @@ local function find_best_seed(areaID)
         return cur
     end
     -- Fall back to first room in the area that has linked exits.
-    local areaRooms = getAreaRooms(areaID)
+    local areaRooms = _.get_area_rooms(areaID)
     if type(areaRooms) == "table" then
         for _, id in ipairs(areaRooms) do
             if has_exits(id) then return id end
@@ -2166,7 +2166,7 @@ end
 function _.close_area_seams(areaID, maxPasses)
     local result = { closed = 0, rooms_moved = 0, passes = 0 }
     if type(areaID) ~= "number" or areaID < 1 then return result end
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" or #rooms == 0 then return result end
     maxPasses = tonumber(maxPasses) or 8
 
@@ -2254,7 +2254,7 @@ function _.finish_layout_repair(areaID, posCache, result, opts)
         anchorRoomID, opts.respectRealLocks)
 
     if opts.audit ~= false then
-        local freshRooms = getAreaRooms(areaID)
+        local freshRooms = _.get_area_rooms(areaID)
         result.audit = _.audit_layout_anomalies(
             type(freshRooms) == "table" and freshRooms or {}, areaID)
     end
@@ -2415,7 +2415,7 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
             areaName_display, tostring(cnt), thr))
     end
 
-    local areaRooms        = getAreaRooms(areaID)
+    local areaRooms        = _.get_area_rooms(areaID)
     if type(areaRooms) ~= "table" then areaRooms = {} end
 
     -- Scale the reconcile move cap to the area size unless the user gave an
@@ -2451,7 +2451,7 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         posCache = _.build_pos_cache(areaID)
         result.dedupe = map.dedupe_area_by_hash(areaID, posCache)
         -- Refresh room list after potential deletes
-        areaRooms = getAreaRooms(areaID)
+        areaRooms = _.get_area_rooms(areaID)
         if type(areaRooms) ~= "table" then areaRooms = {} end
 
         -- Reconcile: BFS-move rooms to match their exits' expected deltas.
@@ -2517,7 +2517,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
 
     for _i, name in ipairs(areaNames) do
         local id        = areas[name]
-        local areaRooms = getAreaRooms(id)
+        local areaRooms = _.get_area_rooms(id)
         if type(areaRooms) == "table" and #areaRooms > 0 then
             totalSelfLoops = totalSelfLoops + _.strip_self_loop_exits(areaRooms)
             -- One position cache per area, threaded through every pass below
@@ -2525,7 +2525,7 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             local posCache     = _.build_pos_cache(id)
             local dedupeResult = map.dedupe_area_by_hash(id, posCache)
             totalDedupe = totalDedupe + (dedupeResult.removed or 0)
-            areaRooms = getAreaRooms(id)
+            areaRooms = _.get_area_rooms(id)
             if type(areaRooms) ~= "table" then areaRooms = {} end
             -- Scale the move cap to this area's size unless the user overrode it,
             -- so large areas fully normalise instead of bailing out early.
@@ -2609,7 +2609,7 @@ function map.recalculate_room_layout()
         return
     end
 
-    local areaRooms = getAreaRooms(areaID)
+    local areaRooms = _.get_area_rooms(areaID)
 
     -- Refuse rather than truncate.  The BFS below is single-pass and derives
     -- every coordinate from the seed outward, so stopping part way does not

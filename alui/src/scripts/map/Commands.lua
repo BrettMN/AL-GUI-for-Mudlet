@@ -262,26 +262,200 @@ function map.get_area_display_name(areaIDOrName)
     return nil
 end
 
-function map.clear_area_cache()
-    map.configs.area_ids_by_gmcp = {}
+-- --------------------------------------------------------------------------
+-- Area room counts table
+-- --------------------------------------------------------------------------
 
+local AREA_TABLE_MAX_NAME = 40
+
+local function fit_cell(text, width)
+    text = tostring(text or "")
+    if #text > width then
+        text = text:sub(1, width - 1) .. "~"
+    end
+    return text .. string.rep(" ", width - #text)
+end
+
+-- Server-side key for an area: the gmcp Room.Info area string recorded when the
+-- area was created or renamed, falling back to the reverse gmcp cache and then
+-- to the majority area-vnum prefix of the area's room hashes.
+local function get_area_server_name(areaID)
+    local savedKey = getAreaUserData(areaID, "gmcp_area_key")
+    if type(savedKey) == "string" and savedKey ~= "" then
+        return savedKey
+    end
+    for gmcpKey, mappedID in pairs(map.configs.area_ids_by_gmcp) do
+        if tonumber(mappedID) == areaID then
+            return gmcpKey
+        end
+    end
+    local inferred = _.infer_area_vnum_key_for_area(areaID)
+    return inferred
+end
+
+local function collect_area_rows()
+    local rows  = {}
     local areas = getAreaTable()
-    if type(areas) == "table" then
-        local removed = 0
-        for name, id in pairs(areas) do
-            local savedKey = getAreaUserData(id, "gmcp_area_key")
-            if type(savedKey) == "string" and savedKey ~= "" then
-                if name ~= savedKey and not areas[savedKey] then
-                    deleteAreaUserData(id, "gmcp_area_key")
-                    removed = removed + 1
-                end
+    if type(areas) ~= "table" then return rows end
+
+    for areaName, areaID in pairs(areas) do
+        if type(areaID) == "number" and areaID > 0 then
+            local rooms = _.get_area_rooms(areaID)
+            local count = type(rooms) == "table" and #rooms or 0
+            local displayName = map.configs.area_display_names[tostring(areaID)]
+            if type(displayName) ~= "string" or displayName == "" then
+                displayName = areaName
+            end
+            rows[#rows + 1] = {
+                id     = areaID,
+                name   = displayName,
+                server = get_area_server_name(areaID) or "-",
+                rooms  = count,
+            }
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        local an, bn = a.name:lower(), b.name:lower()
+        if an == bn then return a.id < b.id end
+        return an < bn
+    end)
+    return rows
+end
+
+local function render_area_room_counts()
+    local rows = collect_area_rows()
+    if #rows == 0 then
+        echo("No mapper areas found.\n")
+        return
+    end
+
+    local nameWidth, serverWidth, roomsWidth = #"My Name", #"Server Name", #"Rooms"
+    local idWidth, totalRooms = #"ID", 0
+    for _i, row in ipairs(rows) do
+        nameWidth   = math.max(nameWidth, math.min(#row.name, AREA_TABLE_MAX_NAME))
+        serverWidth = math.max(serverWidth, math.min(#tostring(row.server), AREA_TABLE_MAX_NAME))
+        idWidth     = math.max(idWidth, #tostring(row.id))
+        totalRooms  = totalRooms + row.rooms
+    end
+    roomsWidth = math.max(roomsWidth, #tostring(totalRooms))
+
+    local sep = string.rep("-", idWidth + nameWidth + serverWidth + roomsWidth + 9)
+    cecho(string.format("<white>%s | %s | %s | %s\n",
+        fit_cell("ID", idWidth), fit_cell("My Name", nameWidth),
+        fit_cell("Server Name", serverWidth), string.rep(" ", roomsWidth - 5) .. "Rooms"))
+    cecho("<dim_grey>" .. sep .. "\n")
+    for _i, row in ipairs(rows) do
+        local roomsText = tostring(row.rooms)
+        cecho(string.format("<grey>%s <dim_grey>| <cyan>%s <dim_grey>| <yellow>%s <dim_grey>| <white>%s\n",
+            fit_cell(row.id, idWidth), fit_cell(row.name, nameWidth),
+            fit_cell(row.server, serverWidth),
+            string.rep(" ", roomsWidth - #roomsText) .. roomsText))
+    end
+    cecho("<dim_grey>" .. sep .. "\n")
+    cecho(string.format("<white>%d areas, %d rooms\n", #rows, totalRooms))
+end
+
+-- Alias errors only reach Mudlet's Errors view, so report failures in the
+-- main console where the user typed the command.
+function map.show_area_room_counts()
+    local ok, err = pcall(render_area_room_counts)
+    if not ok then
+        cecho("<red>map areas failed: " .. tostring(err) .. "\n")
+    end
+end
+
+-- Group areas by their saved gmcp_area_key and return only the keys held by
+-- more than one area, as { key = { areaID, ... } }.
+local function find_duplicate_area_keys()
+    local byKey = {}
+    local areas = getAreaTable()
+    if type(areas) ~= "table" then return {} end
+    for _name, id in pairs(areas) do
+        if type(id) == "number" and id > 0 then
+            local key = getAreaUserData(id, "gmcp_area_key")
+            if type(key) == "string" and key ~= "" then
+                byKey[key] = byKey[key] or {}
+                table.insert(byKey[key], id)
             end
         end
-        echo("Area cache cleared. Removed " .. removed .. " stale gmcp_area_key entry" ..
-            (removed == 1 and "" or "s") .. ".\n")
-        echo("Re-enter rooms in each area to rebuild associations.\n")
+    end
+    local duplicates = {}
+    for key, ids in pairs(byKey) do
+        if #ids > 1 then
+            table.sort(ids)
+            duplicates[key] = ids
+        end
+    end
+    return duplicates
+end
+
+-- The area that keeps the rooms: one the user renamed (its name no longer
+-- equals the server key), then the one with the most rooms, then the lowest ID.
+local function pick_merge_target(key, ids)
+    local best, bestRenamed, bestRooms
+    for _i, id in ipairs(ids) do
+        local renamed = _.get_area_name_by_id(id) ~= key
+        local rooms   = _.get_area_rooms(id)
+        local count   = type(rooms) == "table" and #rooms or 0
+        if not best
+            or (renamed and not bestRenamed)
+            or (renamed == bestRenamed and count > bestRooms) then
+            best, bestRenamed, bestRooms = id, renamed, count
+        end
+    end
+    return best
+end
+
+local function describe_area(id)
+    local rooms = _.get_area_rooms(id)
+    return string.format("#%d %s (%d rooms)", id,
+        _.get_area_name_by_id(id) or "?", type(rooms) == "table" and #rooms or 0)
+end
+
+function map.clear_area_cache()
+    -- Only the in-memory cache is cleared.  Each area's saved gmcp_area_key is
+    -- the sole record of which server area a renamed area belongs to, so
+    -- deleting it makes the next room event create a duplicate area.
+    map.configs.area_ids_by_gmcp = {}
+    echo("Area cache cleared. It rebuilds from saved area keys as you move.\n")
+
+    local duplicates = find_duplicate_area_keys()
+    if next(duplicates) then
+        echo("Some server areas are split across several mapper areas.\n")
+        echo("Run 'map merge-duplicates' to see them.\n")
+    end
+end
+
+function map.merge_duplicate_areas(confirm)
+    local duplicates = find_duplicate_area_keys()
+    if not next(duplicates) then
+        echo("No duplicate areas: every server area maps to one mapper area.\n")
+        return
+    end
+
+    local doMerge = trim_whitespace(confirm) == "confirm"
+    for key, ids in pairs(duplicates) do
+        local target = pick_merge_target(key, ids)
+        echo("Server area " .. key .. ":\n")
+        echo("  keep  " .. describe_area(target) .. "\n")
+        for _i, id in ipairs(ids) do
+            if id ~= target then
+                echo("  merge " .. describe_area(id) .. "\n")
+            end
+        end
+        if doMerge then
+            local result = _.merge_duplicate_areas_by_area_vnum(target)
+            echo(string.format("  Moved %d rooms, removed %d areas.\n",
+                result.moved_rooms, result.removed_areas))
+        end
+    end
+
+    if doMerge then
+        updateMap()
+        echo("Merge done. Run 'map normalize' in each merged area to fix any overlapping rooms.\n")
     else
-        echo("Area cache cleared (could not read area table for userdata cleanup).\n")
+        echo("Nothing changed. Save a map backup, then run 'map merge-duplicates confirm'.\n")
     end
 end
 
@@ -308,7 +482,7 @@ local function run_layout_determinism_test(label, mutateFn, numRuns)
         mutateFn()
         local areaID = getRoomArea(roomID)
         if areaID then
-            local rooms = getAreaRooms(areaID)
+            local rooms = _.get_area_rooms(areaID)
             if type(rooms) == "table" then
                 local snapshot = {}
                 for _, id in ipairs(rooms) do
@@ -421,7 +595,7 @@ function map.clean_placeholders(areaNameArg, silent)
         return
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then
         echo("Cannot get rooms for area.\n")
         return
@@ -513,7 +687,7 @@ function map.stub_placeholders(areaNameArg, silent)
         return
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then
         echo("Cannot get rooms for area.\n")
         return
@@ -591,7 +765,7 @@ function map.clean_border_markers(areaNameArg, silent)
         return
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then
         echo("Cannot get rooms for area.\n")
         return
@@ -833,7 +1007,7 @@ function map.audit_layout(areaNameArg, limitArg)
         return
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" or #rooms == 0 then
         echo("Nothing to audit: that area has no rooms.\n")
         return
@@ -1018,9 +1192,17 @@ function map.show_help()
     echo("    De-dupe and align all areas (same as 'map normalize-all-areas').\n\n")
     echo("  map area-name [new name]\n")
     echo("    Show or set a custom display name for the current area.\n\n")
+    echo("  map areas\n")
+    echo("    Print a table of every mapper area: your display name, the server's area\n")
+    echo("    name (GMCP area key), and how many rooms each area holds.\n\n")
     echo("  map clear-area-cache\n")
-    echo("    Clear the GMCP area cache and remove stale area-key associations.\n")
-    echo("    Use this when rooms appear in the wrong area. Re-enter rooms afterwards to rebuild.\n\n")
+    echo("    Clear the in-memory GMCP area cache. Saved area keys are kept, so renamed areas\n")
+    echo("    stay linked to their server area. Reports any server area split across areas.\n\n")
+    echo("  map merge-duplicates [confirm]\n")
+    echo("    List server areas that are split across several mapper areas, and which area\n")
+    echo("    would keep the rooms (the one you renamed, else the largest).\n")
+    echo("    With 'confirm', move the rooms into that area and delete the empty duplicates.\n")
+    echo("    Save a map backup first; run 'map normalize' in the merged area afterwards.\n\n")
     echo("  map export\n")
     echo("    Export the visually selected rooms to the clipboard as JSON for sharing or troubleshooting.\n\n")
     echo("  map fix-selected-layout\n")
@@ -1138,7 +1320,7 @@ function map.apply_area_terrain()
         return
     end
 
-    local rooms = getAreaRooms(areaID)
+    local rooms = _.get_area_rooms(areaID)
     if type(rooms) ~= "table" then
         echo("No rooms found in area '" .. (areaName or ("#" .. areaID)) .. "'.\n")
         return
@@ -1807,7 +1989,7 @@ local function build_cell_probe(areaID, minX, maxX, minY, maxY, minZ, maxZ)
         return function(x, y, z) return first_room_in(live[key(x, y, z)]) end
     end
 
-    local rooms = type(getAreaRooms) == "function" and getAreaRooms(areaID) or nil
+    local rooms = type(getAreaRooms) == "function" and _.get_area_rooms(areaID) or nil
     if type(rooms) == "table" then
         local occ = {}
         for _i, id in ipairs(rooms) do
@@ -1961,7 +2143,7 @@ local function compute_autowalk_path(currentRoomID, targetRoomID)
         and type(lockRoom) == "function"
         and type(roomLocked) == "function" then
         local temporarilyLocked = {}
-        local areaRooms = (type(areaID) == "number" and areaID > 0) and getAreaRooms(areaID) or {}
+        local areaRooms = (type(areaID) == "number" and areaID > 0) and _.get_area_rooms(areaID) or {}
         for _i, roomID in ipairs(areaRooms) do
             if type(roomID) == "number"
                 and roomID ~= currentRoomID
