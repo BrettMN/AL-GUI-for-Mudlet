@@ -164,6 +164,99 @@ function ALUI.disable()
     setBorderTop(0)
     setBorderBottom(0)
 
+    -- 6. Tell GMCP-driven GUI handlers to stop touching destroyed widgets.
+    ALUI.uiDisabled = true
+
     cecho("<green>ALUI disabled. Mudlet main window restored.\n")
-    cecho("<dim_grey>To re-enable, reload the package or reconnect.\n")
 end
+
+-- --------------------------------------------------------------------------
+-- ALUI.hideUI() / ALUI.showUI() — reversible on/off. Widgets are hidden, not
+-- destroyed, so the embedded mapper keeps its place in the widget stack.
+-- Destroying and rebuilding (disable + resetProfile) leaves the reused
+-- mapper buried under the freshly created map panel labels.
+-- --------------------------------------------------------------------------
+local rootPanels = { "Left", "Right", "Top" }
+
+function ALUI.hideUI()
+    ALUI.uiDisabled = true
+    local GUI = ALUI.GUI
+    for _, key in ipairs(rootPanels) do
+        local el = GUI[key]
+        if el and type(el.hide) == "function" then
+            pcall(function() el:hide() end)
+        end
+    end
+    setBorderLeft(0)
+    setBorderRight(0)
+    setBorderTop(0)
+    setBorderBottom(0)
+end
+
+function ALUI.showUI()
+    ALUI.uiDisabled = false
+    local GUI = ALUI.GUI
+    for _, key in ipairs(rootPanels) do
+        local el = GUI[key]
+        if el and type(el.show) == "function" then
+            pcall(function() el:show() end)
+        end
+    end
+    if GUI.runResizeOperations then
+        local ok, err = pcall(GUI.runResizeOperations)
+        if not ok then
+            cecho(("<red>Error restoring UI layout: %s\n"):format(tostring(err)))
+        end
+    elseif GUI.setBorders then
+        GUI.setBorders()
+    end
+
+    -- GMCP handlers skipped updates while hidden; replay the latest data into
+    -- the panels directly (raising gmcp.Room.Info would also re-run the mapper).
+    local replay = {
+        { style_update, "gmcp.Char.Style" },
+        { status_update, "gmcp.Char.Status" },
+        { vitals_update, "gmcp.Char.Vitals" },
+        { room_update, "gmcp.Room.Info" },
+        { survey_update, "gmcp.Room.survey" },
+    }
+    for _, entry in ipairs(replay) do
+        if type(entry[1]) == "function" then
+            pcall(entry[1], entry[2])
+        end
+    end
+end
+
+-- --------------------------------------------------------------------------
+-- ALUI.setUIEnabled(enabled) — persist the UI on/off choice across sessions.
+-- --------------------------------------------------------------------------
+function ALUI.setUIEnabled(enabled)
+    local Config = ALUI.Config
+    if not Config or type(Config.set) ~= "function" then
+        cecho("<red>ALUI Config is not loaded yet. Try again in a second.\n")
+        return
+    end
+
+    Config.set("features.uiEnabled", enabled and true or false)
+    local ok, err = Config.save()
+    if not ok then
+        cecho(("<red>Failed to save UI setting: %s\n"):format(tostring(err)))
+        return
+    end
+
+    if enabled then
+        ALUI.showUI()
+        cecho("<green>ALUI on.\n")
+    else
+        ALUI.hideUI()
+        cecho("<green>ALUI off. <dim_grey>Stays off on future startups. Type 'ui on' to turn it back on.\n")
+    end
+end
+
+-- Apply the saved choice once every package script (Config, GUI) has loaded.
+tempTimer(0, function()
+    local Config = ALUI and ALUI.Config
+    if Config and type(Config.get) == "function" and Config.get("features.uiEnabled", true) == false then
+        ALUI.hideUI()
+    end
+end)

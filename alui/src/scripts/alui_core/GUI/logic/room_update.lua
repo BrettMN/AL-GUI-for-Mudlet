@@ -1,4 +1,5 @@
 function room_update(e)
+    if ALUI and ALUI.uiDisabled then return end
     if e ~= "gmcp.Room.Info" then
         return
     end

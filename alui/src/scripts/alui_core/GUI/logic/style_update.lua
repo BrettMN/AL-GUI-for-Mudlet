@@ -1,4 +1,5 @@
 function style_update(event)
+    if ALUI and ALUI.uiDisabled then return end
     if event ~= "gmcp.Char.Style" then
         return
     end

@@ -31,7 +31,7 @@ ALUI.GUI.cleanupTimers = cleanupTimers
 
 local function runResizeOperations()
     local GUI = ALUI and ALUI.GUI
-    if not GUI then
+    if not GUI or ALUI.uiDisabled then
         return
     end
 
@@ -52,6 +52,8 @@ local function runResizeOperations()
         GUI.Logic.StyleUpdate()
     end
 end
+
+ALUI.GUI.runResizeOperations = runResizeOperations
 
 -- Trailing-edge debounce: every event reschedules the pending run, so the last
 -- event of a drag always gets one. A leading-edge throttle here can swallow that
@@ -99,37 +101,3 @@ ALUI.GUI.Events.resize = registerNamedEventHandler(
     resizeHandler,
     false
 )
-
-function ALUI.disable()
-    if ALUI.GUI.Events.resize then
-        stopNamedEventHandler(profileName, "ALUI.events.resize")
-        ALUI.GUI.Events.resize = nil
-    end
-
-    cleanupTimers()
-
-    if ALUI.ResourceManager then
-        ALUI.ResourceManager.cleanupAll()
-    end
-
-    local GUI = ALUI.GUI or {}
-    local rootPanels = { "Left", "Right", "Top" }
-    for _, key in ipairs(rootPanels) do
-        local el = GUI[key]
-        if el and type(el.hide) == "function" then
-            pcall(function() el:hide() end)
-        end
-        if el and type(el.deleteSelf) == "function" then
-            pcall(function() el:deleteSelf() end)
-        end
-        GUI[key] = nil
-    end
-
-    setBorderLeft(0)
-    setBorderRight(0)
-    setBorderTop(0)
-    setBorderBottom(0)
-
-    cecho("<green>ALUI disabled. Mudlet main window restored.\n")
-    cecho("<dim_grey>To re-enable, reload the package or reconnect.\n")
-end

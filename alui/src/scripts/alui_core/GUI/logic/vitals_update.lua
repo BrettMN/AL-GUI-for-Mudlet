@@ -128,6 +128,7 @@ local health_levels = {
 
 -- Core vitals update function
 local function updateVitals(e)
+    if ALUI and ALUI.uiDisabled then return end
     if e ~= "gmcp.Char.Vitals" then
         return
     end

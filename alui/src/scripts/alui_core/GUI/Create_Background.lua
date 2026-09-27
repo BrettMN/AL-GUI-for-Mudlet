@@ -469,6 +469,7 @@ GUI.HorizontalResizeHandlesByName = {
 }
 
 local function refreshThemeDrivenUI()
+    if ALUI.uiDisabled then return end
     if GUI.setBackground then GUI.setBackground() end
     if GUI.applyTheme then GUI.applyTheme() end
     if GUI.resizeBoxes then GUI.resizeBoxes() end

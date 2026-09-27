@@ -165,7 +165,8 @@ Config.defaults = {
         enableAnimations = true,     -- Enable UI animations
         enableThemes = true,         -- Enable theme system
         enableConfigGUI = true,      -- Enable visual configuration panel
-        enableConfigBackup = true    -- Enable automatic configuration backups
+        enableConfigBackup = true,   -- Enable automatic configuration backups
+        uiEnabled = true             -- Build the ALUI interface on startup (toggle with `ui on` / `ui off`)
     },
 
     -- Advanced configuration options

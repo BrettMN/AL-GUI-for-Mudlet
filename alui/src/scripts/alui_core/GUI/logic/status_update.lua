@@ -1,4 +1,5 @@
 function status_update(e)
+    if ALUI and ALUI.uiDisabled then return end
     -- Initialize ALUI namespace
     ALUI = ALUI or {}
     ALUI.Status = ALUI.Status or {}

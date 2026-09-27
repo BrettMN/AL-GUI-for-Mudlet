@@ -1,4 +1,5 @@
 function survey_update()
+    if ALUI and ALUI.uiDisabled then return end
     -- Validate GMCP data exists before proceeding
     if not gmcp or not gmcp.Room or not gmcp.Room.survey then
         return
