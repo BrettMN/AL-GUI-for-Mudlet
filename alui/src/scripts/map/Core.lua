@@ -1154,6 +1154,11 @@ config()
 -- --------------------------------------------------------------------------
 
 function map.eventHandler(event, ...)
+    -- UI off (`ui off`): skip all room processing so the mapper costs nothing.
+    -- sysConnectionEvent still runs; it only resets caches for the new session.
+    if ALUI and ALUI.uiDisabled and event ~= "sysConnectionEvent" then
+        return
+    end
     if event == "gmcp.Room.Info" then
         local exits = {}
         if type(gmcp.Room.Info.exits) == "table" then

@@ -178,8 +178,33 @@ end
 -- --------------------------------------------------------------------------
 local rootPanels = { "Left", "Right", "Top" }
 
+-- Package items switched off with the UI so nothing but the `ui` alias runs.
+-- Names are the Muddler group/item names from src/aliases and src/triggers.
+local toggledAliases = { "map", "config", "stop" }
+local toggledTriggers = { "Chat_Capture" }
+
+-- Mudlet saves item enabled state in the profile, so this runs on every
+-- startup (not just on toggle) to undo a disabled state left by a prior session.
+local function setPackageItemsEnabled(enabled)
+    local aliasFn = enabled and enableAlias or disableAlias
+    local triggerFn = enabled and enableTrigger or disableTrigger
+    for _, name in ipairs(toggledAliases) do
+        aliasFn(name)
+    end
+    for _, name in ipairs(toggledTriggers) do
+        triggerFn(name)
+    end
+end
+
 function ALUI.hideUI()
     ALUI.uiDisabled = true
+    setPackageItemsEnabled(false)
+    if map and type(map.stop_auto_walk) == "function" then
+        pcall(map.stop_auto_walk)
+    end
+    if ALUI.ResourceManager and ALUI.ResourceManager.cleanupByCategory then
+        pcall(ALUI.ResourceManager.cleanupByCategory, "resize")
+    end
     local GUI = ALUI.GUI
     for _, key in ipairs(rootPanels) do
         local el = GUI[key]
@@ -195,6 +220,7 @@ end
 
 function ALUI.showUI()
     ALUI.uiDisabled = false
+    setPackageItemsEnabled(true)
     local GUI = ALUI.GUI
     for _, key in ipairs(rootPanels) do
         local el = GUI[key]
@@ -258,5 +284,7 @@ tempTimer(0, function()
     local Config = ALUI and ALUI.Config
     if Config and type(Config.get) == "function" and Config.get("features.uiEnabled", true) == false then
         ALUI.hideUI()
+    else
+        setPackageItemsEnabled(true)
     end
 end)
