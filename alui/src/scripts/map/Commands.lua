@@ -680,6 +680,10 @@ function map.stub_placeholders(areaNameArg, silent)
         echo("Error: _.is_placeholder is not loaded yet.\n")
         return
     end
+    if type(getAllRoomEntrances) ~= "function" then
+        echo("Error: getAllRoomEntrances is not available in this Mudlet version.\n")
+        return
+    end
 
     local areaID, areaErr = resolve_area_arg(areaNameArg)
     if not areaID then
@@ -693,40 +697,23 @@ function map.stub_placeholders(areaNameArg, silent)
         return
     end
 
+    -- Collected first: each replacement deletes a room, and the list is what
+    -- is being walked.  Exits between two placeholders are dropped rather than
+    -- stubbed, since neither end survives.
     local placeholders = {}
     for _k, rid in ipairs(rooms) do
         if _.is_placeholder(rid) and not _.is_border_poi(rid)
             and not _.is_room_locked(rid) then
-            placeholders[rid] = true
+            placeholders[#placeholders + 1] = rid
         end
     end
 
-    -- Which real room pointed at each placeholder, and in which direction.
-    -- Read before anything is deleted: Mudlet drops the exits into a room when
-    -- the room goes, so afterwards there is nothing left to read.
-    local pending = {}
-    for _k, rid in ipairs(rooms) do
-        if not placeholders[rid] then
-            local exits = getRoomExits(rid)
-            if type(exits) == "table" then
-                for dir, target in pairs(exits) do
-                    if placeholders[tonumber(target) or target] then
-                        pending[#pending + 1] = { room = rid, dir = dir }
-                    end
-                end
-            end
-        end
-    end
-
-    local deletedCount = 0
-    for rid in pairs(placeholders) do
-        if _.delete_room(rid) then deletedCount = deletedCount + 1 end
-    end
-
-    local stubbedCount = 0
-    for _k, entry in ipairs(pending) do
-        if _.ensure_exit_stub(entry.room, entry.dir) then
-            stubbedCount = stubbedCount + 1
+    local deletedCount, stubbedCount = 0, 0
+    for _k, rid in ipairs(placeholders) do
+        local stubbed = _.replace_placeholder_with_stubs(rid)
+        if stubbed then
+            deletedCount = deletedCount + 1
+            stubbedCount = stubbedCount + stubbed
         end
     end
 
@@ -739,7 +726,7 @@ function map.stub_placeholders(areaNameArg, silent)
             .. stubbedCount .. " exit stub"
             .. (stubbedCount == 1 and "" or "s") .. ".\n")
     end
-    return deletedCount
+    return deletedCount, stubbedCount
 end
 
 -- --------------------------------------------------------------------------
@@ -1163,11 +1150,14 @@ function map.show_help()
     echo("Map commands:\n\n")
     echo("  map help\n")
     echo("    Show this help text.\n\n")
-    echo("  map normalize [maxPasses maxMoves]\n")
+    echo("  map normalize [maxMoves [maxPasses]]\n")
     echo("    Safe incremental layout repair for the current area.\n")
     echo("    1) Removes self-loop exits (exits pointing back to the same room — always a data bug).\n")
     echo("    2) De-duplicates rooms sharing the same hash (merges stubs into the canonical room,\n")
     echo("       preserving all exits and user data). Must run before reconcile to clear phantom occupants.\n")
+    echo("       Then deletes legacy border markers and replaces unvisited placeholder rooms with exit\n")
+    echo("       stubs (the clean-borders and stub-placeholders commands). With stub_unexplored_exits\n")
+    echo("       off, only stale placeholders are deleted instead (clean-placeholders).\n")
     echo("    3) Reconciles connected exits: walks the exit graph and gently moves rooms whose coordinates\n")
     echo("       disagree with their exit offsets, skipping rooms that can't move due to collisions.\n")
     echo("    4) Flattens cardinally connected rooms to the current room's z-level.\n")
@@ -1180,16 +1170,16 @@ function map.show_help()
     echo("    Steps 5-8 are shared with 'map recalculate'; only how the coordinates are produced differs.\n")
     echo("    Manual coordinate tweaks are preserved; normalize pins the current room and\n")
     echo("    allows other rooms to move so the repair can spread outward from your location.\n")
-    echo("    Defaults: maxPasses=" ..
-        map.configs.reconcile_deep_max_passes .. ", maxMoves=" .. map.configs.reconcile_deep_max_moves .. "\n")
-    echo("    Example: map normalize 5 500\n\n")
+    echo("    Defaults: maxMoves scales with the area size, maxPasses=" ..
+        map.configs.reconcile_deep_max_passes .. "\n")
+    echo("    Example: map normalize 500 5\n\n")
     echo("    When to use: start here. Safe for day-to-day drift and minor mismatches.\n")
     echo("    Use 'map recalculate' instead when the layout is fundamentally broken (e.g. two separately\n")
     echo("    mapped groups were linked by exits — normalize cannot evict rooms that are in the way).\n\n")
     echo("  map dedupe\n")
     echo("    Shorthand for 'map normalize': de-dupes and aligns the current area.\n\n")
     echo("  map dedupe-all\n")
-    echo("    De-dupe and align all areas (same as 'map normalize-all-areas').\n\n")
+    echo("    De-dupe and align all areas (same as 'map normalize all areas').\n\n")
     echo("  map area-name [new name]\n")
     echo("    Show or set a custom display name for the current area.\n\n")
     echo("  map areas\n")
@@ -1264,7 +1254,7 @@ function map.show_help()
     echo("    Read-only report of what is still wrong with the current (or named) area, naming\n")
     echo("    the rooms: shared-target exits, duplicate-hash rooms, self-loops, rooms sharing a\n")
     echo("    cell, delta mismatches, vertical drift and unreachable rooms.\n")
-    echo("    Same checks step 9 of normalize/recalculate counts, listed instead of tallied.\n")
+    echo("    Same checks step 8 of normalize counts, listed instead of tallied.\n")
     echo("    Room ids are clickable and center the mapper on the room.\n")
     echo("    N caps how many entries each category lists (default "
         .. map.configs.audit_max_listed .. "); the totals shown are always the real ones.\n")
@@ -1285,14 +1275,18 @@ function map.show_help()
     echo("    Closing one seam can supply the evidence another was missing, hence the passes.\n\n")
     echo("  map clean-placeholders [area name]\n")
     echo("    Delete placeholder rooms whose map position overlaps a real room in the current (or named) area.\n")
-    echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n\n")
+    echo("    Useful for cleaning up stale pre-visit stubs after using 'map recalculate' or 'map link-room'.\n")
+    echo("    'map normalize' runs this instead of stub-placeholders when stub_unexplored_exits is off.\n\n")
     echo("  map stub-placeholders [area name]\n")
     echo("    Replace every unvisited placeholder room in the area with an exit stub on the\n")
     echo("    room that pointed at it. GMCP never says which area an exit's target is in, so a\n")
-    echo("    placeholder past a border sits in the wrong area until it is walked.\n\n")
+    echo("    placeholder past a border sits in the wrong area until it is walked.\n")
+    echo("    Also runs as part of 'map normalize', and on each arrival for the placeholders\n")
+    echo("    next to the room you walked into.\n\n")
     echo("  map clean-borders [area name]\n")
     echo("    Delete the border marker rooms older builds placed where a cross-area exit leads.\n")
-    echo("    Those cells now get an arrow on the exit line instead, so the markers are stale.\n\n")
+    echo("    Those cells now get an arrow on the exit line instead, so the markers are stale.\n")
+    echo("    Also runs as part of 'map normalize'.\n\n")
     echo("  map remove poi\n")
     echo("    Remove the POI marker from the current room and restore its original terrain color.\n\n")
     echo("  map profile [on|off|reset|report [N]|status]\n")

@@ -114,8 +114,7 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
     -- A large area forces the stub regardless of the setting: there each
     -- placeholder costs roughly half a second to create and most are never
     -- walked.
-    local stubUnexplored   = map.configs.stub_unexplored_exits ~= false
-        or (type(_.is_large_area) == "function" and _.is_large_area(areaID))
+    local stubUnexplored   = _.stubs_unexplored_exits(areaID)
 
     local forcedZ          = _.get_forced_z_for_room(roomID)
     local createdCount     = 0
@@ -264,6 +263,26 @@ function _.create_neighbors_for_current_room(roomID, posCache, infoOverride)
                     end
                     targetID = realAtPos
                 end
+            end
+
+            -- A placeholder still standing for this exit where the area now
+            -- stubs unexplored exits: left over from an earlier build or from
+            -- before the setting changed.  It may be filed under the wrong area
+            -- (see stubUnexplored above), so replace it the way 'map
+            -- stub-placeholders' does, and let the stub path below mark this
+            -- room's side.  Walking into it still adopts it (handle_move runs
+            -- find_placeholder_for_arrival first), so this only reaches the
+            -- ones the player is standing next to.
+            if stubUnexplored and type(targetID) == "number" and targetID > 0
+                and targetID ~= roomID
+                and _.is_placeholder(targetID)
+                and not _.is_border_poi(targetID)
+                and not safe_is_room_locked(targetID)
+                and _.replace_placeholder_with_stubs(targetID, posCache) then
+                _.debug_echo("Replaced placeholder " .. targetID .. " for vnum "
+                    .. targetVnum .. " (dir " .. tostring(dir) .. ") with exit stubs.\n")
+                myExits  = nil
+                targetID = -1
             end
 
             if targetID < 1 then
@@ -2303,6 +2322,11 @@ local function emit_layout_report(result)
         tally(result.dedupe.removed, "duplicate room", "merged")
         tally(result.dedupe.skipped, "duplicate group", "skipped (all locked)")
     end
+    tally(result.border_markers, "border marker", "removed")
+    if (tonumber(result.placeholders_stubbed) or 0) > 0 then
+        add(count(result.placeholders_stubbed, "placeholder", "replaced by "
+            .. count(result.exit_stubs or 0, "exit stub")))
+    end
 
     tally(result.moved, "room", "repositioned")
     if (tonumber(result.nudged) or 0) > 0 then
@@ -2349,6 +2373,33 @@ local function emit_layout_report(result)
     else
         echo(table.concat(parts, ", ") .. ".\n")
     end
+end
+
+-- The placeholder clean-up commands, run as one normalize stage: legacy border
+-- markers go, then unvisited placeholders become exit stubs where the area
+-- stubs unexplored exits, or only the stale ones (overlapping a real room, or
+-- nothing pointing at them) are deleted where it still uses placeholders.
+-- Fills result.border_markers / placeholders_stubbed / placeholders_removed
+-- and returns how many rooms were deleted, so the caller knows whether its
+-- position cache and room list are stale.
+local function clean_placeholder_rooms(areaID, result)
+    local deleted = 0
+    if type(map.clean_border_markers) == "function" then
+        result.border_markers = map.clean_border_markers(areaID, true) or 0
+        deleted = deleted + result.border_markers
+    end
+    if _.stubs_unexplored_exits(areaID) then
+        if type(map.stub_placeholders) == "function" then
+            local removed, stubbed = map.stub_placeholders(areaID, true)
+            result.placeholders_stubbed = removed or 0
+            result.exit_stubs = stubbed or 0
+            deleted = deleted + result.placeholders_stubbed
+        end
+    elseif type(map.clean_placeholders) == "function" then
+        result.placeholders_removed = map.clean_placeholders(areaID, true) or 0
+        deleted = deleted + result.placeholders_removed
+    end
+    return deleted
 end
 
 function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
@@ -2450,6 +2501,12 @@ function map.normalize_room_layout(maxPasses, maxMoves, allRooms, areaName)
         -- _.reconcile_connected_rooms from moving rooms.
         posCache = _.build_pos_cache(areaID)
         result.dedupe = map.dedupe_area_by_hash(areaID, posCache)
+        -- After dedupe, so a placeholder that duplicates a walked room is merged
+        -- into it (keeping the exits) instead of being turned into a stub.
+        -- The deletes only reach Mudlet's live cache, so rebuild this one.
+        if clean_placeholder_rooms(areaID, result) > 0 then
+            posCache = _.build_pos_cache(areaID)
+        end
         -- Refresh room list after potential deletes
         areaRooms = _.get_area_rooms(areaID)
         if type(areaRooms) ~= "table" then areaRooms = {} end
@@ -2506,6 +2563,8 @@ function map.normalize_all_areas(maxPasses, maxMoves)
 
     local totalSelfLoops  = 0
     local totalDedupe     = 0
+    local totalBorders    = 0
+    local totalPlaceholders = 0
     local totalMoved      = 0
     local totalSnapped    = 0
     local totalElevated   = 0
@@ -2525,6 +2584,13 @@ function map.normalize_all_areas(maxPasses, maxMoves)
             local posCache     = _.build_pos_cache(id)
             local dedupeResult = map.dedupe_area_by_hash(id, posCache)
             totalDedupe = totalDedupe + (dedupeResult.removed or 0)
+            local cleaned = {}
+            if clean_placeholder_rooms(id, cleaned) > 0 then
+                posCache = _.build_pos_cache(id)
+            end
+            totalBorders      = totalBorders + (cleaned.border_markers or 0)
+            totalPlaceholders = totalPlaceholders
+                + (cleaned.placeholders_stubbed or 0) + (cleaned.placeholders_removed or 0)
             areaRooms = _.get_area_rooms(id)
             if type(areaRooms) ~= "table" then areaRooms = {} end
             -- Scale the move cap to this area's size unless the user overrode it,
@@ -2565,6 +2631,14 @@ function map.normalize_all_areas(maxPasses, maxMoves)
     if totalDedupe > 0 then
         parts[#parts + 1] = totalDedupe
             .. " duplicate room" .. (totalDedupe == 1 and "" or "s") .. " merged"
+    end
+    if totalBorders > 0 then
+        parts[#parts + 1] = totalBorders
+            .. " border marker" .. (totalBorders == 1 and "" or "s") .. " removed"
+    end
+    if totalPlaceholders > 0 then
+        parts[#parts + 1] = totalPlaceholders
+            .. " placeholder" .. (totalPlaceholders == 1 and "" or "s") .. " removed"
     end
     parts[#parts + 1] = totalMoved .. " room" .. (totalMoved == 1 and "" or "s") .. " repositioned"
     if totalSnapped > 0 then

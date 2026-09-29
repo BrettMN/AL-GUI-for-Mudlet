@@ -821,6 +821,67 @@ function _.ensure_exit_stub(roomID, dir)
     return true
 end
 
+-- Whether exits to rooms nobody has walked get an exit stub rather than a
+-- placeholder room in this area.  A large area forces the stub whatever the
+-- setting says (see create_neighbors_for_current_room in Layout.lua).
+function _.stubs_unexplored_exits(areaID)
+    return map.configs.stub_unexplored_exits ~= false
+        or (type(_.is_large_area) == "function" and _.is_large_area(areaID))
+end
+
+-- Delete placeholder roomID and leave an exit stub on every room that pointed
+-- at it, in the direction it pointed.  Returns the number of stubs written, or
+-- nil when the room was not deleted.
+--
+-- The rooms pointing at it are read before the delete: Mudlet drops the exits
+-- into a room when the room goes, so afterwards there is nothing left to read.
+-- getAllRoomEntrances covers every area, which matters here because a
+-- placeholder past a border is pointed at from the area it was seen from.
+-- Without that API the placeholder is kept rather than risk dropping exits
+-- nothing can put back.  Special exits into it cannot be stubbed and are lost
+-- with it; the player walking them recreates the connection.
+function _.replace_placeholder_with_stubs(roomID, posCache)
+    if type(roomID) ~= "number" or roomID < 1 then return nil end
+    if type(getAllRoomEntrances) ~= "function" then return nil end
+
+    local sources = getAllRoomEntrances(roomID)
+    local pending = {}
+    if type(sources) == "table" then
+        for _k, src in pairs(sources) do
+            local srcID = tonumber(src)
+            if srcID and srcID ~= roomID then
+                local exits = getRoomExits(srcID)
+                if type(exits) == "table" then
+                    for dir, target in pairs(exits) do
+                        if tonumber(target) == roomID then
+                            pending[#pending + 1] = { room = srcID, dir = dir }
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local x, y, z = getRoomCoordinates(roomID)
+    local hash = type(getRoomHashByID) == "function" and getRoomHashByID(roomID) or nil
+    if not _.delete_room(roomID) then return nil end
+    if x ~= nil then _.pos_cache_drop(posCache, x, y, z, roomID) end
+    -- deleteRoom can leave the hash -> id binding behind (see the ghost-id guard
+    -- in create_neighbors_for_current_room); clear it so the vnum resolves to
+    -- nothing and the next arrival builds the room fresh.
+    if type(hash) == "string" and hash ~= "" and getRoomIDbyHash(hash) == roomID then
+        pcall(setRoomIDbyHash, roomID, "")
+    end
+
+    local stubbed = 0
+    for _k, entry in ipairs(pending) do
+        local ok, wrote = pcall(_.ensure_exit_stub, entry.room, entry.dir)
+        if ok and wrote then stubbed = stubbed + 1 end
+    end
+    if type(_.mark_autowalk_dirty) == "function" then _.mark_autowalk_dirty() end
+    return stubbed
+end
+
 local function stable_exit_key(value)
     local valueType = type(value)
     if valueType == "number" then return "0:" .. tostring(value) end
