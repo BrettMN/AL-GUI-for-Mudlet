@@ -516,6 +516,49 @@ local function setSplitterHoverState(splitterName, isHover)
     setSplitterStyle(splitter, isHover and "hover" or "idle")
 end
 
+-- Mudlet reads the map file twice while a profile loads: once when setBoxes()
+-- creates the embedded mapper (TMainConsole::createMapper, while the map is
+-- still empty) and again from Host::loadMap() once every script has run.  The
+-- second read does not clear what the first one loaded, and reading on top of
+-- a loaded map is what is slow: 56.6s against 1.2s for the same 100 MB file.
+-- Mudlet's own loadMap() clears first and reads that file in 1.25s.  So when
+-- creating the mapper is what loaded the map, empty it again straight away
+-- and let Host::loadMap() do the real load into an empty map.
+local function countMapAreas()
+    if type(getAreaTable) ~= "function" then return 0 end
+    local count = 0
+    for _name in pairs(getAreaTable() or {}) do count = count + 1 end
+    return count
+end
+
+-- If the later read never comes (or fails) the map would stay empty, and the
+-- next save would write that empty map as the newest file.  Load it instead.
+local function ensureMapLoaded()
+    if countMapAreas() <= 1 and type(loadMap) == "function" then
+        cecho("<orange>ALUI: map was not reloaded after startup, loading it now.\n")
+        loadMap()
+    end
+end
+
+local function createMapperWidget(cons, container)
+    local areasBefore = countMapAreas()
+    local mapper = Geyser.Mapper:new(cons, container)
+    -- Only the first creation in a profile reads the map, and only then does
+    -- the area count jump from the lone default area.  Later rebuilds (resize,
+    -- `ui on`) reuse the mapper and leave the map alone.
+    if areasBefore <= 1 and countMapAreas() > 1 and type(deleteMap) == "function" then
+        deleteMap()
+        if type(registerNamedEventHandler) == "function" and type(getProfileName) == "function" then
+            registerNamedEventHandler(getProfileName(), "ALUI.ensureMapLoaded", "sysLoadEvent",
+                function() tempTimer(1, ensureMapLoaded) end, true)
+        end
+        -- Installing into a running profile raises no sysLoadEvent and Mudlet
+        -- does not read the map again, so this is what restores it then.
+        tempTimer(30, ensureMapLoaded)
+    end
+    return mapper
+end
+
 -- Core box setup function with ResourceManager integration
 local function setBoxes()
     -- Clean up existing box resources first
@@ -748,7 +791,7 @@ local function setBoxes()
 
     GUI.Map_Container = createContainer("GUI.Map_Container", GUI.Box4)
 
-    GUI.Mapper = Geyser.Mapper:new({
+    GUI.Mapper = createMapperWidget({
         name = "GUI.Mapper",
         x = Gui_Padding * 2,
         y = Gui_Padding * 2,

@@ -729,6 +729,104 @@ function map.stub_placeholders(areaNameArg, silent)
     return deletedCount, stubbedCount
 end
 
+-- The same replacement swept over every area at once.  Placeholders pile up
+-- into the tens of thousands on a big map, and every one of them is a room
+-- Mudlet has to read back at profile load, so this is what shrinks the map
+-- file.  Deletion runs in batches on a timer so Mudlet stays responsive, and a
+-- backup is saved before anything is touched.
+local STUB_ALL_BATCH = 500
+
+function map.stub_all_placeholders(confirm)
+    if map.stub_all_running then
+        echo("Placeholder replacement is already running.\n")
+        return
+    end
+    if type(_.is_placeholder) ~= "function" then
+        echo("Error: _.is_placeholder is not loaded yet.\n")
+        return
+    end
+    if type(getAllRoomEntrances) ~= "function" or type(getRooms) ~= "function" then
+        echo("Error: getAllRoomEntrances/getRooms are not available in this Mudlet version.\n")
+        return
+    end
+
+    local placeholders = {}
+    for rid in pairs(getRooms()) do
+        if _.is_placeholder(rid) and not _.is_border_poi(rid)
+            and not _.is_room_locked(rid) then
+            placeholders[#placeholders + 1] = rid
+        end
+    end
+    local total = #placeholders
+    if total == 0 then
+        echo("No placeholder rooms on the map.\n")
+        return
+    end
+
+    if trim_whitespace(confirm) ~= "confirm" then
+        echo(string.format("%d placeholder rooms on the map. Nothing changed.\n", total))
+        echo("Run 'map stub-placeholders all confirm' to replace them with exit stubs.\n")
+        echo("The map is backed up first.\n")
+        return
+    end
+
+    local backup = getMudletHomeDir() .. "/map_backup_before_stub_placeholders.dat"
+    if not saveMap(backup) then
+        echo("Could not save a backup to " .. backup .. ". Nothing changed.\n")
+        return
+    end
+    echo("Map backed up to " .. backup .. "\n")
+    echo(string.format("Replacing %d placeholder rooms in batches of %d...\n",
+        total, STUB_ALL_BATCH))
+
+    map.stub_all_running = true
+    local index, deletedCount, stubbedCount = 1, 0, 0
+    local step
+    step = function()
+        local last = math.min(index + STUB_ALL_BATCH - 1, total)
+        local ok, err = pcall(function()
+            for i = index, last do
+                local rid = placeholders[i]
+                -- The player can walk into a placeholder between batches and
+                -- turn it into a real room, so check again before deleting.
+                if roomExists(rid) and _.is_placeholder(rid) then
+                    local stubbed = _.replace_placeholder_with_stubs(rid)
+                    if stubbed then
+                        deletedCount = deletedCount + 1
+                        stubbedCount = stubbedCount + stubbed
+                    end
+                end
+            end
+        end)
+        if not ok then
+            map.stub_all_running = nil
+            echo("Placeholder replacement stopped at " .. index .. "/" .. total
+                .. ": " .. tostring(err) .. "\n")
+            updateMap()
+            return
+        end
+        index = last + 1
+        if index <= total then
+            if math.floor(last / 10000) ~= math.floor((last - STUB_ALL_BATCH) / 10000) then
+                echo(string.format("  %d/%d done\n", last, total))
+            end
+            tempTimer(0, step)
+            return
+        end
+
+        map.stub_all_running = nil
+        updateMap()
+        echo(string.format("Deleted %d placeholder rooms, leaving %d exit stubs.\n",
+            deletedCount, stubbedCount))
+        if saveMap() then
+            echo("Map saved. The next profile load reads the smaller map.\n")
+        else
+            echo("Map save failed. Save it yourself before closing Mudlet.\n")
+        end
+    end
+    step()
+end
+
 -- --------------------------------------------------------------------------
 -- Legacy border marker cleanup
 -- --------------------------------------------------------------------------
@@ -1283,6 +1381,10 @@ function map.show_help()
     echo("    placeholder past a border sits in the wrong area until it is walked.\n")
     echo("    Also runs as part of 'map normalize', and on each arrival for the placeholders\n")
     echo("    next to the room you walked into.\n\n")
+    echo("  map stub-placeholders all [confirm]\n")
+    echo("    Same, for every area on the map. Without 'confirm' it only counts them.\n")
+    echo("    With 'confirm' it backs up the map, replaces them in batches, then saves.\n")
+    echo("    Fewer rooms means a faster profile load.\n\n")
     echo("  map clean-borders [area name]\n")
     echo("    Delete the border marker rooms older builds placed where a cross-area exit leads.\n")
     echo("    Those cells now get an arrow on the exit line instead, so the markers are stale.\n")
