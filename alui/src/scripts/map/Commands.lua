@@ -140,6 +140,109 @@ function map.toggle_poi_for_selected_room(event, action, ...)
     end
 end
 
+-- Directions offered by the mapper's "Add POI room" submenu, in menu order.
+local POI_ADD_DIRECTIONS = {
+    "north", "northeast", "east", "southeast",
+    "south", "southwest", "west", "northwest",
+    "up", "down",
+}
+local POI_ADD_MENU       = "alui-mapper-add-poi"
+local POI_ADD_EVENT_PREFIX = POI_ADD_MENU .. "-"
+
+-- Create a POI room one step from fromRoomID in dir.
+--
+-- Some POIs are entered through an exit that leaves the area, so the room on
+-- the other side lives in another area's frame and nothing is drawn on this
+-- side of the border.  Placeholders used to fill that cell and could be toggled
+-- to a POI; with placeholders gone there is no room to toggle, so this makes
+-- one.  The room carries no vnum and is locked, which keeps the dedup and
+-- layout passes from moving or merging it.
+--
+-- fromRoomID's own exit in dir is left alone when it already leads somewhere:
+-- that exit is what routes across the border.  Only an empty or stubbed
+-- direction is linked to the new room.
+function map.add_poi_room(fromRoomID, dir, name)
+    fromRoomID = fromRoomID or _.get_current_area_context()
+    if type(fromRoomID) ~= "number" or fromRoomID < 1 or not roomExists(fromRoomID) then
+        echo("Cannot add POI room: current room is unknown.\n")
+        return nil
+    end
+
+    local canonical = _.normalize_exit_direction(dir)
+    local vec       = canonical and _.move_vectors[canonical] or nil
+    if not vec then
+        echo("Cannot add POI room: unknown direction '" .. tostring(dir) .. "'.\n")
+        echo("Use one of: n, ne, e, se, s, sw, w, nw, u, d.\n")
+        return nil
+    end
+
+    local areaID = getRoomArea(fromRoomID)
+    local x, y, z = getRoomCoordinates(fromRoomID)
+    if type(areaID) ~= "number" or areaID < 1 or x == nil then
+        echo("Cannot add POI room: room " .. fromRoomID .. " has no area or coordinates.\n")
+        return nil
+    end
+    local tx, ty, tz = x + vec[1], y + vec[2], z + vec[3]
+
+    local occupants = _.rooms_at_position(_.live_pos_cache(areaID), areaID, tx, ty, tz)
+    if type(occupants) == "table" and #occupants > 0 then
+        echo(string.format("Cannot add POI room: (%d,%d,%d) is already occupied by room %d.\n",
+            tx, ty, tz, occupants[1]))
+        echo("Use 'Toggle POI on selected room' on that room instead.\n")
+        return nil
+    end
+
+    local exitTarget = _.get_room_exit_target(fromRoomID, canonical)
+    if exitTarget and getRoomArea(exitTarget) == areaID then
+        echo(string.format("Cannot add POI room: room %d already leads %s to room %d in this area.\n",
+            fromRoomID, canonical, exitTarget))
+        echo("Use 'Toggle POI on selected room' on that room instead.\n")
+        return nil
+    end
+
+    if type(name) ~= "string" or name == "" then name = "Point of interest" end
+
+    local poiID = createRoomID()
+    _.add_room(poiID)
+    _.mark_autowalk_dirty()
+    _.set_room_name(poiID, name, areaID)
+    _.stamp_room_origin(poiID, "manual-poi", fromRoomID .. ":" .. canonical)
+    _.set_room_area(poiID, areaID)
+    _.set_room_coordinates(poiID, tx, ty, tz)
+    _.set_room_locked(poiID, true)
+
+    local reverse = _.reverse_move_vectors[canonical]
+    if reverse then setExit(poiID, fromRoomID, reverse) end
+    if not exitTarget then setExit(fromRoomID, poiID, canonical) end
+
+    map.set_poi(poiID)
+    return poiID
+end
+
+function map.add_poi_room_for_selected_room(event, action, ...)
+    local dir = type(action) == "string"
+        and action:match("^" .. POI_ADD_EVENT_PREFIX:gsub("%-", "%%-") .. "(%a+)$") or nil
+    if not dir then
+        for _i, arg in ipairs({ action, ... }) do
+            if _.normalize_exit_direction(arg) then
+                dir = arg
+                break
+            end
+        end
+    end
+    if not dir then
+        echo("Add POI room: no direction received from the mapper menu.\n")
+        return
+    end
+
+    local roomID = _.get_selected_map_room and _.get_selected_map_room() or nil
+    if not roomID then
+        echo("Select a room on the mapper, then right-click it to add a POI room next to it.\n")
+        return
+    end
+    map.add_poi_room(roomID, dir)
+end
+
 -- --------------------------------------------------------------------------
 -- Underworld entrance commands
 -- --------------------------------------------------------------------------
@@ -1300,7 +1403,9 @@ function map.show_help()
     echo("  stop\n")
     echo("    Stop the current auto walk. If no auto walk is active, sends 'stop' to the game.\n\n")
     echo("  Mapper right-click POI\n")
-    echo("    Select or right-click a terrain-mapped room, then choose Toggle POI on selected room.\n\n")
+    echo("    Select or right-click a terrain-mapped room, then choose Toggle POI on selected room.\n")
+    echo("    For a POI with no room drawn (its exit leaves the area), right-click the room next to\n")
+    echo("    it and choose Add POI room next to selected room, then the direction.\n\n")
     echo("  map follow [on|off]\n")
     echo("    Show or set whether each room you walk into is positioned one step from the room\n")
     echo("    you just left, in the direction you walked. On by default.\n")
@@ -1342,6 +1447,10 @@ function map.show_help()
     echo("  map set poi\n")
     echo("    Set the current room's symbol to '#' and apply the Inside background color.\n")
     echo("    Useful for marking points of interest (shops, quest givers, etc.) on the map.\n\n")
+    echo("  map add poi <direction> [name]\n")
+    echo("    Create a POI room one step from the current room in <direction> (n, ne, e, ... u, d).\n")
+    echo("    For POIs whose exit leads into another area, so no room is drawn on this map.\n")
+    echo("    An exit already leading out of the area is kept; the new room is locked in place.\n\n")
     echo("  map origin [room id]\n")
     echo("    Say why a room exists and whether the player has ever been in it: created on\n")
     echo("    arrival, created because a neighbour reported an exit that way, adopted, or\n")
@@ -2356,9 +2465,13 @@ local function register_mapper_context_menu()
         removeMapEvent("alui-mapper-speedwalk")
         removeMapEvent("alui-mapper-toggle-poi")
         removeMapEvent("alui-mapper-toggle-uw-entrance")
+        for _i, dir in ipairs(POI_ADD_DIRECTIONS) do
+            removeMapEvent(POI_ADD_EVENT_PREFIX .. dir)
+        end
     end
     if type(removeMapMenu) == "function" then
         removeMapMenu("alui-mapper-travel")
+        removeMapMenu(POI_ADD_MENU)
     end
 
     local autoWalkOk, autoWalkErr = addMapEvent(
@@ -2374,6 +2487,29 @@ local function register_mapper_context_menu()
         nil,
         "Toggle POI on selected room"
     )
+    local addPoiOk, addPoiErr = true, nil
+    if type(addMapMenu) == "function" then
+        -- addMapMenu's return value differs between Mudlet releases (Menu.lua
+        -- ignores it too), so only a raised error counts as failure.
+        addPoiOk, addPoiErr = pcall(addMapMenu, POI_ADD_MENU, nil, "Add POI room next to selected room")
+        if addPoiOk then
+            for _i, dir in ipairs(POI_ADD_DIRECTIONS) do
+                local ok, err = addMapEvent(
+                    POI_ADD_EVENT_PREFIX .. dir,
+                    "aluiMapperAddPoi",
+                    POI_ADD_MENU,
+                    dir:sub(1, 1):upper() .. dir:sub(2),
+                    dir
+                )
+                if not ok then
+                    addPoiOk, addPoiErr = false, err
+                    break
+                end
+            end
+        end
+    end
+    poiOk  = poiOk and addPoiOk
+    poiErr = poiErr or addPoiErr
     local uwOk, uwErr = addMapEvent(
         "alui-mapper-toggle-uw-entrance",
         "aluiMapperToggleUwEntrance",
@@ -2421,6 +2557,10 @@ end
 if not map.mapper_poi_menu_handler_registered then
     registerAnonymousEventHandler("aluiMapperTogglePoi", "map.toggle_poi_for_selected_room")
     map.mapper_poi_menu_handler_registered = true
+end
+if not map.mapper_add_poi_menu_handler_registered then
+    registerAnonymousEventHandler("aluiMapperAddPoi", "map.add_poi_room_for_selected_room")
+    map.mapper_add_poi_menu_handler_registered = true
 end
 if not map.mapper_uw_entrance_menu_handler_registered then
     registerAnonymousEventHandler("aluiMapperToggleUwEntrance",

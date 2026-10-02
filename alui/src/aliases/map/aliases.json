@@ -112,6 +112,10 @@
         "regex": "^map\\s+remove\\s+poi$"
     },
     {
+        "name": "map add poi",
+        "regex": "^map\\s+add\\s+poi\\s+(\\w+)(?:\\s+(.+))?$"
+    },
+    {
         "name": "map link-room",
         "regex": "^map\\s+link-room$"
     },
