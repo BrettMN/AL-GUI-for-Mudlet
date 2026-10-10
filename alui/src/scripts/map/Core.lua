@@ -799,6 +799,11 @@ local function handle_move(isLastInBatch)
             if getRoomChar(rnum) == "#" then
                 _.apply_room_environment(rnum, "Inside")
             end
+            -- No terrain in the GMCP is not evidence the room has none: the
+            -- server omits it whenever the character cannot see (too dark, too
+            -- bright, blind).  Clearing on that would erase what an earlier,
+            -- sighted visit recorded, so an absent terrain leaves the stored one
+            -- alone.
             if _.is_elevated_room_name(info.name) then
                 _.clear_room_user_data(rnum, "terrain")
             elseif type(info.terrain) == "string" and info.terrain ~= "" then
@@ -806,8 +811,6 @@ local function handle_move(isLastInBatch)
                 if storedTerrain and getRoomUserData(rnum, "terrain") ~= storedTerrain then
                     setRoomUserData(rnum, "terrain", storedTerrain)
                 end
-            else
-                _.clear_room_user_data(rnum, "terrain")
             end
 
             -- Grid mode for the area the player is in.
@@ -819,14 +822,20 @@ local function handle_move(isLastInBatch)
             -- step and back again on the next.  Terrain on the room the player
             -- occupies is good evidence that the area *is* a grid and no evidence
             -- that it is not, so the flag is latched on: it may be turned on by an
-            -- arrival, never off by one.  Clear map._last_grid_mode_by_area (or
-            -- call setGridMode yourself) to undo a latch set in error.
+            -- arrival, never off by one.  Call setGridMode yourself to undo a
+            -- latch set in error.
+            --
+            -- The latch used to live only in map._last_grid_mode_by_area, which
+            -- starts empty every session while the grid flag itself is saved
+            -- with the map.  The first arrival of a session in a room with no
+            -- terrain (an interior, or one too dark or bright to see) therefore
+            -- found no latch and switched a saved grid area off.  With the latch
+            -- on, no arrival turns grid mode off at all, whatever the table says.
             if currentAreaID and currentAreaID > 0 then
                 if type(setGridMode) == "function" then
                     local desiredGrid = _.current_room_uses_grid_mode() and true or false
                     map._last_grid_mode_by_area = map._last_grid_mode_by_area or {}
                     local latched = map.configs.grid_mode_latch ~= false
-                        and map._last_grid_mode_by_area[currentAreaID] == true
                         and not desiredGrid
                     if not latched
                         and map._last_grid_mode_by_area[currentAreaID] ~= desiredGrid then
