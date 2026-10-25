@@ -587,11 +587,6 @@ local function handle_move(isLastInBatch)
             local warn = "handle_move: vnum " .. tostring(info.vnum)
                 .. " has no room (getRoomIDbyHash returned " .. tostring(rnum)
                 .. "). Will adopt or create — this can place the room near 0,0,0.\n"
-            if type(cecho) == "function" then
-                cecho("<yellow>" .. warn .. "<reset>")
-            else
-                echo(warn)
-            end
             _.debug_echo(warn)
             -- Before creating a brand-new room, check if there is an existing
             -- placeholder at the expected adjacent position that we can adopt.
